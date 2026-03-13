@@ -27,7 +27,7 @@ Level 0: Param        — 每个实现的离散/连续参数
 ```
                 ┌──────────── Write Path ────────────┐
                 │                                     │
-Observation ──► UnitFormation ──► Representation ──► WriteTrigger ──► Organization ──► Update ──► Store
+Observation ──► UnitFormation ──► Representation ──► WriteTrigger ──► Organization ──► MemoryEvolution ──► Store
                                                                                          │
                 ┌──────────── Read Path ─────────────┐                                   │
                 │                                     │                                   │
@@ -37,8 +37,7 @@ Query ────────► Retrieval ──► Readout ──► Agent   
                                                                                          │
                 ┌──────── Background Path ───────────┐                                   │
                 │                                     │                                   │
-                │   Compression ◄── Trigger           │◄──────────────────────────────────┘
-                │   Maintenance ◄── Trigger           │
+                │   MemoryEvolution ◄── Trigger       │◄──────────────────────────────────┘
                 └─────────────────────────────────────┘
 ```
 
@@ -125,7 +124,7 @@ stores {
 - 每层的 `shape`
 - 每层的 `theme`
 
-跨层流动策略，如写入路由、摘要迁移、提升/降级和 selective read，不放在 `StoreBlock` 中，而由 `organization`、`compression`、`retrieval`、`maintenance` 等模块负责。
+跨层流动策略，如写入路由、摘要迁移、提升/降级和 selective read，不放在 `StoreBlock` 中，而由 `organization`、`memory_evolution`、`retrieval` 等模块负责。
 
 ### 2.4 Module 声明
 
@@ -140,11 +139,9 @@ PrimitiveSlot   ::= 'unit_formation'   (* A: 记忆单元形成 *)
                    | 'representation'   (* B: 表示编码 *)
                    | 'write_trigger'    (* C: 写入决策 *)
                    | 'organization'     (* D: 关系/放置规划 *)
-                   | 'update'           (* E: 写入执行 *)
-                   | 'compression'      (* F: 抽象压缩 *)
+                   | 'memory_evolution' (* E: 记忆演化 *)
                    | 'retrieval'        (* G: 检索策略 *)
                    | 'readout'          (* H: 输出格式化 *)
-                   | 'maintenance'      (* I: 维护管理 *)
 ```
 
 ### 2.5 Module 表达式
@@ -295,7 +292,7 @@ Represent(
 
 - 向量检索要求 `elements` 中包含 `"embedding"`
 - BM25 / sparse retrieval 要求 `elements` 中包含 `"text"` 或 `"sparse_embedding"`
-- entity-aware organization / update 通常要求 `"entities"`
+- entity-aware organization / memory evolution 通常要求 `"entities"`
 - `code` 通常与 `description` 或 `embedding` 联合出现
 
 示例：
@@ -428,16 +425,363 @@ write_trigger : WriteTrigger(
 )
 ```
 
+### 2.5.4 Organization 的规范写法（建议）
+
+对 `organization`，推荐统一写成：
+
+```text
+Organization(
+  routing=...,
+  links={...},
+  placement=...,
+  ...
+)
+```
+
+并且采用如下原则：
+
+```text
+Organization is topology-constrained.
+StoreTopology defines the admissible routing targets, link types, and placement modes.
+```
+
+推荐 routing：
+
+```text
+default(target_layer=...)
+by_unit_type(route_map={...})
+by_tag(tag_field=..., route_map={...})
+by_rule(rules=[...])
+explicit(field=...)
+agent_selected(tool_to_layer={...})
+```
+
+推荐 links：
+
+```text
+temporal(...)
+entity(...)
+similarity(...)
+cluster_membership(...)
+graph_edge(edge_types=[...], connection_method=...)
+parent_child(...)
+```
+
+推荐 placement：
+
+```text
+append()
+partition(partition_key=...)
+cluster(similarity_threshold=...)
+graph_node(node_policy=...)
+hierarchical_slot(target_level=..., placement_policy=...)
+```
+
+推荐约束：
+
+- `placement=graph_node(...)` 要求存在 `shape=Graph` 的 layer
+- `links` 中包含 `graph_edge(...)` 时，通常要求目标 layer 有 `graph` index
+- `placement=hierarchical_slot(...)` 或 `links={parent_child(...)}` 要求 `layer_count > 1`
+- `routing=by_tag(...)` 要求 unit/representation 中可读出 `tags`
+- `links={entity(...)}` 要求 unit/representation 中可读出 `entities`
+
+示例：
+
+```text
+organization : Organization(
+    routing=default(target_layer="episodic"),
+    links={temporal()},
+    placement=append()
+)
+```
+
+```text
+organization : Organization(
+    routing=by_unit_type(route_map={"turn": "working", "fact": "semantic"}),
+    links={},
+    placement=append()
+)
+```
+
+```text
+organization : Organization(
+    routing=default(target_layer="graph_memory"),
+    links={graph_edge(edge_types=["related_to", "derived_from"], connection_method="llm_inferred")},
+    placement=graph_node(node_policy="append")
+)
+```
+
+```text
+organization : Organization(
+    routing=by_tag(tag_field="skill_type", route_map={"craft": "craft_skills", "nav": "nav_skills"}),
+    links={},
+    placement=partition(partition_key="skill_type")
+)
+```
+
+### 2.5.5 Memory Evolution 的规范写法（建议）
+
+对 `memory_evolution`，推荐统一写成：
+
+```text
+MemoryEvolution(
+  selection=...,
+  action=...,
+  effect=...,
+  trigger=...,
+  ...
+)
+```
+
+推荐 selection：
+
+```text
+incoming_only()
+matched_by_key(key_field=...)
+matched_by_entity(entity_field=...)
+time_window(window_size=...)
+layer_slice(target_layer=..., filter=...)
+low_activity(activity_threshold=...)
+all(scope=...)
+```
+
+推荐 action：
+
+```text
+append()
+replace()
+merge()
+upsert()
+rewrite()
+delta()
+versioned_append()
+summarize()
+reflect()
+profile_update()
+extract_concept()
+prototype_form()
+distill()
+prune()
+dedup()
+move(target_layer=...)
+consolidate()
+review()
+```
+
+推荐 effect：
+
+```text
+add
+modify
+delete
+move
+merge
+summarize
+version
+```
+
+推荐 trigger：
+
+```text
+after_write
+periodic(every=...)
+on_event("session_end")
+budget_exceeded(threshold=...)
+count_exceeded(max_count=...)
+conditional(...)
+```
+
+推荐约束：
+
+- `selection=matched_by_entity(...)` 与 `action=merge/profile_update` 要求 `entities`
+- `action=move(...)` 要求 `layer_count > 1`
+- `action=summarize/reflect/extract_concept/prototype_form` 通常要求 selection 覆盖多个 unit
+- `action=dedup/prune/review` 会影响后续 retrieval 可见内容
+
+示例：
+
+```text
+memory_evolution : MemoryEvolution(
+    selection=incoming_only(),
+    action=append(),
+    effect=add,
+    trigger=after_write
+)
+```
+
+```text
+memory_evolution : MemoryEvolution(
+    selection=matched_by_entity(entity_field="entities"),
+    action=profile_update(),
+    effect=modify,
+    trigger=periodic(every=20)
+)
+```
+
+```text
+memory_evolution : MemoryEvolution(
+    selection=time_window(window_size=100),
+    action=reflect(),
+    effect=add,
+    trigger=periodic(every=100)
+)
+```
+
+```text
+memory_evolution : MemoryEvolution(
+    selection=low_activity(activity_threshold=0.2),
+    action=move(target_layer="cold_archive"),
+    effect=move,
+    trigger=budget_exceeded(threshold=0.8)
+)
+```
+
+### 2.5.6 Retrieval 的规范写法（建议）
+
+对 `retrieval`，推荐统一写成：
+
+```text
+Retrieval(
+  signals={...},
+  ranker=...,
+  flow=...,
+  constraints={...},
+  ...
+)
+```
+
+推荐 signal：
+
+```text
+similarity
+keyword_match
+recency
+importance
+entity_match
+graph_proximity
+hierarchy_match
+diversity_penalty
+```
+
+推荐 ranker：
+
+```text
+identity(source=...)
+weighted_sum(weights=[...])
+rrf(k=...)
+decay(decay_rate=..., half_life=...)
+rerank_llm(model=..., rerank_prompt=...)
+mmr(lambda=...)
+```
+
+推荐 flow：
+
+```text
+single_stage(top_k=...)
+two_stage(recall_k=..., final_k=...)
+top_down(levels=..., expand_top_k=...)
+agent_invoked(tool_names=[...], backend=...)
+```
+
+推荐约束：
+
+- `signals` 中包含 `similarity` 时，要求 `embedding`
+- `signals` 中包含 `keyword_match` 时，要求 `text` 或 `sparse_embedding`
+- `signals` 中包含 `entity_match` 时，要求 `entities`
+- `signals` 中包含 `graph_proximity` 时，要求图边与 graph index
+- `flow=top_down(...)` 时，要求层级摘要或父子层级存在
+
+示例：
+
+```text
+retrieval : Retrieval(
+    signals={similarity},
+    ranker=identity(source="similarity"),
+    flow=single_stage(top_k=10)
+)
+```
+
+```text
+retrieval : Retrieval(
+    signals={similarity, recency, importance},
+    ranker=weighted_sum(weights=[0.5, 0.3, 0.2]),
+    flow=single_stage(top_k=50)
+)
+```
+
+```text
+retrieval : Retrieval(
+    signals={entity_match},
+    ranker=rerank_llm(model="gpt-4.1"),
+    flow=two_stage(recall_k=20, final_k=5)
+)
+```
+
+```text
+retrieval : Retrieval(
+    signals={hierarchy_match},
+    ranker=identity(source="hierarchy_match"),
+    flow=top_down(levels=3, expand_top_k=5)
+)
+```
+
+### 2.5.7 Readout 的规范写法（建议）
+
+对 `readout`，当前 design space 只保留少数真正影响 memory 使用方式的模式：
+
+```text
+FlatConcat(...)
+SummarizedReadout(...)
+TemplatedPrompt(...)
+CodeInjection(...)
+```
+
+其中：
+
+- `FlatConcat` 是默认 readout 基线
+- `SummarizedReadout` 表示检索后再压缩
+- `TemplatedPrompt` 表示用模板包装 readout
+- `CodeInjection` 保留为特殊 mode，通常只用于 skill/tool memory，不参与默认搜索空间
+
+示例：
+
+```text
+readout : FlatConcat(
+    separator="\n\n",
+    max_tokens=2000,
+    format="text"
+)
+```
+
+```text
+readout : SummarizedReadout(
+    model="gpt-4.1",
+    max_length=400
+)
+```
+
+```text
+readout : TemplatedPrompt(
+    template="Relevant memories:\n{{items}}\nUse them when answering."
+)
+```
+
+```text
+readout : CodeInjection(
+    format="function_def"
+)
+```
+
 ### 2.6 Trigger 声明
 
-控制 compression 和 maintenance 的触发时机。
+控制 `memory_evolution` 的触发时机。
 
 ```ebnf
 TriggerBlock    ::= 'triggers' '{' TriggerDecl+ '}'
 
 TriggerDecl     ::= TriggerSlot ':' TriggerExpr
 
-TriggerSlot     ::= 'compress_trigger' | 'maintain_trigger'
+TriggerSlot     ::= 'evolution_trigger'
 
 TriggerExpr     ::= 'Periodic' '(' 'every' '=' INT ')'
                    | 'OnEvent' '(' EventType ')'
@@ -573,7 +917,7 @@ Dispatch(on=field.path, "case1": M1, "case2": M2, default=M3)
 ### 4.4 None — 跳过
 
 ```
-compression: None
+memory_evolution: None
 ```
 
 该 slot 不执行任何操作，Packet 和 Store 透传。

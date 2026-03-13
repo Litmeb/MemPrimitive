@@ -36,11 +36,9 @@
 - `representation`：记忆单元如何编码、结构化和索引化
 - `write trigger`：系统何时决定写入记忆
 - `organization`：写入前如何决定放置位置和关系结构
-- `update`：新记忆如何与旧记忆合并、追加、替换或重写
-- `compression`：如何把已有记忆压缩成摘要、概念或反思
+- `memory evolution`：已有记忆如何被追加、合并、重写、压缩、迁移、清理和整理
 - `retrieval`：给定 query 如何选取相关记忆
 - `readout`：检索结果如何转化为 agent 可使用的上下文
-- `maintenance`：如何做预算控制、遗忘、去重、迁移与整理
 
 这里最重要的思想是：
 
@@ -77,7 +75,7 @@
 
 - 固定 `unit formation`，只比较不同 `retrieval`
 - 固定 `retrieval`，只比较不同 `write trigger`
-- 固定 `representation`，比较不同 `update` 和 `maintenance`
+- 固定 `representation`，比较不同 `memory evolution`
 
 这使得 memory 研究从“方法对方法”的比较，转向“机制对机制”的比较。
 
@@ -106,7 +104,7 @@
 
 - 很多有效系统都采用“结构化抽取 + selective write + hybrid retrieval”
 - 某些任务更偏好“append-only + periodic summarization”
-- 某些长期交互场景更需要“entity merge + profile update + maintenance”
+- 某些长期交互场景更需要“entity merge + profile update + memory evolution”
 
 这类结论不是从单篇方法中得到的，而是从系统搜索和机制比较中归纳出来的。
 
@@ -185,7 +183,7 @@ memory primitive 之间并非完全自由组合。
 例如：
 
 - graph retrieval 需要图结构或图链接
-- entity-based update 需要 entity-aware units
+- entity-based memory evolution 需要 entity-aware units
 - similarity retrieval 需要 embedding
 - hierarchical retrieval 往往需要层级压缩或层级组织
 
@@ -249,8 +247,7 @@ memory primitive 之间并非完全自由组合。
 例如：
 
 - `representation` 和 `retrieval` 往往强耦合
-- `unit formation` 和 `update` 常常强耦合
-- `compression` 和 `maintenance` 经常相互影响
+- `unit formation` 和 `memory evolution` 常常强耦合
 - `organization` 决定了后续能否进行 graph 或 hierarchical retrieval
 
 因此，一个有效的搜索空间必须同时包含：
