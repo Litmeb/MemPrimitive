@@ -305,6 +305,9 @@ memory primitive 之间并非完全自由组合。
 
 ## 本仓库当前文档的分工
 
+- `memprimitive/baselines/README.md`
+  说明阶段一 baseline 代码如何按 primitive slot 拆分到多个 `.py` 文件、`__init__.py` 与 `simple.py` 的导出关系，以及扩展新实现时的约定。
+
 - `DSLIO.md`
   讨论 memory system 各模块的标准输入输出接口，明确系统中的共享对象、模块签名、副作用与能力约束。
 

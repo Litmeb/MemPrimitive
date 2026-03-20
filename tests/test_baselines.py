@@ -1,0 +1,240 @@
+from __future__ import annotations
+
+import pytest
+
+from memprimitive.baselines.registry import (
+    instantiate_default_baseline_modules,
+    registered_baseline_class_names,
+)
+from memprimitive.core import MemoryStore, Observation, Packet, Query, RetrievedSet
+from memprimitive.pipeline_slots import PRE_EVOLUTION_SLOTS
+
+
+def _stored_pipeline_packet(text: str, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    """Pre-evolution ingest chain; uses the same default modules as the full pipeline."""
+    mods = instantiate_default_baseline_modules(top_k=2)
+    packet = Packet(observation=Observation(text=text, source="dialogue"))
+    for slot in PRE_EVOLUTION_SLOTS:
+        packet, store = mods[slot].run(packet, store)
+    return packet, store
+
+
+def test_unit_formation_returns_one_unit_with_provenance() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation
+
+    module = PassThroughUnitFormation()
+    packet = Packet(observation=Observation(text="Alice likes tea.", source="dialogue"))
+
+    packet_out, _ = module.run(packet, MemoryStore())
+
+    assert packet_out.units is not None
+    assert len(packet_out.units) == 1
+    assert packet_out.units[0].text == "Alice likes tea."
+    assert packet_out.units[0].metadata["provenance"]["observation_id"] == packet.observation.observation_id
+
+
+def test_unit_formation_requires_observation() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation
+
+    module = PassThroughUnitFormation()
+
+    with pytest.raises(ValueError, match="packet.observation"):
+        module.run(Packet(), MemoryStore())
+
+
+def test_representation_preserves_identity_and_adds_normalized_text() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="  Alice Likes Tea  ", source="dialogue")),
+        MemoryStore(),
+    )
+
+    packet_out, _ = BasicRepresentation().run(unit_packet, store)
+
+    assert packet_out.units is not None
+    assert len(packet_out.units) == 1
+    assert packet_out.units[0].unit_id == unit_packet.units[0].unit_id
+    assert packet_out.units[0].text == "Alice Likes Tea"
+    assert packet_out.units[0].metadata["representation"]["normalized_text"] == "alice likes tea"
+
+
+def test_write_trigger_aligns_decisions_with_units() -> None:
+    from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, PassThroughUnitFormation
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+
+    packet_out, _ = AlwaysWriteTrigger().run(packet, store)
+
+    assert packet_out.decisions == [True]
+
+
+def test_organization_aligns_placements_with_units() -> None:
+    from memprimitive.baselines import (
+        AlwaysWriteTrigger,
+        AppendOrganization,
+        BasicRepresentation,
+        PassThroughUnitFormation,
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    packet, store = AlwaysWriteTrigger().run(packet, store)
+
+    packet_out, _ = AppendOrganization().run(packet, store)
+
+    assert packet_out.placements is not None
+    assert len(packet_out.placements) == len(packet_out.units)
+    assert packet_out.placements[0].target_layer == "default"
+
+
+def test_append_only_evolution_mutates_store_only_for_true_decisions() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution
+
+    packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
+    packet = Packet(
+        units=packet.units,
+        decisions=[False],
+        placements=packet.placements,
+        trace=packet.trace,
+    )
+
+    _, updated_store = AppendOnlyEvolution().run(packet, store)
+
+    assert updated_store.count() == 0
+
+
+def test_append_only_evolution_requires_aligned_inputs() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution
+
+    with pytest.raises(ValueError, match="aligned units"):
+        AppendOnlyEvolution().run(
+            Packet(units=[], decisions=[True], placements=[]),
+            MemoryStore(),
+        )
+
+
+def test_retrieval_honors_top_k() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+
+    store = MemoryStore()
+    evolution = AppendOnlyEvolution()
+    for text in ("one", "two", "three"):
+        packet, store = _stored_pipeline_packet(text, store)
+        _, store = evolution.run(packet, store)
+
+    packet_out, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="items")), store)
+
+    assert packet_out.retrieved is not None
+    assert len(packet_out.retrieved.items) == 2
+
+
+def test_retrieval_rejects_non_positive_top_k() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+
+    with pytest.raises(ValueError, match="top_k > 0"):
+        RecencyRetrieval(top_k=0)
+
+
+def test_retrieval_on_empty_store_returns_empty_retrieved_set() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+
+    packet_out, store_out = RecencyRetrieval(top_k=2).run(
+        Packet(query=Query(text="alice")),
+        MemoryStore(),
+    )
+
+    assert packet_out.retrieved is not None
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+    assert store_out.count() == 0
+
+
+def test_readout_formats_deterministic_text_and_source_ids() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, ConcatenateReadout
+
+    store = MemoryStore()
+    packet, store = _stored_pipeline_packet("Alice likes tea.", store)
+    _, store = AppendOnlyEvolution().run(packet, store)
+    retrieved = RetrievedSet(items=list(reversed(store.iter_records())), scores=[])
+
+    packet_out, _ = ConcatenateReadout().run(Packet(retrieved=retrieved), store)
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Alice likes tea."
+    assert packet_out.readout.source_ids == [store.iter_records()[0].record_id]
+
+
+def test_readout_on_empty_retrieval_returns_valid_empty_output() -> None:
+    from memprimitive.baselines import ConcatenateReadout
+
+    packet_out, _ = ConcatenateReadout().run(Packet(retrieved=RetrievedSet()), MemoryStore())
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == ""
+    assert packet_out.readout.source_ids == []
+
+
+def test_retrieval_prefers_keyword_matches_when_available() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+
+    store = MemoryStore()
+    for text in ("Alice likes tea", "Bob prefers coffee", "Alice studies graphs"):
+        packet, store = _stored_pipeline_packet(text, store)
+        _, store = AppendOnlyEvolution().run(packet, store)
+
+    packet_out, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="Alice")), store)
+
+    assert packet_out.retrieved is not None
+    assert len(packet_out.retrieved.items) == 2
+    assert all("alice" in record.text.casefold() for record in packet_out.retrieved.items)
+
+
+def test_retrieval_returns_latest_records_first_when_falling_back_to_recency() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+
+    store = MemoryStore()
+    for text in ("first item", "second item", "third item"):
+        packet, store = _stored_pipeline_packet(text, store)
+        _, store = AppendOnlyEvolution().run(packet, store)
+
+    packet_out, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="unmatched")), store)
+
+    assert packet_out.retrieved is not None
+    assert [record.text for record in packet_out.retrieved.items] == ["third item", "second item"]
+
+
+def test_retrieval_does_not_mutate_store() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+
+    store = MemoryStore()
+    packet, store = _stored_pipeline_packet("Alice likes tea", store)
+    _, store = AppendOnlyEvolution().run(packet, store)
+    before_ids = [record.record_id for record in store.iter_records()]
+
+    _, store_after = RecencyRetrieval(top_k=1).run(Packet(query=Query(text="Alice")), store)
+
+    assert [record.record_id for record in store_after.iter_records()] == before_ids
+
+
+def test_baselines_simple_reexports_match_package_exports() -> None:
+    import memprimitive.baselines as pkg
+    import memprimitive.baselines.simple as legacy
+
+    assert set(pkg.__all__) == set(legacy.__all__)
+    for name in sorted(pkg.__all__):
+        assert getattr(pkg, name) is getattr(legacy, name), name
+
+
+def test_baselines_all_matches_registered_baseline_classes() -> None:
+    """``__init__.__all__`` must list exactly the classes registered in per-module ``BASELINE_CLASSES``."""
+    import memprimitive.baselines as pkg
+
+    assert set(pkg.__all__) == registered_baseline_class_names()
