@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
 import json
 import os
@@ -223,7 +224,7 @@ def load_dataset(dataset_path: Path) -> list[dict]:
 
 
 def get_default_dataset_path() -> Path:
-    return Path(__file__).with_name("locomo10_simplified.json")
+    return Path(__file__).with_name("locomo10.json")
 
 
 def get_default_llm_config() -> dict:
@@ -263,6 +264,27 @@ def ensure_langchain_prompts_shim() -> None:
     sys.modules["langchain.prompts"] = shim
 
 
+def _patch_memengine_llm_trigger_no_execute_returns_list() -> None:
+    """memengine LLMTrigger returns False for NO_EXECUTE; MGMemoryRecall expects an iterable."""
+    try:
+        trigger_mod = importlib.import_module("memengine.function.Trigger")
+    except Exception:
+        return
+    LLMTrigger = getattr(trigger_mod, "LLMTrigger", None)
+    if LLMTrigger is None:
+        return
+    current = LLMTrigger.__parse_excuate_function__
+    if getattr(current, "_locomo_search_no_execute_patch", False):
+        return
+
+    def _wrapped(self, res):
+        out = current(self, res)
+        return [] if out is False else out
+
+    _wrapped._locomo_search_no_execute_patch = True
+    LLMTrigger.__parse_excuate_function__ = _wrapped
+
+
 def check_memengine_dependencies() -> dict:
     info = {"ok": False, "errors": []}
     missing = check_python_dependencies()
@@ -272,6 +294,7 @@ def check_memengine_dependencies() -> dict:
     try:
         ensure_langchain_prompts_shim()
         memengine = importlib.import_module("memengine")
+        _patch_memengine_llm_trigger_no_execute_returns_list()
         info["memengine"] = memengine
         info["MemoryConfig"] = getattr(memengine, "MemoryConfig")
         info["exports"] = {name: getattr(memengine, name) for name in MEMORY_MODULES}
@@ -342,7 +365,7 @@ def build_single_memory(memory_name: str, *, topk: int, time_bucket: int, llm_cf
     if memory_name == "STMemory":
         cfg = make_common_config()
         cfg["name"] = "STMemory"
-        cfg["store"] = {"method": "LTMemoryStore"}
+        cfg["store"] = {"method": "STMemoryStore"}
         cfg["recall"].update(
             {
                 "method": "STMemoryRecall",
@@ -982,7 +1005,17 @@ def evaluate_config(config: dict, *, dataset, llm_cfg: dict, latency_penalty: fl
     }
 
 
-def run_search(*, num_trials: int, dataset, latency_penalty: float, seed: int, out_path: Path, log_dir: Path, eval_opts: dict) -> dict:
+def run_search(
+    *,
+    num_trials: int,
+    dataset,
+    latency_penalty: float,
+    seed: int,
+    out_path: Path,
+    log_dir: Path,
+    eval_opts: dict,
+    max_workers: int = 1,
+) -> dict:
     rng = random.Random(seed)
     search_space = eval_opts.get("search_space", DEFAULT_SEARCH_SPACE)
     ensure_dir(out_path)
@@ -993,8 +1026,8 @@ def run_search(*, num_trials: int, dataset, latency_penalty: float, seed: int, o
     best_result_path = out_path / "best_result.json"
     search_summary_path = out_path / "search_summary.json"
 
-    trials = []
     tried_configs = set()
+    scheduled_trials = []
     exhausted = False
 
     for trial_idx in range(1, int(num_trials) + 1):
@@ -1003,22 +1036,37 @@ def run_search(*, num_trials: int, dataset, latency_penalty: float, seed: int, o
             exhausted = True
             break
         tried_configs.add(config_to_key(config))
+        scheduled_trials.append((trial_idx, config))
 
-        trial = evaluate_config(
-            config,
-            dataset=dataset,
-            llm_cfg=eval_opts["llm_cfg"],
-            latency_penalty=latency_penalty,
-            log_dir=log_dir,
-            eval_opts={**eval_opts, "trial_id": trial_idx},
-        )
-        trials.append(trial)
-        append_jsonl(trials_jsonl_path, [trial])
-        dump_json(trials_json_path, trials)
+    trials_by_id = {}
+    max_workers = max(1, int(max_workers))
 
-        ok_trials = [item for item in trials if item["status"] == "ok" and item["score"] is not None]
-        dump_json(best_result_path, max(ok_trials, key=lambda item: item["score"]) if ok_trials else None)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_trial_id = {
+            executor.submit(
+                evaluate_config,
+                config,
+                dataset=dataset,
+                llm_cfg=eval_opts["llm_cfg"],
+                latency_penalty=latency_penalty,
+                log_dir=log_dir,
+                eval_opts={**eval_opts, "trial_id": trial_idx},
+            ): trial_idx
+            for trial_idx, config in scheduled_trials
+        }
 
+        for future in as_completed(future_to_trial_id):
+            trial = future.result()
+            trials_by_id[trial["trial_id"]] = trial
+
+            append_jsonl(trials_jsonl_path, [trial])
+            ordered_trials = [trials_by_id[idx] for idx in sorted(trials_by_id)]
+            dump_json(trials_json_path, ordered_trials)
+
+            ok_trials = [item for item in ordered_trials if item["status"] == "ok" and item["score"] is not None]
+            dump_json(best_result_path, max(ok_trials, key=lambda item: item["score"]) if ok_trials else None)
+
+    trials = [trials_by_id[idx] for idx in sorted(trials_by_id)]
     ok_trials = [item for item in trials if item["status"] == "ok" and item["score"] is not None]
     best_trial = max(ok_trials, key=lambda item: item["score"]) if ok_trials else None
     summary = {
@@ -1028,6 +1076,7 @@ def run_search(*, num_trials: int, dataset, latency_penalty: float, seed: int, o
         "search_space_exhausted": exhausted,
         "latency_penalty": latency_penalty,
         "seed": seed,
+        "max_workers": max_workers,
     }
     dump_json(search_summary_path, summary)
     dump_json(best_result_path, best_trial)
@@ -1062,11 +1111,12 @@ def smoke_test_sampling() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Random-search memory configs on LOCOMO.")
     parser.add_argument("--dataset", type=str, default=str(get_default_dataset_path()))
-    parser.add_argument("--num-trials", type=int, default=2)
+    parser.add_argument("--num-trials", type=int, default=40)
+    parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--latency-penalty", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--top-samples", type=int, default=1)
-    parser.add_argument("--top-qas-per-sample", type=int, default=1)
+    parser.add_argument("--top-samples", type=int, default=3)
+    parser.add_argument("--top-qas-per-sample", type=int, default=1000)
     parser.add_argument("--st-model", type=str, default="sentence-transformers/all-MiniLM-L6-v2")
     parser.add_argument("--output-dir", type=str, default="")
     parser.add_argument("--smoke-test", action="store_true")
@@ -1113,6 +1163,7 @@ def main() -> int:
         seed=args.seed,
         out_path=out_dir,
         log_dir=log_dir,
+        max_workers=args.max_workers,
         eval_opts={
             "top_samples": args.top_samples,
             "top_qas_per_sample": args.top_qas_per_sample,
