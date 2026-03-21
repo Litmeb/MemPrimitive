@@ -56,7 +56,78 @@ def test_representation_preserves_identity_and_adds_normalized_text() -> None:
     assert len(packet_out.units) == 1
     assert packet_out.units[0].unit_id == unit_packet.units[0].unit_id
     assert packet_out.units[0].text == "Alice Likes Tea"
+    assert packet_out.units[0].normalized_text == "alice likes tea"
+    assert packet_out.units[0].embedding is not None
+    assert len(packet_out.units[0].embedding) > 0
+    assert packet_out.units[0].representation_elements == ("embedding", "text")
+    assert packet_out.trace["representation"]["elements"] == ["text", "embedding"]
+    assert packet_out.trace["representation"]["per_unit"][0]["elements"] == ["embedding", "text"]
+    assert packet_out.units[0].metadata["representation"]["text"] == "Alice Likes Tea"
     assert packet_out.units[0].metadata["representation"]["normalized_text"] == "alice likes tea"
+    assert packet_out.units[0].metadata["representation"]["embedding"]["dim"] == len(packet_out.units[0].embedding)
+
+
+def test_representation_can_build_structured_element_sets() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea. role: engineer", source="dialogue")),
+        MemoryStore(),
+    )
+
+    packet_out, _ = BasicRepresentation(elements=("text", "triple", "kv", "entities", "tags")).run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert ("Alice", "likes", "tea") in unit.triples
+    assert unit.kv["role"] == "engineer"
+    assert "Alice" in unit.entities
+    assert "structured_triple" in unit.tags
+    assert "structured_kv" in unit.tags
+    assert unit.metadata["representation"]["triples"]
+    assert unit.metadata["representation"]["kv"]["role"] == "engineer"
+    assert unit.metadata["representation"]["entities"] == unit.entities
+    assert unit.metadata["representation"]["tags"] == unit.tags
+
+
+def test_representation_can_build_hybrid_element_set() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Graph memory helps Alice study code.", source="notes")),
+        MemoryStore(),
+    )
+
+    packet_out, _ = BasicRepresentation(elements=("text", "embedding", "triple", "tags", "entities")).run(
+        unit_packet,
+        store,
+    )
+
+    unit = packet_out.units[0]
+    assert unit.embedding is not None
+    assert "embedding" in unit.representation_elements
+    assert "text" in unit.representation_elements
+    assert "entities" in unit.representation_elements
+    assert "tags" in unit.representation_elements
+    assert "Alice" in unit.entities
+    assert "graph" in unit.tags
+    assert "memory" in unit.tags
+
+
+def test_representation_can_generate_real_description_via_api() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice writes reusable Python code for graph memory tools.", source="notes")),
+        MemoryStore(),
+    )
+
+    packet_out, _ = BasicRepresentation(elements=("text", "entities", "tags", "description")).run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.description is not None
+    assert len(unit.description) > 10
+    assert "alice" in unit.description.casefold() or "python" in unit.description.casefold()
+    assert unit.metadata["representation"]["description"] == unit.description
 
 
 def test_write_trigger_aligns_decisions_with_units() -> None:

@@ -1,6 +1,6 @@
 import pytest
 
-from memprimitive.core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Query, StoreLayerSpec, StoreTopology
+from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Observation, Query, StoreLayerSpec, StoreTopology
 
 
 def test_observation_rejects_empty_text() -> None:
@@ -167,3 +167,33 @@ def test_module_spec_preserves_declared_contract_fields() -> None:
     assert spec.store_requirements == ("vector",)
     assert spec.layer_requirements == ("shape:Flat",)
     assert spec.side_effects == ("read_only",)
+
+
+def test_memory_unit_representation_fields_have_stable_defaults() -> None:
+    unit = MemoryUnit(text="Alice likes tea.")
+
+    assert unit.representation_elements == ()
+    assert unit.normalized_text is None
+    assert unit.embedding is None
+    assert unit.triples == []
+    assert unit.kv == {}
+    assert unit.entities == []
+    assert unit.tags == []
+    assert unit.description is None
+
+
+def test_memory_record_from_unit_carries_representation_summary_without_raw_embedding_duplication() -> None:
+    unit = MemoryUnit(
+        text="Alice likes tea.",
+        representation_elements=("text", "embedding", "entities"),
+        normalized_text="alice likes tea.",
+        embedding=[0.1, 0.2, 0.3],
+        entities=["Alice"],
+    )
+
+    record = MemoryRecord.from_unit(unit=unit, layer="default", sequence_id=1)
+
+    assert record.metadata["representation"]["elements"] == ["text", "embedding", "entities"]
+    assert record.metadata["representation"]["normalized_text"] == "alice likes tea."
+    assert record.metadata["representation"]["entities"] == ["Alice"]
+    assert record.metadata["representation"]["embedding"] == {"dim": 3}

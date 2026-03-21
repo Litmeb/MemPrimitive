@@ -72,11 +72,29 @@ class MemoryUnit:
     unit_id: str = field(default_factory=lambda: _default_id("unit"))
     unit_type: str = "observation"
     timestamp: str = field(default_factory=_utc_now_iso)
+    representation_elements: tuple[str, ...] = ()
+    normalized_text: str | None = None
+    embedding: list[float] | None = None
+    triples: list[tuple[str, str, str]] = field(default_factory=list)
+    kv: dict[str, str] = field(default_factory=dict)
+    entities: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.text = _require_non_empty_text(self.text, "MemoryUnit.text")
         self.unit_type = _require_non_empty_text(self.unit_type, "MemoryUnit.unit_type")
+        self.representation_elements = tuple(dict.fromkeys(self.representation_elements))
+        if self.normalized_text is not None:
+            self.normalized_text = _require_non_empty_text(self.normalized_text, "MemoryUnit.normalized_text")
+        if self.description is not None:
+            self.description = _require_non_empty_text(self.description, "MemoryUnit.description")
+        self.embedding = None if self.embedding is None else [float(value) for value in self.embedding]
+        self.triples = [(str(s), str(p), str(o)) for s, p, o in self.triples]
+        self.kv = {str(key): str(value) for key, value in self.kv.items()}
+        self.entities = [str(value) for value in self.entities]
+        self.tags = [str(value) for value in self.tags]
 
 
 @dataclass(slots=True)
@@ -99,6 +117,7 @@ class MemoryRecord:
 
     @classmethod
     def from_unit(cls, unit: MemoryUnit, layer: str, sequence_id: int) -> "MemoryRecord":
+        representation_summary = _representation_summary_from_unit(unit)
         return cls(
             record_id=f"rec-{sequence_id}",
             unit_id=unit.unit_id,
@@ -108,8 +127,32 @@ class MemoryRecord:
             metadata={
                 **unit.metadata,
                 "unit_type": unit.unit_type,
+                "representation": representation_summary,
             },
         )
+
+
+def _representation_summary_from_unit(unit: MemoryUnit) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "elements": list(unit.representation_elements),
+        "text": unit.text,
+        "normalized_text": unit.normalized_text or unit.text.casefold().strip(),
+    }
+    if unit.embedding is not None:
+        summary["embedding"] = {
+            "dim": len(unit.embedding),
+        }
+    if unit.triples:
+        summary["triples"] = list(unit.triples)
+    if unit.kv:
+        summary["kv"] = dict(unit.kv)
+    if unit.entities:
+        summary["entities"] = list(unit.entities)
+    if unit.tags:
+        summary["tags"] = list(unit.tags)
+    if unit.description is not None:
+        summary["description"] = unit.description
+    return summary
 
 
 @dataclass(slots=True)
