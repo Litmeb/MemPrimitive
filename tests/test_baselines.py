@@ -260,6 +260,69 @@ def test_threshold_evolution_trigger_writes_only_evolution_decisions() -> None:
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
 
 
+def test_composed_write_trigger_validates_input_requirements_at_entry() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+    from memprimitive.baselines._trigger_family import (
+        AlwaysOpenGate,
+        ConstantSignal,
+        ThresholdPolicy,
+        WeightedSumScorer,
+    )
+    from memprimitive.baselines.write_trigger import compose_write_trigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    trigger = compose_write_trigger(
+        name="query_aware_write_trigger",
+        signal_providers=(ConstantSignal(signal_name="constant", value=1.0),),
+        scorer=WeightedSumScorer(weights={"constant": 1.0}),
+        gate=AlwaysOpenGate(),
+        policy=ThresholdPolicy(threshold=0.5),
+        input_requirements=("units", "query"),
+    )
+
+    with pytest.raises(ValueError, match="query is required for trigger execution"):
+        trigger.run(packet, store)
+
+
+def test_composed_evolution_trigger_validates_custom_input_requirements_at_entry() -> None:
+    from memprimitive.baselines import (
+        AlwaysWriteTrigger,
+        AppendOrganization,
+        BasicRepresentation,
+        PassThroughUnitFormation,
+    )
+    from memprimitive.baselines._trigger_family import (
+        AlwaysOpenGate,
+        ConstantSignal,
+        ThresholdPolicy,
+        WeightedSumScorer,
+    )
+    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AppendOrganization().run(packet, store)
+    trigger = compose_evolution_trigger(
+        name="query_aware_evolution_trigger",
+        signal_providers=(ConstantSignal(signal_name="constant", value=1.0),),
+        scorer=WeightedSumScorer(weights={"constant": 1.0}),
+        gate=AlwaysOpenGate(),
+        policy=ThresholdPolicy(threshold=0.5),
+        input_requirements=("units", "placements", "query"),
+    )
+
+    with pytest.raises(ValueError, match="query is required for trigger execution"):
+        trigger.run(packet, store)
+
+
 def test_retrieval_honors_top_k() -> None:
     from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
 

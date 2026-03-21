@@ -35,10 +35,17 @@ class _TriggerFamilyEvolutionAdapter(EvolutionTriggerModule):
         output_guarantees=("evolution_decisions",),
     )
 
-    def __init__(self, *, runner: TriggerFamilyRunner, spec: ModuleSpec | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: TriggerFamilyRunner,
+        spec: ModuleSpec | None = None,
+        required_fields: tuple[str, ...] | None = None,
+    ) -> None:
         self._runner = runner
         if spec is not None:
             self.spec = spec
+        self._required_fields = required_fields if required_fields is not None else self.required_fields
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         return self._runner.run(
@@ -47,7 +54,7 @@ class _TriggerFamilyEvolutionAdapter(EvolutionTriggerModule):
             trace_key=self.trace_key,
             output_field=self.output_field,
             module_name=self.spec.name,
-            required_fields=self.required_fields,
+            required_fields=self._required_fields,
         )
 
 
@@ -105,6 +112,7 @@ def compose_evolution_trigger(
 ) -> EvolutionTriggerModule:
     """Assemble an evolution-trigger module directly from trigger-family components."""
 
+    required_fields = tuple(field for field in input_requirements if field != "units")
     return _TriggerFamilyEvolutionAdapter(
         runner=TriggerFamilyRunner(
             signal_providers=tuple(signal_providers),
@@ -118,6 +126,7 @@ def compose_evolution_trigger(
             input_requirements=input_requirements,
             output_guarantees=output_guarantees,
         ),
+        required_fields=required_fields,
     )
 
 
