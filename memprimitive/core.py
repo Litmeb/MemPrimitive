@@ -150,11 +150,18 @@ class ModuleSpec:
 
 @dataclass(slots=True)
 class Packet:
-    """Shared pipeline IR. Each stage reads and fills specific fields."""
+    """Shared pipeline IR. Each stage reads and fills specific fields.
+
+    ``decisions`` is the write-side gating mask used before organization.
+    ``evolution_decisions`` is the evolution-side gating mask used by
+    ``memory_evolution``; when absent, evolution modules may fall back to
+    ``decisions`` for backward compatibility.
+    """
 
     observation: Observation | None = None
     units: list[MemoryUnit] | None = None
     decisions: list[bool] | None = None
+    evolution_decisions: list[bool] | None = None
     placements: list[Placement] | None = None
     query: Query | None = None
     retrieved: RetrievedSet | None = None

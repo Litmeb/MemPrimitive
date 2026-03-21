@@ -71,6 +71,42 @@ def test_write_trigger_aligns_decisions_with_units() -> None:
     packet_out, _ = AlwaysWriteTrigger().run(packet, store)
 
     assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["policy"] == "always"
+    assert packet_out.trace["write_trigger"]["scorer"] == "identity"
+    assert packet_out.trace["write_trigger"]["output_field"] == "decisions"
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"] == {"constant": 1.0}
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] == 1.0
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["gate"] is True
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is True
+
+
+def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
+    from memprimitive.baselines import (
+        AlwaysEvolutionTrigger,
+        AlwaysWriteTrigger,
+        AppendOrganization,
+        BasicRepresentation,
+        PassThroughUnitFormation,
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AppendOrganization().run(packet, store)
+
+    packet_out, _ = AlwaysEvolutionTrigger().run(packet, store)
+
+    assert packet_out.evolution_decisions == [True]
+    assert packet_out.trace["evolution_trigger"]["policy"] == "always"
+    assert packet_out.trace["evolution_trigger"]["scorer"] == "identity"
+    assert packet_out.trace["evolution_trigger"]["evolution_decisions"] == [True]
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"] == {"constant": 1.0}
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["score"] == 1.0
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["gate"] is True
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is True
 
 
 def test_organization_aligns_placements_with_units() -> None:
@@ -111,6 +147,33 @@ def test_append_only_evolution_mutates_store_only_for_true_decisions() -> None:
     assert updated_store.count() == 0
 
 
+def test_append_only_evolution_prefers_evolution_decisions_over_decisions() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution
+
+    packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
+    packet = Packet(
+        units=packet.units,
+        decisions=[True],
+        evolution_decisions=[False],
+        placements=packet.placements,
+        trace=packet.trace,
+    )
+
+    _, updated_store = AppendOnlyEvolution().run(packet, store)
+
+    assert updated_store.count() == 0
+
+
+def test_append_only_evolution_falls_back_to_decisions_when_evolution_decisions_missing() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution
+
+    packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
+
+    _, updated_store = AppendOnlyEvolution().run(packet, store)
+
+    assert updated_store.count() == 1
+
+
 def test_append_only_evolution_requires_aligned_inputs() -> None:
     from memprimitive.baselines import AppendOnlyEvolution
 
@@ -119,6 +182,82 @@ def test_append_only_evolution_requires_aligned_inputs() -> None:
             Packet(units=[], decisions=[True], placements=[]),
             MemoryStore(),
         )
+
+
+def test_write_and_evolution_trigger_share_observable_mask_behavior() -> None:
+    from memprimitive.baselines import (
+        AlwaysEvolutionTrigger,
+        AlwaysWriteTrigger,
+        AppendOrganization,
+        BasicRepresentation,
+        PassThroughUnitFormation,
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    write_packet, store = AlwaysWriteTrigger().run(packet, store)
+    write_packet, store = AppendOrganization().run(write_packet, store)
+    evolution_packet, _ = AlwaysEvolutionTrigger().run(write_packet, store)
+
+    assert write_packet.decisions == evolution_packet.evolution_decisions
+    assert write_packet.trace["write_trigger"]["family"] == evolution_packet.trace["evolution_trigger"]["family"]
+
+
+def test_threshold_write_trigger_respects_threshold_policy() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation, ThresholdWriteTrigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+
+    packet_out, _ = ThresholdWriteTrigger(threshold=0.8, constant=0.7).run(packet, store)
+    assert packet_out.decisions == [False]
+    assert packet_out.trace["write_trigger"]["policy"] == "threshold"
+    assert packet_out.trace["write_trigger"]["scorer"] == "weighted_sum"
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] == 0.7
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is False
+
+    packet_out, _ = ThresholdWriteTrigger(threshold=0.7, constant=0.7).run(packet, store)
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is True
+
+
+def test_threshold_evolution_trigger_writes_only_evolution_decisions() -> None:
+    from memprimitive.baselines import (
+        AppendOrganization,
+        BasicRepresentation,
+        PassThroughUnitFormation,
+        ThresholdEvolutionTrigger,
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    packet_out, _ = ThresholdEvolutionTrigger(threshold=2.0, constant=1.0).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.evolution_decisions == [False]
+    assert packet_out.trace["evolution_trigger"]["policy"] == "threshold"
+    assert packet_out.trace["evolution_trigger"]["scorer"] == "weighted_sum"
+    assert packet_out.trace["evolution_trigger"]["output_field"] == "evolution_decisions"
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
 
 
 def test_retrieval_honors_top_k() -> None:

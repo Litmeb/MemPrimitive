@@ -7,6 +7,7 @@ from typing import ClassVar, Final
 
 from .core import MemoryStore, Observation, Packet, Query, Readout
 from .interfaces import (
+    EvolutionTriggerModule,
     MemoryEvolutionModule,
     OrganizationModule,
     ReadoutModule,
@@ -23,6 +24,7 @@ _INGEST_SLOT_CHECK: Final[tuple[tuple[str, str, type], ...]] = (
     ("representation", "representation", RepresentationModule),
     ("write_trigger", "write_trigger", WriteTriggerModule),
     ("organization", "organization", OrganizationModule),
+    ("evolution_trigger", "evolution_trigger", EvolutionTriggerModule),
     ("memory_evolution", "memory_evolution", MemoryEvolutionModule),
 )
 _RECALL_SLOT_CHECK: Final[tuple[tuple[str, str, type], ...]] = (
@@ -51,6 +53,7 @@ class MemoryPipeline:
         representation: RepresentationModule,
         write_trigger: WriteTriggerModule,
         organization: OrganizationModule,
+        evolution_trigger: EvolutionTriggerModule,
         memory_evolution: MemoryEvolutionModule,
         retrieval: RetrievalModule,
         readout: ReadoutModule,
@@ -60,6 +63,7 @@ class MemoryPipeline:
         self.representation = representation
         self.write_trigger = write_trigger
         self.organization = organization
+        self.evolution_trigger = evolution_trigger
         self.memory_evolution = memory_evolution
         self.retrieval = retrieval
         self.readout = readout
@@ -87,6 +91,7 @@ class MemoryPipeline:
             self.representation,
             self.write_trigger,
             self.organization,
+            self.evolution_trigger,
             self.memory_evolution,
         ):
             packet, self.store = module.run(packet, self.store)

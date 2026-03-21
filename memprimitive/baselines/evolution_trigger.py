@@ -1,11 +1,11 @@
-"""Baseline write-trigger adapters built on the shared trigger family."""
+"""Baseline evolution-trigger adapters built on the shared trigger family."""
 
 from __future__ import annotations
 
 from typing import Final
 
 from ..core import MemoryStore, ModuleSpec, Packet
-from ..interfaces import WriteTriggerModule
+from ..interfaces import EvolutionTriggerModule
 
 from ._trigger_family import (
     AlwaysOpenGate,
@@ -22,17 +22,17 @@ from ._trigger_family import (
 )
 
 
-class _TriggerFamilyWriteAdapter(WriteTriggerModule):
-    """Slot adapter that writes trigger-family decisions into ``Packet.decisions``."""
+class _TriggerFamilyEvolutionAdapter(EvolutionTriggerModule):
+    """Slot adapter that writes trigger-family decisions into ``Packet.evolution_decisions``."""
 
-    trace_key = "write_trigger"
-    output_field = "decisions"
-    required_fields: tuple[str, ...] = ()
+    trace_key = "evolution_trigger"
+    output_field = "evolution_decisions"
+    required_fields = ("placements",)
     spec = ModuleSpec(
-        name="trigger_family_write_adapter",
-        slot="write_trigger",
-        input_requirements=("units",),
-        output_guarantees=("decisions",),
+        name="trigger_family_evolution_adapter",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
     )
 
     def __init__(self, *, runner: TriggerFamilyRunner, spec: ModuleSpec | None = None) -> None:
@@ -51,14 +51,14 @@ class _TriggerFamilyWriteAdapter(WriteTriggerModule):
         )
 
 
-class AlwaysWriteTrigger(_TriggerFamilyWriteAdapter):
-    """Mark every unit as eligible for write using the shared trigger family."""
+class AlwaysEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Mark every organized unit as eligible for evolution using the shared family."""
 
     spec = ModuleSpec(
-        name="always_write_trigger",
-        slot="write_trigger",
-        input_requirements=("units",),
-        output_guarantees=("decisions",),
+        name="always_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
     )
 
     def __init__(self) -> None:
@@ -72,14 +72,14 @@ class AlwaysWriteTrigger(_TriggerFamilyWriteAdapter):
         )
 
 
-class ThresholdWriteTrigger(_TriggerFamilyWriteAdapter):
-    """Constant-signal threshold baseline for the write trigger slot."""
+class ThresholdEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Constant-signal threshold baseline for the evolution trigger slot."""
 
     spec = ModuleSpec(
-        name="threshold_write_trigger",
-        slot="write_trigger",
-        input_requirements=("units",),
-        output_guarantees=("decisions",),
+        name="threshold_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
     )
 
     def __init__(self, *, threshold: float = 0.5, constant: float = 1.0) -> None:
@@ -93,19 +93,19 @@ class ThresholdWriteTrigger(_TriggerFamilyWriteAdapter):
         )
 
 
-def compose_write_trigger(
+def compose_evolution_trigger(
     *,
     name: str,
     signal_providers: tuple[SignalProvider, ...],
     scorer: ScoreAggregator,
     gate: Gate,
     policy: DecisionPolicy,
-    input_requirements: tuple[str, ...] = ("units",),
-    output_guarantees: tuple[str, ...] = ("decisions",),
-) -> WriteTriggerModule:
-    """Assemble a write-trigger module directly from trigger-family components."""
+    input_requirements: tuple[str, ...] = ("units", "placements"),
+    output_guarantees: tuple[str, ...] = ("evolution_decisions",),
+) -> EvolutionTriggerModule:
+    """Assemble an evolution-trigger module directly from trigger-family components."""
 
-    return _TriggerFamilyWriteAdapter(
+    return _TriggerFamilyEvolutionAdapter(
         runner=TriggerFamilyRunner(
             signal_providers=tuple(signal_providers),
             scorer=scorer,
@@ -114,12 +114,15 @@ def compose_write_trigger(
         ),
         spec=ModuleSpec(
             name=name,
-            slot="write_trigger",
+            slot="evolution_trigger",
             input_requirements=input_requirements,
             output_guarantees=output_guarantees,
         ),
     )
 
 
-BASELINE_SLOT: Final[str] = "write_trigger"
-BASELINE_CLASSES: Final[tuple[type[WriteTriggerModule], ...]] = (AlwaysWriteTrigger, ThresholdWriteTrigger)
+BASELINE_SLOT: Final[str] = "evolution_trigger"
+BASELINE_CLASSES: Final[tuple[type[EvolutionTriggerModule], ...]] = (
+    AlwaysEvolutionTrigger,
+    ThresholdEvolutionTrigger,
+)

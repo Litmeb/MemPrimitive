@@ -312,16 +312,20 @@ PlacementPlan = {
 
 ---
 
-## D. Write Trigger Interface
+## D. Trigger Interface
 
-它负责判断“要不要写”。
+它负责判断“某个后续动作要不要触发”。
 
-这是非常关键的独立模块，建议单列，不要和 update 混成一个字段。
+在当前 DSL 里，trigger 是一类可复用机制，而不是只能服务于单一 slot 的专属模块。
+同一 trigger family 可以分别实例化为：
+
+* `write_trigger`：填写 `decisions`，控制是否进入 organization / write 路径
+* `evolution_trigger`：填写 `evolution_decisions`，控制是否真正执行 memory evolution 副作用
 
 ### 接口定义
 
 ```python
-def should_write(
+def should_trigger(
     units: list[MemoryUnit],
     store: MemoryStore,
     context: AgentContext,
@@ -332,7 +336,7 @@ def should_write(
 
 返回：
 
-* 每个 unit 是否写入
+* 每个 unit 是否触发当前 slot 对应的动作
 * 每个决策的解释与分数
 
 例如输出：
@@ -347,6 +351,21 @@ def should_write(
   {"importance": 0.88, "reason": "task_outcome"}
 ]
 ```
+
+### Slot 化约定
+
+在 stage-1 runtime 中，trigger 机制被放在两个不同的 ingest slot：
+
+```text
+unit_formation -> representation -> write_trigger -> organization -> evolution_trigger -> memory_evolution
+```
+
+对应的数据面约定是：
+
+* `write_trigger` 写 `Packet.decisions`
+* `evolution_trigger` 写 `Packet.evolution_decisions`
+* `memory_evolution` 优先读取 `evolution_decisions`
+* 若 `evolution_decisions is None`，则回退使用 `decisions`
 
 ### 这样设计的好处
 
@@ -569,6 +588,9 @@ class MemoryModule:
 Packet = {
     "observation": Observation | None,
     "units": list[MemoryUnit] | None,
+    "decisions": list[bool] | None,
+    "placements": list[PlacementPlan] | None,
+    "evolution_decisions": list[bool] | None,
     "query": Query | None,
     "retrieved": RetrievedContext | None,
     "readout": dict | None,
@@ -585,8 +607,10 @@ packet = {"observation": obs, "trace": {}}
 
 packet, store, aux1 = unit_formation(packet, store, context, cfg1)
 packet, store, aux2 = represent(packet, store, context, cfg2)
-packet, store, aux3 = organize(packet, store, context, cfg3)
-packet, store, aux4 = write(packet, store, context, cfg4)
+packet, store, aux3 = write_trigger(packet, store, context, cfg3)
+packet, store, aux4 = organize(packet, store, context, cfg4)
+packet, store, aux5 = evolution_trigger(packet, store, context, cfg5)
+packet, store, aux6 = memory_evolution(packet, store, context, cfg6)
 ...
 ```
 
@@ -722,6 +746,7 @@ MemoryConfig(
     representation = HybridRep(embed=True, entity_link=True),
     write_trigger = ImportanceNoveltyGate(),
     organization = EntityTemporalOrganizer(),
+    evolution_trigger = ImportanceNoveltyGate(),
     update = MergeOrAppend(),
     retrieval = HybridRetriever(),
     readout = StructuredReadout(),
@@ -739,7 +764,8 @@ units = HybridRep(units)
 decisions = ImportanceNoveltyGate(units, store)
 selected_units = filter_by_decision(units, decisions)
 placement = EntityTemporalOrganizer(selected_units, store)
-store = MergeOrAppend(selected_units, placement, store)
+evolution_decisions = ImportanceNoveltyGate(selected_units, store)
+store = MergeOrAppend(selected_units, placement, store, evolution_decisions)
 store = ImportanceDecayPruner(store)
 ```
 

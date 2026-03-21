@@ -63,6 +63,7 @@ def test_memory_pipeline_rejects_wrong_abstract_type_at_slot() -> None:
             representation=m["representation"],
             write_trigger=m["write_trigger"],
             organization=m["organization"],
+            evolution_trigger=m["evolution_trigger"],
             memory_evolution=m["memory_evolution"],
             retrieval=m["retrieval"],
             readout=m["retrieval"],
@@ -85,10 +86,75 @@ def test_memory_pipeline_rejects_wrong_module_spec_slot() -> None:
             representation=m["representation"],
             write_trigger=m["write_trigger"],
             organization=m["organization"],
+            evolution_trigger=m["evolution_trigger"],
             memory_evolution=m["memory_evolution"],
             retrieval=MislabeledRetrieval(),
             readout=m["readout"],
         )
+
+
+def test_memory_pipeline_rejects_write_trigger_instance_in_evolution_trigger_slot() -> None:
+    from memprimitive.baselines import AlwaysWriteTrigger
+
+    m = instantiate_default_baseline_modules(top_k=2)
+    with pytest.raises(TypeError, match="EvolutionTriggerModule"):
+        MemoryPipeline(
+            unit_formation=m["unit_formation"],
+            representation=m["representation"],
+            write_trigger=m["write_trigger"],
+            organization=m["organization"],
+            evolution_trigger=AlwaysWriteTrigger(),
+            memory_evolution=m["memory_evolution"],
+            retrieval=m["retrieval"],
+            readout=m["readout"],
+        )
+
+
+def test_default_pipeline_includes_evolution_trigger_trace_and_preserves_behavior() -> None:
+    pipeline = create_baseline_pipeline(top_k=2)
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert "evolution_trigger" in packet.trace
+    assert pipeline.store.count() == 1
+
+
+def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() -> None:
+    from dataclasses import replace
+
+    from memprimitive.baselines import (
+        AlwaysEvolutionTrigger,
+        AlwaysWriteTrigger,
+        AppendOnlyEvolution,
+        AppendOrganization,
+        BasicRepresentation,
+        ConcatenateReadout,
+        PassThroughUnitFormation,
+        RecencyRetrieval,
+    )
+    from memprimitive.interfaces import EvolutionTriggerModule
+
+    class PartialEvolutionTrigger(AlwaysEvolutionTrigger):
+        def run(self, packet: Packet, store):
+            packet, store = super().run(packet, store)
+            return replace(packet, evolution_decisions=[False for _ in packet.units], trace=packet.trace), store
+
+    pipeline = MemoryPipeline(
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=AppendOrganization(),
+        evolution_trigger=PartialEvolutionTrigger(),
+        memory_evolution=AppendOnlyEvolution(),
+        retrieval=RecencyRetrieval(top_k=2),
+        readout=ConcatenateReadout(),
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert packet.decisions == [True]
+    assert packet.placements is not None
+    assert packet.evolution_decisions == [False]
+    assert pipeline.store.count() == 0
 
 
 def test_every_registered_baseline_combination_runs_ingest_and_recall() -> None:

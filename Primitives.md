@@ -152,15 +152,22 @@ Store 拓扑决定了整个系统的骨架，是最高层的结构性选择。�
 
 ---
 
-## C. Write Trigger — 写入决策
+## C. Trigger — 触发决策
 
-**核心问题**：什么时候该把 unit 写入 store？
+**核心问题**：什么时候该触发某个 memory 生命周期动作？
 
-这里不再把写入决策建模成很多命名 trigger，而是统一为一个**决策框架**：
+这里不再把 trigger 建模成很多彼此孤立的命名模块，而是统一为一个**可复用决策框架**：
 
 ```text
-WriteTrigger = signals + scorer + gates + policy
+Trigger = signals + scorer + gates + policy
 ```
+
+在 stage-1 runtime 中，`Trigger` 机制可复用于多个 slot：
+
+* `write_trigger`：控制 unit 是否进入 organization / write 路径
+* `evolution_trigger`：控制 unit 是否真正执行 append / merge / rewrite 等 memory evolution
+
+也就是说，slot 是分开的，但 trigger family 可以复用；例如同一个 `always` / `threshold` / `on_event` 机制可以分别实例化成 write trigger 和 evolution trigger。
 
 
 | 组件        | 含义                         | 典型取值                                                                                                         |
@@ -205,13 +212,13 @@ WriteTrigger = signals + scorer + gates + policy
 
 | policy             | 含义             | 关键参数        |
 | ------------------ | -------------- | ----------- |
-| `always`           | 无条件写入          | —           |
-| `never`            | 从不写入           | —           |
-| `threshold`        | score 超过阈值时写入  | threshold   |
+| `always`           | 无条件触发          | —           |
+| `never`            | 从不触发           | —           |
+| `threshold`        | score 超过阈值时触发  | threshold   |
 | `top_k_per_window` | 每个窗口只保留 top-k  | k, window   |
 | `sample_by_score`  | 按 score 进行概率采样 | temperature |
-| `boolean_gate`     | gates 满足时写入    | gate_logic  |
-| `explicit_only`    | 只有显式工具调用才写入    | tool_names  |
+| `boolean_gate`     | gates 满足时触发    | gate_logic  |
+| `explicit_only`    | 只有显式工具调用才触发    | tool_names  |
 
 
 ### 常见 gate
@@ -219,10 +226,10 @@ WriteTrigger = signals + scorer + gates + policy
 
 | gate                           | 含义                 |
 | ------------------------------ | ------------------ |
-| `on_event("task_failure")`     | 特定事件发生时允许写入        |
-| `not_duplicate(threshold=...)` | 重复风险过高时阻止写入        |
-| `tool_called("memory_write")`  | 只有 agent 显式调用工具时写入 |
-| `predicate(...)`               | 命中规则条件时允许写入        |
+| `on_event("task_failure")`     | 特定事件发生时允许触发        |
+| `not_duplicate(threshold=...)` | 重复风险过高时阻止触发        |
+| `tool_called("memory_write")`  | 只有 agent 显式调用工具时触发 |
+| `predicate(...)`               | 命中规则条件时允许触发        |
 
 
 ### 变异轴
@@ -230,6 +237,7 @@ WriteTrigger = signals + scorer + gates + policy
 - **信号选择**：看哪些 signals
 - **评分方式**：单信号 / 加权融合 / 规则 / LLM
 - **决策策略**：阈值 / 采样 / 显式调用 / gate
+- **作用位置**：同一 trigger family 可用于 `write_trigger` 或 `evolution_trigger`
 
 ### 建模说明
 
@@ -255,6 +263,21 @@ WriteTrigger = signals + scorer + gates + policy
 | `SurpriseGated`        | `signals={surprise}, scorer=identity, policy=threshold`                |
 | `SampledWrite`         | `signals={...}, scorer=..., policy=sample_by_score`                    |
 | `DuplicateAwareWrite`  | `gates={not_duplicate(...)}, policy=boolean_gate`                      |
+
+### Stage-1 Runtime Mapping
+
+在当前 `memprimitive` 实现中，ingest 顺序为：
+
+```text
+unit_formation -> representation -> write_trigger -> organization -> evolution_trigger -> memory_evolution
+```
+
+对应的数据面约定是：
+
+* `write_trigger` 产出 `Packet.decisions`
+* `organization` 继续使用 `decisions`
+* `evolution_trigger` 产出 `Packet.evolution_decisions`
+* `memory_evolution` 优先读取 `evolution_decisions`，为空时回退到 `decisions`
 
 
 ---

@@ -20,6 +20,7 @@ New implementations in this package should follow the same pattern so readers ca
 | `representation.py`   | `representation`         | `BasicRepresentation`      |
 | `write_trigger.py`    | `write_trigger`          | `AlwaysWriteTrigger`       |
 | `organization.py`     | `organization`           | `AppendOrganization`       |
+| `evolution_trigger.py`| `evolution_trigger`      | `AlwaysEvolutionTrigger`   |
 | `memory_evolution.py` | `memory_evolution`       | `AppendOnlyEvolution`      |
 | `retrieval.py`        | `retrieval`              | `RecencyRetrieval`         |
 | `readout.py`          | `readout`                | `ConcatenateReadout`       |
@@ -63,13 +64,13 @@ Swapping modules across slots or reusing the wrong ABC fails fast with `TypeErro
 
 ## Public entry points
 
-- **`__init__.py`** re-exports all baseline **classes** for `from memprimitive.baselines import ...`.
-- **`simple.py`** re-exports the **same** class symbols for backward compatibility. Older code may use `from memprimitive.baselines.simple import RecencyRetrieval`; new code should prefer the package root or the slot module.
+- **`__init__.py`** exposes all classes listed in per-file **`BASELINE_CLASSES`** (via `registry.baseline_classes_by_slot()`); no manual symbol list.
+- **`simple.py`** mirrors the parent package namespace (`sys.modules[__package__]`) for backward compatibility. Older code may use `from memprimitive.baselines.simple import RecencyRetrieval`; new code should prefer the package root or the slot module.
 - **Registry** is imported as `from memprimitive.baselines.registry import ...` (not duplicated in `__init__.__all__`).
 
 ## Extension guidelines
 
-1. **Add a new implementation** for an existing slot: implement the class in that slot’s file, append it to **`BASELINE_CLASSES`**, add the class name to `__init__.py` and `simple.py` `__all__`. Follow the **Class documentation convention** above.
+1. **Add a new implementation** for an existing slot: implement the class in that slot’s file and append it to **`BASELINE_CLASSES`** (package exports update automatically). Follow the **Class documentation convention** above.
 2. **Add a new primitive slot** (future DSL versions): extend `memprimitive.interfaces`, add `pipeline_slots` and `MemoryPipeline` validation, add a new file with `BASELINE_SLOT` / `BASELINE_CLASSES`.
 3. Keep **cross-slot helpers** minimal; if something is shared by many slots, consider `_trace.py` or a small `_util.py` rather than growing a second “god” module.
 
@@ -78,4 +79,3 @@ Swapping modules across slots or reusing the wrong ABC fails fast with `TypeErro
 - `create_baseline_pipeline` builds from `registry.instantiate_default_baseline_modules`; it does not depend on `simple.py`.
 - Tests that import from `memprimitive.baselines` are unchanged.
 - Any external code importing `memprimitive.baselines.simple` continues to work via the re-export layer.
-

@@ -29,6 +29,10 @@ class WriteTriggerModule(PrimitiveModule):
     pass
 
 
+class EvolutionTriggerModule(PrimitiveModule):
+    pass
+
+
 class OrganizationModule(PrimitiveModule):
     pass
 

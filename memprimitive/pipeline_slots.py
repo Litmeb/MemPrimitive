@@ -13,6 +13,7 @@ INGEST_SLOTS: Final[tuple[str, ...]] = (
     "representation",
     "write_trigger",
     "organization",
+    "evolution_trigger",
     "memory_evolution",
 )
 
