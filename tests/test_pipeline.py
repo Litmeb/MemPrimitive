@@ -7,7 +7,7 @@ from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
     iter_baseline_pipeline_instances,
 )
-from memprimitive.core import ModuleSpec, Packet
+from memprimitive.core import MemoryStore, ModuleSpec, Packet, StoreLayerSpec, StoreTopology
 from memprimitive.interfaces import RetrievalModule
 from memprimitive.pipeline import MemoryPipeline
 
@@ -168,3 +168,24 @@ def test_every_registered_baseline_combination_runs_ingest_and_recall() -> None:
         readout = pipeline.recall(Query(text="combinatorial"))
         assert isinstance(readout.text, str)
         assert pipeline.store.count() == 1
+
+
+def test_pipeline_accepts_custom_topology_store_without_breaking_baseline_flow() -> None:
+    modules = instantiate_default_baseline_modules(top_k=2)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic", theme="episodic", indices=("temporal",)),
+            ]
+        )
+    )
+    pipeline = MemoryPipeline(store=store, **modules)
+
+    pipeline.ingest(Observation(text="Alice likes topology-aware stores.", source="dialogue"))
+    readout = pipeline.recall(Query(text="topology"))
+
+    assert readout.text
+    assert pipeline.store.topology.layer_count == 2
+    assert pipeline.store.count("default") == 1
+    assert pipeline.store.count("episodic") == 0

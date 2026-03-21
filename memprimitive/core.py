@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Iterable
 from uuid import uuid4
 
 
@@ -23,6 +23,30 @@ def _require_non_empty_text(value: str, field_name: str) -> str:
 
 def _default_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex}"
+
+
+_VALID_LAYER_SHAPES = frozenset({"Flat", "Graph"})
+_VALID_LAYER_INDICES = frozenset({"vector", "entity", "temporal", "keyword", "graph", "tag"})
+_VALID_LAYER_CAPACITIES = frozenset({"token_limited", "sliding_window", "unlimited"})
+
+
+def _require_choice(value: str, field_name: str, allowed: frozenset[str]) -> str:
+    normalized = _require_non_empty_text(value, field_name)
+    if normalized not in allowed:
+        options = ", ".join(sorted(allowed))
+        raise ValueError(f"{field_name} must be one of: {options}.")
+    return normalized
+
+
+def _normalize_indices(indices: Iterable[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_index in indices:
+        index_name = _require_choice(raw_index, "StoreLayerSpec.indices", _VALID_LAYER_INDICES)
+        if index_name not in seen:
+            seen.add(index_name)
+            normalized.append(index_name)
+    return tuple(normalized)
 
 
 @dataclass(slots=True)
@@ -148,6 +172,105 @@ class ModuleSpec:
         _require_non_empty_text(self.slot, "ModuleSpec.slot")
 
 
+@dataclass(slots=True, frozen=True)
+class StoreLayerSpec:
+    """Declarative spec for one logical memory layer."""
+
+    name: str
+    theme: str = "working"
+    shape: str = "Flat"
+    indices: tuple[str, ...] = ()
+    capacity: str = "unlimited"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _require_non_empty_text(self.name, "StoreLayerSpec.name"))
+        object.__setattr__(self, "theme", _require_non_empty_text(self.theme, "StoreLayerSpec.theme"))
+        object.__setattr__(self, "shape", _require_choice(self.shape, "StoreLayerSpec.shape", _VALID_LAYER_SHAPES))
+        object.__setattr__(self, "indices", _normalize_indices(self.indices))
+        object.__setattr__(
+            self,
+            "capacity",
+            _require_choice(self.capacity, "StoreLayerSpec.capacity", _VALID_LAYER_CAPACITIES),
+        )
+
+    def supports_index(self, index_name: str) -> bool:
+        normalized = _require_choice(index_name, "index_name", _VALID_LAYER_INDICES)
+        return normalized in self.indices
+
+
+@dataclass(slots=True, frozen=True)
+class StoreTopology:
+    """Declarative topology for the stage-1 in-memory store."""
+
+    layers: tuple[StoreLayerSpec, ...]
+
+    def __post_init__(self) -> None:
+        if not self.layers:
+            raise ValueError("StoreTopology.layers must contain at least one layer.")
+        normalized_layers = tuple(self.layers)
+        names: set[str] = set()
+        for layer in normalized_layers:
+            if layer.name in names:
+                raise ValueError(f"StoreTopology.layers contains duplicate layer name: {layer.name!r}.")
+            names.add(layer.name)
+        object.__setattr__(self, "layers", normalized_layers)
+
+    @classmethod
+    def single_flat_default(cls, layer_name: str = "default", theme: str = "working") -> "StoreTopology":
+        return cls(layers=(StoreLayerSpec(name=layer_name, theme=theme),))
+
+    @classmethod
+    def from_layers(cls, layers: Iterable[StoreLayerSpec]) -> "StoreTopology":
+        return cls(layers=tuple(layers))
+
+    @property
+    def layer_count(self) -> int:
+        return len(self.layers)
+
+    @property
+    def layer_names(self) -> tuple[str, ...]:
+        return tuple(layer.name for layer in self.layers)
+
+    def has_layer(self, name: str) -> bool:
+        normalized = _require_non_empty_text(name, "layer")
+        return any(layer.name == normalized for layer in self.layers)
+
+    def get_layer(self, name: str) -> StoreLayerSpec:
+        normalized = _require_non_empty_text(name, "layer")
+        for layer in self.layers:
+            if layer.name == normalized:
+                return layer
+        raise KeyError(f"Layer {normalized!r} is not declared in the store topology.")
+
+    def layer_shape(self, name: str) -> str:
+        return self.get_layer(name).shape
+
+    def layer_supports_index(self, name: str, index_name: str) -> bool:
+        return self.get_layer(name).supports_index(index_name)
+
+    def has_shape(self, shape: str) -> bool:
+        normalized = _require_choice(shape, "shape", _VALID_LAYER_SHAPES)
+        return any(layer.shape == normalized for layer in self.layers)
+
+    def has_index(self, index_name: str) -> bool:
+        normalized = _require_choice(index_name, "index_name", _VALID_LAYER_INDICES)
+        return any(normalized in layer.indices for layer in self.layers)
+
+    def has_graph_layer(self) -> bool:
+        return self.has_shape("Graph")
+
+    def has_vector_layer(self) -> bool:
+        return self.has_index("vector")
+
+    def has_keyword_layer(self) -> bool:
+        return self.has_index("keyword")
+
+    def with_added_layer(self, spec: StoreLayerSpec) -> "StoreTopology":
+        if self.has_layer(spec.name):
+            raise ValueError(f"Layer {spec.name!r} is already declared in the store topology.")
+        return StoreTopology(layers=(*self.layers, spec))
+
+
 @dataclass(slots=True)
 class Packet:
     """Shared pipeline IR. Each stage reads and fills specific fields.
@@ -173,13 +296,50 @@ class Packet:
 class MemoryStore:
     """Minimal in-memory layered store for stage 1."""
 
-    layers: dict[str, list[MemoryRecord]] = field(default_factory=lambda: {"default": []})
+    topology: StoreTopology = field(default_factory=StoreTopology.single_flat_default)
+    layers: dict[str, list[MemoryRecord]] = field(default_factory=dict)
+    allow_topology_extend: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     _next_sequence_id: int = 1
 
-    def ensure_layer(self, layer: str) -> None:
+    def __post_init__(self) -> None:
+        self._synchronize_layers_with_topology()
+
+    def _synchronize_layers_with_topology(self) -> None:
+        normalized_layers: dict[str, list[MemoryRecord]] = {}
+        for layer_spec in self.topology.layers:
+            existing_records = self.layers.get(layer_spec.name, [])
+            normalized_layers[layer_spec.name] = list(existing_records)
+
+        extra_layer_names = [name for name in self.layers if name not in normalized_layers]
+        if extra_layer_names:
+            if not self.allow_topology_extend:
+                extras = ", ".join(repr(name) for name in extra_layer_names)
+                raise ValueError(
+                    "MemoryStore.layers contains undeclared topology layers: "
+                    f"{extras}. Pass allow_topology_extend=True or declare them in topology."
+                )
+            for layer_name in extra_layer_names:
+                self.topology = self.topology.with_added_layer(StoreLayerSpec(name=layer_name))
+                normalized_layers[layer_name] = list(self.layers[layer_name])
+
+        self.layers = normalized_layers
+
+    def ensure_layer(self, layer: str, *, allow_create: bool | None = None, theme: str = "working") -> None:
         layer_name = _require_non_empty_text(layer, "layer")
-        self.layers.setdefault(layer_name, [])
+        if self.topology.has_layer(layer_name):
+            self.layers.setdefault(layer_name, [])
+            return
+
+        should_create = self.allow_topology_extend if allow_create is None else allow_create
+        if not should_create:
+            raise ValueError(
+                f"Layer {layer_name!r} is not declared in the store topology. "
+                "Declare it in topology or call ensure_layer(..., allow_create=True)."
+            )
+
+        self.topology = self.topology.with_added_layer(StoreLayerSpec(name=layer_name, theme=theme))
+        self.layers[layer_name] = []
 
     def append(self, record: MemoryRecord) -> None:
         self.ensure_layer(record.layer)
@@ -193,14 +353,34 @@ class MemoryStore:
     def iter_records(self, layer: str | None = None) -> list[MemoryRecord]:
         if layer is None:
             records: list[MemoryRecord] = []
-            for layer_records in self.layers.values():
-                records.extend(layer_records)
+            for layer_name in self.topology.layer_names:
+                records.extend(self.layers[layer_name])
             return list(records)
-        self.ensure_layer(layer)
-        return list(self.layers[layer])
+        layer_name = _require_non_empty_text(layer, "layer")
+        if not self.topology.has_layer(layer_name):
+            raise ValueError(f"Layer {layer_name!r} is not declared in the store topology.")
+        return list(self.layers[layer_name])
 
     def count(self, layer: str | None = None) -> int:
         return len(self.iter_records(layer))
 
     def is_empty(self) -> bool:
         return self.count() == 0
+
+    def has_layer(self, layer: str) -> bool:
+        return self.topology.has_layer(layer)
+
+    def layer_shape(self, layer: str) -> str:
+        return self.topology.layer_shape(layer)
+
+    def layer_supports_index(self, layer: str, index_name: str) -> bool:
+        return self.topology.layer_supports_index(layer, index_name)
+
+    def has_graph_layer(self) -> bool:
+        return self.topology.has_graph_layer()
+
+    def has_vector_layer(self) -> bool:
+        return self.topology.has_vector_layer()
+
+    def has_keyword_layer(self) -> bool:
+        return self.topology.has_keyword_layer()

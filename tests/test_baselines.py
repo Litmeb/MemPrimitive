@@ -6,7 +6,7 @@ from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
     registered_baseline_class_names,
 )
-from memprimitive.core import MemoryStore, Observation, Packet, Query, RetrievedSet
+from memprimitive.core import MemoryStore, Observation, Packet, Query, RetrievedSet, StoreLayerSpec, StoreTopology
 from memprimitive.pipeline_slots import PRE_EVOLUTION_SLOTS
 
 
@@ -424,6 +424,61 @@ def test_retrieval_does_not_mutate_store() -> None:
     _, store_after = RecencyRetrieval(top_k=1).run(Packet(query=Query(text="Alice")), store)
 
     assert [record.record_id for record in store_after.iter_records()] == before_ids
+
+
+def test_append_only_evolution_can_write_into_declared_non_default_topology_layer() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, AppendOrganization
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="default"),
+            StoreLayerSpec(name="episodic", theme="episodic", indices=("temporal",)),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    packet, store = _stored_pipeline_packet("Alice likes tea.", store)
+    packet, store = AppendOrganization(target_layer="episodic").run(packet, store)
+
+    _, updated_store = AppendOnlyEvolution().run(packet, store)
+
+    assert updated_store.count("episodic") == 1
+    assert updated_store.iter_records("episodic")[0].layer == "episodic"
+
+
+def test_retrieval_can_target_declared_topology_layer() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution, AppendOrganization, RecencyRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="default"),
+            StoreLayerSpec(name="episodic", theme="episode"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    for text in ("episodic first", "episodic second"):
+        packet, store = _stored_pipeline_packet(text, store)
+        packet, store = AppendOrganization(target_layer="episodic").run(packet, store)
+        _, store = AppendOnlyEvolution().run(packet, store)
+
+    packet_out, _ = RecencyRetrieval(top_k=1, layer="episodic").run(Packet(query=Query(text="episodic")), store)
+
+    assert packet_out.retrieved is not None
+    assert [record.text for record in packet_out.retrieved.items] == ["episodic second"]
+
+
+def test_store_capability_queries_reflect_declared_topology() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="working", indices=("keyword",)),
+                StoreLayerSpec(name="graph", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+
+    assert store.has_graph_layer() is True
+    assert store.has_keyword_layer() is True
+    assert store.layer_supports_index("graph", "graph") is True
 
 
 def test_baselines_simple_reexports_match_package_exports() -> None:

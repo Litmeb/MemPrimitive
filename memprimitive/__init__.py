@@ -11,6 +11,8 @@ from .core import (
     Query,
     Readout,
     RetrievedSet,
+    StoreLayerSpec,
+    StoreTopology,
 )
 from .pipeline import MemoryPipeline, create_baseline_pipeline
 
@@ -26,5 +28,7 @@ __all__ = [
     "Query",
     "Readout",
     "RetrievedSet",
+    "StoreLayerSpec",
+    "StoreTopology",
     "create_baseline_pipeline",
 ]
