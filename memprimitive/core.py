@@ -106,6 +106,7 @@ class MemoryRecord:
     layer: str
     text: str
     timestamp: str
+    embedding: list[float] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -114,16 +115,19 @@ class MemoryRecord:
         self.layer = _require_non_empty_text(self.layer, "MemoryRecord.layer")
         self.text = _require_non_empty_text(self.text, "MemoryRecord.text")
         self.timestamp = _require_non_empty_text(self.timestamp, "MemoryRecord.timestamp")
+        self.embedding = None if self.embedding is None else [float(value) for value in self.embedding]
 
     @classmethod
     def from_unit(cls, unit: MemoryUnit, layer: str, sequence_id: int) -> "MemoryRecord":
         representation_summary = _representation_summary_from_unit(unit)
+        embedding = None if unit.embedding is None else [float(value) for value in unit.embedding]
         return cls(
             record_id=f"rec-{sequence_id}",
             unit_id=unit.unit_id,
             layer=layer,
             text=unit.text,
             timestamp=unit.timestamp,
+            embedding=embedding,
             metadata={
                 **unit.metadata,
                 "unit_type": unit.unit_type,
@@ -174,10 +178,12 @@ class Query:
     text: str
     query_id: str = field(default_factory=lambda: _default_id("query"))
     timestamp: str = field(default_factory=_utc_now_iso)
+    embedding: list[float] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.text = _require_non_empty_text(self.text, "Query.text")
+        self.embedding = None if self.embedding is None else [float(value) for value in self.embedding]
 
 
 @dataclass(slots=True)

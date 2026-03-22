@@ -6,7 +6,7 @@ from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
     registered_baseline_class_names,
 )
-from memprimitive.core import MemoryStore, Observation, Packet, Query, RetrievedSet, StoreLayerSpec, StoreTopology
+from memprimitive.core import MemoryRecord, MemoryStore, Observation, Packet, Query, RetrievedSet, StoreLayerSpec, StoreTopology
 from memprimitive.pipeline_slots import PRE_EVOLUTION_SLOTS
 
 
@@ -416,6 +416,13 @@ def test_retrieval_rejects_non_positive_top_k() -> None:
         RecencyRetrieval(top_k=0)
 
 
+def test_embedding_similarity_retrieval_rejects_non_positive_top_k() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    with pytest.raises(ValueError, match="top_k > 0"):
+        EmbeddingSimilarityRetrieval(top_k=0)
+
+
 def test_retrieval_on_empty_store_returns_empty_retrieved_set() -> None:
     from memprimitive.baselines import RecencyRetrieval
 
@@ -495,6 +502,215 @@ def test_retrieval_does_not_mutate_store() -> None:
     _, store_after = RecencyRetrieval(top_k=1).run(Packet(query=Query(text="Alice")), store)
 
     assert [record.record_id for record in store_after.iter_records()] == before_ids
+
+
+def test_embedding_similarity_retrieval_ranks_records_by_query_embedding() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    records = [
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="closest",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"representation": {"embedding": {"dim": 2}}},
+        ),
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="default",
+            text="second",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[0.8, 0.2],
+            metadata={"representation": {"embedding": {"dim": 2}}},
+        ),
+        MemoryRecord(
+            record_id="rec-3",
+            unit_id="unit-3",
+            layer="default",
+            text="opposite",
+            timestamp="2026-01-01T00:00:02+00:00",
+            embedding=[-1.0, 0.0],
+            metadata={"representation": {"embedding": {"dim": 2}}},
+        ),
+    ]
+    for record in records:
+        store.append(record)
+
+    packet_out, store_after = EmbeddingSimilarityRetrieval(top_k=2).run(
+        Packet(query=Query(text="ignored", embedding=[1.0, 0.0])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1", "rec-2"]
+    assert packet_out.retrieved.scores[0]["strategy"] == "embedding_similarity"
+    assert packet_out.retrieved.scores[0]["record_id"] == "rec-1"
+    assert packet_out.retrieved.scores[0]["rank"] == 1
+    assert packet_out.retrieved.scores[0]["score"] >= packet_out.retrieved.scores[1]["score"]
+    assert packet_out.trace["retrieval"]["reused_query_embedding"] is True
+    assert [record.record_id for record in store_after.iter_records()] == [record.record_id for record in store.iter_records()]
+
+
+def test_embedding_similarity_retrieval_computes_and_caches_query_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="alpha",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"representation": {"embedding": {"dim": 2}}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="default",
+            text="beta",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[0.0, 1.0],
+            metadata={"representation": {"embedding": {"dim": 2}}},
+        )
+    )
+
+    def _fake_embed_text(self, text: str) -> list[float]:
+        assert text == "alpha query"
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(EmbeddingSimilarityRetrieval, "_embed_text", _fake_embed_text)
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(top_k=1).run(Packet(query=Query(text="alpha query")), store)
+
+    assert packet_out.query is not None
+    assert packet_out.query.embedding == [1.0, 0.0]
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.trace["retrieval"]["reused_query_embedding"] is False
+    assert packet_out.trace["retrieval"]["embedding_candidate_count"] == 2
+
+
+def test_embedding_similarity_retrieval_uses_record_embedding_not_metadata_summary() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="metadata-only",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=None,
+            metadata={"representation": {"embedding": {"dim": 2}}},
+        )
+    )
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(top_k=1).run(
+        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+    assert packet_out.trace["retrieval"]["candidate_count"] == 1
+    assert packet_out.trace["retrieval"]["embedding_candidate_count"] == 0
+
+
+def test_embedding_similarity_retrieval_skips_missing_and_mismatched_embeddings() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="usable",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="default",
+            text="missing",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=None,
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-3",
+            unit_id="unit-3",
+            layer="default",
+            text="wrong-dim",
+            timestamp="2026-01-01T00:00:02+00:00",
+            embedding=[1.0, 0.0, 0.0],
+        )
+    )
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(top_k=3).run(
+        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.trace["retrieval"]["embedding_candidate_count"] == 1
+    assert packet_out.trace["retrieval"]["skipped_dim_mismatch_count"] == 1
+
+
+def test_embedding_similarity_retrieval_can_target_declared_topology_layer() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="default"),
+            StoreLayerSpec(name="episodic", theme="episode"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="default",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="episodic",
+            text="episodic-best",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(top_k=1, layer="episodic").run(
+        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2"]
+    assert packet_out.trace["retrieval"]["candidate_count"] == 1
 
 
 def test_append_only_evolution_can_write_into_declared_non_default_topology_layer() -> None:

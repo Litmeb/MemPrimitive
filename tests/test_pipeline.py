@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from memprimitive import Observation, Query, create_baseline_pipeline
+from memprimitive.baselines import RecencyRetrieval
 from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
     iter_baseline_pipeline_instances,
@@ -39,6 +40,12 @@ def test_repeated_ingests_accumulate_records_in_store() -> None:
     pipeline.ingest(Observation(text="Charlie likes cocoa.", source="dialogue"))
 
     assert pipeline.store.count() == 3
+
+
+def test_create_baseline_pipeline_keeps_recency_retrieval_as_default() -> None:
+    pipeline = create_baseline_pipeline(top_k=2)
+
+    assert isinstance(pipeline.retrieval, RecencyRetrieval)
 
 
 def test_round_trip_demo_scenario_works_with_baseline_pipeline() -> None:

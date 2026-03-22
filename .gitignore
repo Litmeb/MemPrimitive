@@ -11,6 +11,8 @@ __pycache__/
 .eggs/
 dist/
 build/
+.cursor/
+.vscode/
 
 # Environment and secrets
 .env
@@ -19,7 +21,5 @@ build/
 # Local data, logs, exports (JSON / JSONL)
 *.json
 *.jsonl
-
-# If you need to commit specific JSON, add exceptions below, e.g.:
-# !package.json
-# !some-config.json
+*.mdc
+*.yml

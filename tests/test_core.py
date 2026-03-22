@@ -21,6 +21,18 @@ def test_query_rejects_empty_text() -> None:
         raise AssertionError("Query should reject empty text.")
 
 
+def test_query_embedding_defaults_to_none() -> None:
+    query = Query(text="alice")
+
+    assert query.embedding is None
+
+
+def test_query_embedding_is_normalized_to_float_list() -> None:
+    query = Query(text="alice", embedding=[1, "2.5", 3.0])
+
+    assert query.embedding == [1.0, 2.5, 3.0]
+
+
 def test_memory_store_starts_with_empty_default_layer() -> None:
     store = MemoryStore()
 
@@ -182,7 +194,7 @@ def test_memory_unit_representation_fields_have_stable_defaults() -> None:
     assert unit.description is None
 
 
-def test_memory_record_from_unit_carries_representation_summary_without_raw_embedding_duplication() -> None:
+def test_memory_record_from_unit_carries_embedding_vector_and_representation_dim_summary() -> None:
     unit = MemoryUnit(
         text="Alice likes tea.",
         representation_elements=("text", "embedding", "entities"),
@@ -193,6 +205,7 @@ def test_memory_record_from_unit_carries_representation_summary_without_raw_embe
 
     record = MemoryRecord.from_unit(unit=unit, layer="default", sequence_id=1)
 
+    assert record.embedding == [0.1, 0.2, 0.3]
     assert record.metadata["representation"]["elements"] == ["text", "embedding", "entities"]
     assert record.metadata["representation"]["normalized_text"] == "alice likes tea."
     assert record.metadata["representation"]["entities"] == ["Alice"]
