@@ -122,6 +122,34 @@ def test_default_pipeline_includes_evolution_trigger_trace_and_preserves_behavio
     packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
 
     assert "evolution_trigger" in packet.trace
+    assert packet.trace["evolution_trigger"]["policy"] == "never"
+    assert packet.evolution_decisions == [False]
+    assert pipeline.store.count() == 1
+
+
+def test_memory_pipeline_defaults_optional_evolution_modules() -> None:
+    from memprimitive.baselines import (
+        AlwaysWriteTrigger,
+        AppendOrganization,
+        BasicRepresentation,
+        ConcatenateReadout,
+        PassThroughUnitFormation,
+        RecencyRetrieval,
+    )
+
+    pipeline = MemoryPipeline(
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=AppendOrganization(),
+        retrieval=RecencyRetrieval(top_k=2),
+        readout=ConcatenateReadout(),
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert packet.evolution_decisions == [False]
+    assert packet.trace["evolution_trigger"]["policy"] == "never"
     assert pipeline.store.count() == 1
 
 
@@ -129,18 +157,17 @@ def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() 
     from dataclasses import replace
 
     from memprimitive.baselines import (
-        AlwaysEvolutionTrigger,
         AlwaysWriteTrigger,
         AppendOnlyEvolution,
         AppendOrganization,
         BasicRepresentation,
         ConcatenateReadout,
+        NeverEvolutionTrigger,
         PassThroughUnitFormation,
         RecencyRetrieval,
     )
-    from memprimitive.interfaces import EvolutionTriggerModule
 
-    class PartialEvolutionTrigger(AlwaysEvolutionTrigger):
+    class PartialEvolutionTrigger(NeverEvolutionTrigger):
         def run(self, packet: Packet, store):
             packet, store = super().run(packet, store)
             return replace(packet, evolution_decisions=[False for _ in packet.units], trace=packet.trace), store
@@ -161,7 +188,21 @@ def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() 
     assert packet.decisions == [True]
     assert packet.placements is not None
     assert packet.evolution_decisions == [False]
-    assert pipeline.store.count() == 0
+    assert pipeline.store.count() == 1
+    assert packet.trace["memory_evolution"]["effects"] == []
+
+
+def test_default_ingest_writes_before_optional_evolution_runs() -> None:
+    pipeline = create_baseline_pipeline(top_k=2)
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert packet.decisions == [True]
+    assert packet.evolution_decisions == [False]
+    assert pipeline.store.count() == 1
+    assert packet.trace["organization"]["written_record_ids"]
+    assert packet.trace["memory_evolution"]["active_unit_ids"] == []
+    assert packet.trace["memory_evolution"]["effects"] == []
 
 
 def test_every_registered_baseline_combination_runs_ingest_and_recall() -> None:

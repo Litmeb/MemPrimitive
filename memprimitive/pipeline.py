@@ -53,8 +53,8 @@ class MemoryPipeline:
         representation: RepresentationModule,
         write_trigger: WriteTriggerModule,
         organization: OrganizationModule,
-        evolution_trigger: EvolutionTriggerModule,
-        memory_evolution: MemoryEvolutionModule,
+        evolution_trigger: EvolutionTriggerModule | None = None,
+        memory_evolution: MemoryEvolutionModule | None = None,
         retrieval: RetrievalModule,
         readout: ReadoutModule,
         store: MemoryStore | None = None,
@@ -63,8 +63,8 @@ class MemoryPipeline:
         self.representation = representation
         self.write_trigger = write_trigger
         self.organization = organization
-        self.evolution_trigger = evolution_trigger
-        self.memory_evolution = memory_evolution
+        self.evolution_trigger = evolution_trigger if evolution_trigger is not None else _default_evolution_trigger()
+        self.memory_evolution = memory_evolution if memory_evolution is not None else _default_memory_evolution()
         self.retrieval = retrieval
         self.readout = readout
         self.store = store if store is not None else MemoryStore()
@@ -122,3 +122,15 @@ def create_baseline_pipeline(*, top_k: int = 3) -> MemoryPipeline:
     from .baselines.registry import instantiate_default_baseline_modules
 
     return MemoryPipeline(**instantiate_default_baseline_modules(top_k=top_k))
+
+
+def _default_evolution_trigger() -> EvolutionTriggerModule:
+    from .baselines import NeverEvolutionTrigger
+
+    return NeverEvolutionTrigger()
+
+
+def _default_memory_evolution() -> MemoryEvolutionModule:
+    from .baselines import AppendOnlyEvolution
+
+    return AppendOnlyEvolution()

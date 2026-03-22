@@ -70,7 +70,7 @@ def main() -> None:
     pprint(packet.trace["write_trigger"])
     print()
 
-    print("evolution_trigger trace:")
+    print("evolution_trigger trace (extra evolution remains disabled here):")
     pprint(packet.trace["evolution_trigger"])
     print()
 
