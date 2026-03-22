@@ -164,8 +164,8 @@ Trigger = signals + scorer + gates + policy
 
 在 stage-1 runtime 中，`Trigger` 机制可复用于多个 slot：
 
-* `write_trigger`：控制 unit 是否进入 organization / write 路径
-* `evolution_trigger`：控制 unit 是否真正执行 append / merge / rewrite 等 memory evolution
+* `write_trigger`：控制 unit 是否进入常规写入路径
+* `evolution_trigger`：控制是否启动额外的 memory evolution
 
 也就是说，slot 是分开的，但 trigger family 可以复用；例如同一个 `always` / `threshold` / `on_event` 机制可以分别实例化成 write trigger 和 evolution trigger。
 
@@ -275,21 +275,29 @@ unit_formation -> representation -> write_trigger -> organization -> evolution_t
 对应的数据面约定是：
 
 * `write_trigger` 产出 `Packet.decisions`
-* `organization` 继续使用 `decisions`
+* `organization` 读取 `decisions` 并完成常规写入
 * `evolution_trigger` 产出 `Packet.evolution_decisions`
-* `memory_evolution` 优先读取 `evolution_decisions`，为空时回退到 `decisions`
+* `memory_evolution` 读取 `evolution_decisions` 并执行额外演化
+
+如果某个 runtime 仍允许 `memory_evolution` 在 `evolution_decisions` 为空时回退到 `decisions`，应视为向后兼容行为，而不是目标语义。
 
 
 ---
 
-## D. Organization — 关系归组与放置规划
+## D. Organization — 关系归组、放置与常规写入
 
-**核心问题**：unit 应该放在哪里？与已有 memory 建立什么关系？
+**核心问题**：unit 应该放在哪里？与已有 memory 建立什么关系？在 ingest-time 常规写入路径上如何正式落入 store？
 
 这里不再把 organization 建模成很多命名策略，而是统一写成：
 
 ```text
 Organization = routing + links + placement
+```
+
+但它的 contract 需要改成：
+
+```text
+Organization handles ingest-time organization and normal write.
 ```
 
 并且显式承认：
@@ -352,6 +360,7 @@ StoreTopology defines the admissible routing targets, link types, and placement 
 - **路由目标**：去哪一层 / 哪个分区
 - **关系结构**：建立哪些 link
 - **放置方式**：append / partition / cluster / graph / hierarchical
+- **常规写入方式**：由 organization strategy 隐含决定的 ingest-time update
 - **结构约束来源**：由 StoreTopology 决定可选能力边界
 
 ### Topology-Constrained Organization
@@ -359,7 +368,10 @@ StoreTopology defines the admissible routing targets, link types, and placement 
 - `StoreTopology` 决定 admissible routing targets：没有的 layer 不能被路由。
 - `StoreTopology` 决定 admissible link types：例如没有 graph layer 或 `graph` index，就不该允许 `graph_edge`。
 - `StoreTopology` 决定 admissible placement modes：例如单层 flat store 不应该允许 `hierarchical_slot`。
-- `Organization` 负责在这些能力边界内，选择具体的 routing / links / placement 配置。
+- `Organization` 负责在这些能力边界内，选择具体的 routing / links / placement 配置，并完成常规写入。
+- `placement=append` 不再意味着“只生成计划”，而意味着 append-style normal write。
+- 某些 organization 变体可以包含与 routing / placement 强耦合的 ingest-time merge / upsert / replace。
+- 这些 ingest-time update 不单独拆成新 slot，因为它们不构成独立搜索轴。
 
 ### 关键约束
 
@@ -391,10 +403,10 @@ StoreTopology defines the admissible routing targets, link types, and placement 
 
 ## E. Memory Evolution — 记忆演化
 
-**核心问题**：一旦 unit 已经被组织到某个 layer，store 应如何随之演化？**
+**核心问题**：在常规写入已经完成之后，store 是否还需要额外的演化？**
 
-这里统一吸收原来的 `Update`、`Compression` 和 `Maintenance`。  
-它们本质上都是：针对已有 memory state 施加某种演化操作，只是作用范围、目标和触发时机不同。
+这里统一吸收原来的 `Compression`、`Maintenance`，以及那些**默认不启动、额外触发** 的重写/重整操作。  
+它不再承担普通 append 式落库。
 
 ```text
 MemoryEvolution = selection + action + effect + trigger
@@ -405,10 +417,10 @@ MemoryEvolution = selection + action + effect + trigger
 
 | 组件          | 含义                 | 典型取值                                                                                                                                                                                |
 | ----------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `selection` | 选中哪些已有 memory 参与演化 | `incoming_only`, `matched_by_key`, `matched_by_entity`, `time_window`, `layer_slice`, `low_activity`, `all`                                                                         |
-| `action`    | 对选中对象施加什么演化操作      | `append`, `replace`, `merge`, `upsert`, `rewrite`, `summarize`, `reflect`, `profile_update`, `extract_concept`, `prototype_form`, `prune`, `dedup`, `move`, `consolidate`, `review` |
+| `selection` | 选中哪些已有 memory 参与演化 | `matched_by_key`, `matched_by_entity`, `time_window`, `layer_slice`, `low_activity`, `all`                                                                                           |
+| `action`    | 对选中对象施加什么演化操作      | `replace`, `merge`, `upsert`, `rewrite`, `summarize`, `reflect`, `profile_update`, `extract_concept`, `prototype_form`, `prune`, `dedup`, `move`, `consolidate`, `review`         |
 | `effect`    | 对 store 造成何种状态变化   | `add`, `modify`, `delete`, `move`, `summarize`, `merge`, `version`                                                                                                                  |
-| `trigger`   | 何时执行该演化操作          | `after_write`, `periodic`, `on_event`, `budget_exceeded`, `count_exceeded`, `conditional`                                                                                           |
+| `trigger`   | 何时执行该演化操作          | `periodic`, `on_event`, `budget_exceeded`, `count_exceeded`, `conditional`                                                                                                          |
 
 
 ### 常见 selection
@@ -416,7 +428,6 @@ MemoryEvolution = selection + action + effect + trigger
 
 | selection           | 含义              | 关键参数                      |
 | ------------------- | --------------- | ------------------------- |
-| `incoming_only`     | 只处理当前新写入 unit   | —                         |
 | `matched_by_key`    | 按 key 匹配已有 unit | key_field, match_strategy |
 | `matched_by_entity` | 按 entity 匹配已有记忆 | entity_field              |
 | `time_window`       | 处理某个时间窗口内的记忆    | start, end / window_size  |
@@ -430,13 +441,11 @@ MemoryEvolution = selection + action + effect + trigger
 
 | action             | 含义              | 对应旧名                   |
 | ------------------ | --------------- | ---------------------- |
-| `append`           | 直接追加            | Upd-1                  |
 | `replace`          | 替换匹配对象          | Upd-2                  |
 | `merge`            | 合并新旧对象          | Upd-3, Upd-7           |
 | `upsert`           | 有则更新，无则插入       | Upd-4                  |
 | `rewrite`          | LLM 或规则重写已有内容   | Upd-6                  |
 | `delta`            | 只记录变化量          | Upd-5                  |
-| `versioned_append` | 追加并保留版本链        | Upd-9                  |
 | `summarize`        | 形成摘要            | Comp-2, Comp-8, Comp-9 |
 | `reflect`          | 形成反思/insight    | Comp-4                 |
 | `profile_update`   | 聚合为实体画像/profile | Comp-5                 |
@@ -466,17 +475,19 @@ MemoryEvolution = selection + action + effect + trigger
 
 ### 变异轴
 
-- **演化目标**：局部更新 / 高层抽象 / 生命周期管理
-- **作用范围**：incoming-only / by-entity / by-window / by-layer / global
+- **演化目标**：额外重整 / 高层抽象 / 生命周期管理
+- **作用范围**：by-entity / by-window / by-layer / global
 - **状态变化**：add / modify / delete / move / summarize / version
-- **触发模式**：写入后 / 周期 / 事件 / 预算 / 条件
+- **触发模式**：周期 / 事件 / 预算 / 条件
 
 ### 建模说明
 
-- 原 `Update` 只是一类局部演化；原 `Compression` 是一种高层抽象演化；原 `Maintenance` 是一种生命周期演化。
-- `AppendWithLinkUpdate` 不再单列；link 更新原则上应回到 D 槽，E 只负责 store state evolution。
-- `append` 可以被视为最简单的 evolution action，而不是必须单独占据一个大类。
-- `summarize`、`prune`、`move`、`consolidate` 与 `merge` 一样，都是对 store state 的不同演化方式。
+- 常规写入已经由 D 槽 `organization` 完成。
+- E 槽只表示额外触发的 memory evolution。
+- 原 `Compression` 是一种高层抽象演化；原 `Maintenance` 是一种生命周期演化。
+- `AppendWithLinkUpdate` 不再单列；link 更新原则上应回到 D 槽，E 只负责 extra evolution over existing memory。
+- `summarize`、`prune`、`move`、`consolidate` 与 `merge` 一样，都是对 store state 的不同额外演化方式。
+- `replace/merge/upsert/rewrite` 只有在被理解为额外触发的已有记忆重整时，才属于 E 槽。
 
 ### 关键约束
 
@@ -492,7 +503,6 @@ MemoryEvolution = selection + action + effect + trigger
 
 | 旧写法                              | 新写法                                                                     |
 | -------------------------------- | ----------------------------------------------------------------------- |
-| `Upd-1 Append`                   | `selection=incoming_only, action=append, effect=add`                    |
 | `Upd-3 MergeByEntity`            | `selection=matched_by_entity, action=merge, effect=modify`              |
 | `Upd-4 UpsertByKey`              | `selection=matched_by_key, action=upsert, effect=add+modify`            |
 | `Upd-6 LLMRewrite`               | `selection=matched_by_key/entity, action=rewrite, effect=modify`        |
@@ -700,8 +710,8 @@ Retrieval = signals + ranker + flow + constraints
 
 | 约束                                                                                 | 含义                            |
 | ---------------------------------------------------------------------------------- | ----------------------------- |
-| `co_requires(UF-6/7/8/9, Evo.action in {merge, upsert, profile_update})`           | 结构化 unit 与实体/键控演化强关联          |
-| `co_requires(UF-2/3, Evo.action=append)`                                           | 对话级 unit 与 append 强关联         |
+| `co_requires(UF-6/7/8/9, Evo.action in {merge, upsert, profile_update})`           | 结构化 unit 与额外实体/键控演化强关联        |
+| `co_requires(UF-2/3, Org.placement=append)`                                        | 对话级 unit 与 append-style organization 强关联 |
 | `co_requires(Evo.action=profile_update, UF-7)`                                     | profile 更新与 EntityState 抽取强关联 |
 | `co_requires(Org.links contains graph_edge, Ret.signals contains graph_proximity)` | 图边组织与图邻近检索强关联                 |
 | `co_requires(Rep contains code, Read-6)`                                           | 代码表示与 CodeInjection 强关联       |
@@ -712,7 +722,7 @@ Retrieval = signals + ranker + flow + constraints
 
 | 约束                                                                              | 含义          |
 | ------------------------------------------------------------------------------- | ----------- |
-| `incompatible(WT.policy=never, Evo.action in {append, merge, upsert, rewrite})` | 从不写入与增量演化互斥 |
+| `incompatible(WT.policy=never, Org.placement=append)`                           | 从不写入与 append-style organization 互斥 |
 
 
 ---
@@ -822,16 +832,16 @@ Phase 3: 参数调优（每个配置内部的连续参数）
 将 DSLgrammar.md 中 8 个经典系统分解为 Primitive ID：
 
 
-| System            | UF                  | Rep                                         | WT                                                                  | Org                                                                           | Evo                                                                                                                                     | Ret                                                                                 | Read   |
-| ----------------- | ------------------- | ------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------ |
-| Generative Agents | UF-1                | `{text, embedding}`                         | `signals={importance, novelty}, scorer=weighted_sum, policy=always` | `routing=default(reflections/episodes), links={temporal}, placement=append`   | `selection=time_window, action=reflect, effect=add, trigger=periodic`                                                                   | `signals={similarity, recency, importance}, ranker=weighted_sum, flow=single_stage` | Read-1 |
-| MemGPT            | UF-3                | `{text, embedding}`                         | `gates={tool_called(...)}, policy=explicit_only`                    | `routing=agent_selected(...), links={}, placement=append`                     | `selection=layer_slice(main_context), action=summarize+move, effect=summarize+move, trigger=budget_exceeded`                            | `signals={similarity}, ranker=identity, flow=agent_invoked`                         | Read-4 |
-| Reflexion         | UF-13               | `{text}`                                    | `gates={on_event("task_failure")}, policy=boolean_gate`             | `routing=default(reflection_layer), links={}, placement=append`               | `selection=layer_slice(reflection_layer), action=prune, effect=delete, trigger=after_write`                                             | `signals={}, ranker=identity, flow=single_stage`                                    | Read-1 |
-| Voyager           | UF-10               | `{code, description, embedding}`            | `gates={on_event("task_success")}, policy=boolean_gate`             | `routing=by_tag(skill_type), links={}, placement=partition`                   | `selection=matched_by_key, action=upsert, effect=add+modify, trigger=after_write`                                                       | `signals={similarity}, ranker=identity, flow=single_stage`                          | Read-6 |
-| MemoryBank        | Compose(UF-3, UF-6) | `{text, embedding}`                         | `policy=always`                                                     | `routing=by_unit_type(...), links={}, placement=append`                       | `selection=matched_by_entity + time_window, action=merge+summarize+prune, effect=modify+summarize+delete, trigger=session_end/periodic` | `signals={similarity, recency}, ranker=weighted_sum, flow=single_stage`             | Read-1 |
-| SCM               | UF-6                | `{triple, embedding}`                       | `signals={llm_value_estimate}, scorer=llm_judge, policy=threshold`  | `routing=default(semantic_layer), links={entity}, placement=append`           | `selection=matched_by_entity, action=upsert+profile_update+review, effect=modify, trigger=after_write/periodic`                         | `signals={entity_match}, ranker=rerank_llm, flow=two_stage`                         | Read-4 |
-| A-MEM             | UF-14               | `{text, embedding, triple, tags, entities}` | `policy=always`                                                     | `routing=default(graph_layer), links={graph_edge(...)}, placement=graph_node` | `selection=incoming_only, action=append, effect=add, trigger=after_write`                                                               | `signals={similarity, graph_proximity}, ranker=identity, flow=single_stage`         | Read-4 |
-| TiM               | UF-11               | `{text, embedding}`                         | `gates={on_reasoning_step}, policy=boolean_gate`                    | `routing=default(thought_layer), links={temporal}, placement=append`          | `selection=layer_slice(thought_layer), action=summarize+prune, effect=summarize+delete, trigger=budget_exceeded`                        | `signals={recency, similarity}, ranker=weighted_sum, flow=single_stage`             | Read-1 |
+| System            | UF                  | Rep                                         | WT                                                                  | Org                                                                                                        | Evo                                                                                                                             | Ret                                                                                 | Read   |
+| ----------------- | ------------------- | ------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------ |
+| Generative Agents | UF-1                | `{text, embedding}`                         | `signals={importance, novelty}, scorer=weighted_sum, policy=always` | `routing=default(reflections/episodes), links={temporal}, placement=append`                                | `selection=time_window, action=reflect, effect=add, trigger=periodic`                                                           | `signals={similarity, recency, importance}, ranker=weighted_sum, flow=single_stage` | Read-1 |
+| MemGPT            | UF-3                | `{text, embedding}`                         | `gates={tool_called(...)}, policy=explicit_only`                    | `routing=agent_selected(...), links={}, placement=append`                                                  | `selection=layer_slice(main_context), action=summarize+move, effect=summarize+move, trigger=budget_exceeded`                    | `signals={similarity}, ranker=identity, flow=agent_invoked`                         | Read-4 |
+| Reflexion         | UF-13               | `{text}`                                    | `gates={on_event("task_failure")}, policy=boolean_gate`             | `routing=default(reflection_layer), links={}, placement=append`                                            | `selection=layer_slice(reflection_layer), action=prune, effect=delete, trigger=on_event("task_failure")`                        | `signals={}, ranker=identity, flow=single_stage`                                    | Read-1 |
+| Voyager           | UF-10               | `{code, description, embedding}`            | `gates={on_event("task_success")}, policy=boolean_gate`             | `routing=by_tag(skill_type), links={}, placement=partition`                                                | `selection=matched_by_key, action=review, effect=modify, trigger=periodic`                                                     | `signals={similarity}, ranker=identity, flow=single_stage`                          | Read-6 |
+| MemoryBank        | Compose(UF-3, UF-6) | `{text, embedding}`                         | `policy=always`                                                     | `routing=by_unit_type(...), links={}, placement=append`                                                    | `selection=matched_by_entity + time_window, action=merge+summarize+prune, effect=modify+summarize+delete, trigger=session_end/periodic` | `signals={similarity, recency}, ranker=weighted_sum, flow=single_stage`             | Read-1 |
+| SCM               | UF-6                | `{triple, embedding}`                       | `signals={llm_value_estimate}, scorer=llm_judge, policy=threshold`  | `routing=default(semantic_layer), links={entity}, placement=append`                                        | `selection=matched_by_entity, action=profile_update+review, effect=modify, trigger=periodic`                                   | `signals={entity_match}, ranker=rerank_llm, flow=two_stage`                         | Read-4 |
+| A-MEM             | UF-14               | `{text, embedding, triple, tags, entities}` | `policy=always`                                                     | `routing=default(graph_layer), links={graph_edge(...)}, placement=graph_node`                              | `Trig-1 Never`                                                                                                                  | `signals={similarity, graph_proximity}, ranker=identity, flow=single_stage`         | Read-4 |
+| TiM               | UF-11               | `{text, embedding}`                         | `gates={on_reasoning_step}, policy=boolean_gate`                    | `routing=default(thought_layer), links={temporal}, placement=append`                                       | `selection=layer_slice(thought_layer), action=summarize+prune, effect=summarize+delete, trigger=budget_exceeded`               | `signals={recency, similarity}, ranker=weighted_sum, flow=single_stage`             | Read-1 |
 
 
 ### 从中可观察到的初步 Motif
@@ -841,10 +851,10 @@ Phase 3: 参数调优（每个配置内部的连续参数）
 - 表示 set 包含 `embedding` + retrieval signals 中包含 `similarity`
 - 几乎所有系统都需要 embedding 作为基础检索手段
 
-**Motif 2: Append-Dominant（出现 6/8 次）**
+**Motif 2: Organization-Driven Normal Write（出现 6/8 次）**
 
-- `action=append` 是最常见的局部演化方式
-- 只有涉及结构化 entity/profile 更新的系统才显式使用 `merge/upsert/profile_update`
+- append-style normal write 往往由 `organization` 完成
+- 只有涉及额外 entity/profile 更新或高层整理的系统才显式使用 `memory_evolution`
 
 **Motif 3: Selective-Write 分化**
 
@@ -854,7 +864,7 @@ Phase 3: 参数调优（每个配置内部的连续参数）
 
 **Motif 4: High-Level Evolution 可选**
 
-- 并非所有系统都做高层演化；很多系统只做局部 append 或轻量 prune
+- 并非所有系统都做高层演化；很多系统只做 organization-driven normal write，额外演化保持关闭或极轻量
 - 需要高层演化的系统倾向于不同层次：`summarize` / `reflect` / `profile_update`
 
 **Motif 5: Lifecycle Control 两极化**

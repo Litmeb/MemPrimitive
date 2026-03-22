@@ -14,11 +14,10 @@
 raw input
   -> unit formation
   -> representation
-  -> organization / storage
-  -> write/update
-  -> compression / abstraction
+  -> write trigger
+  -> organization / normal write
+  -> optional memory evolution
   -> retrieval
-  -> maintenance
   -> readout
   -> downstream agent
 ```
@@ -273,12 +272,19 @@ representation 模块不能改变 unit 的语义身份，只能改变或增强�
 
 ## C. Organization Interface
 
-它负责把 units 放进某种结构中，但不一定真正写入。
+它负责 **ingest-time 的组织与常规写入提交**。
 
-这里建议区分：
+在新的语义下，不再把 `organization` 只理解为 “placement plan generator”。
+它既决定：
 
-* `organization`：产生 links / placement plan
-* `write/update`：真正写入 store
+* unit 去哪一层 / 哪个分区
+* 与已有 memory 建立什么 links
+* 在常规写入路径上如何正式落入 store
+
+也就是说：
+
+* `organization` = organize + commit normal write
+* `memory_evolution` 不再默认承担普通 append / 常规落库
 
 ### 接口定义
 
@@ -303,12 +309,24 @@ PlacementPlan = {
 }
 ```
 
+### 输出语义
+
+* `PlacementPlan` 仍可作为显式中间表示
+* 但 `organization` 允许直接修改 `store`
+* trace 应记录：
+  * target store / layer
+  * links / index updates
+  * affected unit ids / record ids
+  * 常规写入采取的 ingest-time update 行为
+
 ### 常见功能
 
 * 判定该放哪个子库
-* 建立 temporal links
-* 建立 entity links
-* 建立 similarity / causal links
+* 建立 temporal / entity / similarity / causal links
+* append 到目标 layer
+* 图节点写入
+* 分区写入
+* 与当前 organization strategy 紧耦合的 ingest-time merge / upsert / replace
 
 ---
 
@@ -319,8 +337,8 @@ PlacementPlan = {
 在当前 DSL 里，trigger 是一类可复用机制，而不是只能服务于单一 slot 的专属模块。
 同一 trigger family 可以分别实例化为：
 
-* `write_trigger`：填写 `decisions`，控制是否进入 organization / write 路径
-* `evolution_trigger`：填写 `evolution_decisions`，控制是否真正执行 memory evolution 副作用
+* `write_trigger`：填写 `decisions`，控制是否进入常规写入路径
+* `evolution_trigger`：填写 `evolution_decisions`，控制是否启动额外的 memory evolution
 
 ### 接口定义
 
@@ -363,27 +381,37 @@ unit_formation -> representation -> write_trigger -> organization -> evolution_t
 对应的数据面约定是：
 
 * `write_trigger` 写 `Packet.decisions`
+* `organization` 读取 `Packet.decisions` 并完成常规写入
 * `evolution_trigger` 写 `Packet.evolution_decisions`
-* `memory_evolution` 优先读取 `evolution_decisions`
-* 若 `evolution_decisions is None`，则回退使用 `decisions`
+* `memory_evolution` 读取 `evolution_decisions`
+
+如果某个 runtime 暂时仍允许 `memory_evolution` 回退使用 `decisions`，应视为向后兼容行为，而不是目标语义。
 
 ### 这样设计的好处
 
 * 能单独 ablate write policy
+* 能把 “常规写入” 与 “额外演化” 清晰区分
 * 能做 learned write / heuristic write / llm-judge write 的统一比较
 
 ---
 
-## E. Update Interface
+## E. Memory Evolution Interface
 
-它负责真正把 unit 写进 store，或者修改旧 memory。
+它负责 **默认不启动、额外触发** 的 memory evolution。
+
+这里的对象不是“本次 observation 的常规落库”，而是：
+
+* 对已有 memory 的整理
+* 高层抽象
+* 维护
+* 遗忘
+* 后台重写 / 重组
 
 ### 接口定义
 
 ```python
-def update_store(
-    units: list[MemoryUnit],
-    placement: list[dict],
+def memory_evolution(
+    packet: dict,
     store: MemoryStore,
     context: AgentContext,
     config: dict
@@ -393,27 +421,35 @@ def update_store(
 
 ### 功能
 
-* append
-* replace
-* merge
-* delta update
-* rewrite
-* conflict resolution
+* summarize
+* reflect
+* prune / forget
+* dedup
+* consolidate
+* move / archive
+* 对已有 memory 的 rewrite / review
+* 在显式触发时进行 profile / concept abstraction
 
 ### 输出中的 aux 应包含
 
 * affected unit ids
-* conflicts found
-* merge trace
-* overwritten records
+* affected record ids
+* evolution trigger reason
+* rewrite / summarize / prune trace
+* overwritten / removed / archived records
 
 这个 trace 很重要，因为你之后分析 memory 机制时会需要。
 
 ---
 
-## F. Compression / Abstraction Interface
+## F. Compression / Abstraction Family
 
-它负责从已有记忆中生成更高层表示。
+这不是独立 slot，而是 `memory_evolution` 的一个重要子家族。
+
+也就是说：
+
+* `compress` / `abstract` 仍然是重要机制
+* 但在当前 primitive 划分下，它们属于 `memory_evolution` 的实现变体
 
 ### 接口定义
 
@@ -495,9 +531,11 @@ def retrieve(
 
 ---
 
-## H. Maintenance Interface
+## H. Maintenance Family
 
-它负责容量控制、遗忘、去重、重排序等。
+这同样不是独立 slot，而是 `memory_evolution` 的另一个子家族。
+
+它负责容量控制、遗忘、去重、重排序等额外演化。
 
 ### 接口定义
 
@@ -521,7 +559,7 @@ def maintain(
 
 ### 建议
 
-把 `maintenance` 设计成可周期触发的后台步骤，但在 DSL 执行图里仍然是显式模块。
+把 `maintenance` 设计成可周期触发的后台步骤，但在当前 DSL 中将其视为 `memory_evolution` 的一种实现模式，而不是新增顶层 slot。
 
 ---
 
@@ -614,6 +652,11 @@ packet, store, aux6 = memory_evolution(packet, store, context, cfg6)
 ...
 ```
 
+其中新的语义是：
+
+* `organize(...)` 完成 ingest-time normal write
+* `memory_evolution(...)` 只在 `evolution_trigger` 打开时做额外演化
+
 这就是很典型的 **IR-style intermediate representation** 思路。
 我觉得这对 DSL 很有帮助。
 
@@ -692,11 +735,11 @@ ModuleSpec = {
 * 必须提供 score trace
 * 不允许直接修改原始 memory 内容
 
-而 `update` 的 contract 是：
+而 `memory_evolution` 的 contract 是：
 
-* 输入 units 与 placement
+* 输入 packet / store / context
 * 可以修改 store
-* 必须返回 conflict / overwrite trace
+* 必须返回 evolution / overwrite / summarize / prune trace
 
 这样整个系统会非常清晰。
 
@@ -717,9 +760,9 @@ should_write(units, store, context, config)
     -> decisions, aux
 
 organize(units, store, context, config) 
-    -> placement, aux
+    -> store, aux
 
-update_store(units, placement, store, context, config) 
+memory_evolution(packet, store, context, config) 
     -> store, aux
 
 retrieve(query, store, context, config) 
@@ -727,9 +770,6 @@ retrieve(query, store, context, config)
 
 readout(retrieved, store, context, config) 
     -> readout_packet, aux
-
-maintain(store, context, config) 
-    -> store, aux
 ```
 
 这是一个非常实用的起点。
@@ -746,11 +786,10 @@ MemoryConfig(
     representation = HybridRep(embed=True, entity_link=True),
     write_trigger = ImportanceNoveltyGate(),
     organization = EntityTemporalOrganizer(),
-    evolution_trigger = ImportanceNoveltyGate(),
-    update = MergeOrAppend(),
+    evolution_trigger = Never(),
     retrieval = HybridRetriever(),
     readout = StructuredReadout(),
-    maintenance = ImportanceDecayPruner()
+    memory_evolution = ImportanceDecayPruner()
 )
 ```
 
@@ -763,10 +802,10 @@ units = EventExtractor(obs)
 units = HybridRep(units)
 decisions = ImportanceNoveltyGate(units, store)
 selected_units = filter_by_decision(units, decisions)
-placement = EntityTemporalOrganizer(selected_units, store)
-evolution_decisions = ImportanceNoveltyGate(selected_units, store)
-store = MergeOrAppend(selected_units, placement, store, evolution_decisions)
-store = ImportanceDecayPruner(store)
+store, placement = EntityTemporalOrganizer(selected_units, store)
+evolution_decisions = Never()(selected_units, store)
+if any(evolution_decisions):
+    store = ImportanceDecayPruner(store)
 ```
 
 ### 读取阶段
@@ -792,7 +831,7 @@ readout_packet = StructuredReadout(retrieved, store)
 
 * 固定 representation，搜索 retrieval
 * 固定 retrieval，搜索 write policy
-* 联合搜索 write + update + maintain
+* 联合搜索 write + organization + memory evolution
 
 否则搜索空间只是纸上谈兵。
 
@@ -803,7 +842,7 @@ readout_packet = StructuredReadout(retrieved, store)
 统一接口后，你可以真正控制变量：
 
 * 同样的 unit formation，不同 retrieval
-* 同样的 update，不同 write trigger
+* 同样的 organization，不同 write trigger
 * 同样的 retrieval，不同 readout
 
 这对论文实验很关键。
@@ -817,9 +856,9 @@ readout_packet = StructuredReadout(retrieved, store)
 * event/fact unit
 * hybrid representation
 * selective write
-* merge update
+* organization-driven normal write
 * hybrid retrieval
-* periodic compression
+* periodic evolution
 
 那你就能从搜索结果归纳出 motif，而不是只得到“某个黑箱配置更好”。
 
@@ -837,10 +876,10 @@ readout_packet = StructuredReadout(retrieved, store)
 * 没 embedding 就做不了向量检索
 * 没 graph link 就做不了 graph hop retrieval
 
-### unit formation 和 update 强耦合
+### unit formation 和 organization / evolution 强耦合
 
-* fact unit 更适合 replace/merge
-* raw chunk 更适合 append-only
+* fact unit 更适合 entity/profile-oriented organization 或后续 profile evolution
+* raw chunk 更适合 append-style organization
 
 ### compression 和 maintenance 强耦合
 

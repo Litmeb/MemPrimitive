@@ -27,7 +27,13 @@ Level 0: Param        — 每个实现的离散/连续参数
 ```
                 ┌──────────── Write Path ────────────┐
                 │                                     │
-Observation ──► UnitFormation ──► Representation ──► WriteTrigger ──► Organization ──► MemoryEvolution ──► Store
+Observation ──► UnitFormation ──► Representation ──► WriteTrigger ──► Organization ──► Store
+                                                                            │
+                                                                            ▼
+                                                                   EvolutionTrigger
+                                                                            │
+                                                                            ▼
+                                                                   MemoryEvolution
                                                                                          │
                 ┌──────────── Read Path ─────────────┐                                   │
                 │                                     │                                   │
@@ -125,6 +131,10 @@ stores {
 - 每层的 `theme`
 
 跨层流动策略，如写入路由、摘要迁移、提升/降级和 selective read，不放在 `StoreBlock` 中，而由 `organization`、`memory_evolution`、`retrieval` 等模块负责。
+其中新的语义是：
+
+- `organization` 负责 ingest-time 的组织与常规写入
+- `memory_evolution` 负责额外触发的演化，而不是默认常规落库
 
 ### 2.4 Module 声明
 
@@ -138,8 +148,8 @@ ModuleDecl      ::= PrimitiveSlot ':' ModuleExpr
 PrimitiveSlot   ::= 'unit_formation'   (* A: 记忆单元形成 *)
                    | 'representation'   (* B: 表示编码 *)
                    | 'write_trigger'    (* C: 写入决策 *)
-                   | 'organization'     (* D: 关系/放置规划 *)
-                   | 'memory_evolution' (* E: 记忆演化 *)
+                   | 'organization'     (* D: 组织 + 常规写入 *)
+                   | 'memory_evolution' (* E: 额外触发的记忆演化 *)
                    | 'retrieval'        (* G: 检索策略 *)
                    | 'readout'          (* H: 输出格式化 *)
 ```
@@ -438,6 +448,13 @@ Organization(
 )
 ```
 
+这里的 contract 需要特别强调：
+
+```text
+Organization handles ingest-time organization and normal write.
+It is not only a placement-plan generator.
+```
+
 并且采用如下原则：
 
 ```text
@@ -484,6 +501,12 @@ hierarchical_slot(target_level=..., placement_policy=...)
 - `placement=hierarchical_slot(...)` 或 `links={parent_child(...)}` 要求 `layer_count > 1`
 - `routing=by_tag(...)` 要求 unit/representation 中可读出 `tags`
 - `links={entity(...)}` 要求 unit/representation 中可读出 `entities`
+
+补充语义约束：
+
+- `organization` 默认完成常规写入，因此 `placement=append()` 不再意味着“只产出计划”，而意味着 append-style normal write
+- 某些 `organization` 实现可以包含与 routing / placement 强耦合的 ingest-time merge / upsert / replace
+- 这些 ingest-time update 不单独拆成新 slot，因为它们不构成独立搜索轴
 
 示例：
 
@@ -533,10 +556,16 @@ MemoryEvolution(
 )
 ```
 
+新的定义是：
+
+```text
+MemoryEvolution handles optional extra evolution over already-organized memory.
+It is off by default and should not be used as the default normal write path.
+```
+
 推荐 selection：
 
 ```text
-incoming_only()
 matched_by_key(key_field=...)
 matched_by_entity(entity_field=...)
 time_window(window_size=...)
@@ -548,13 +577,10 @@ all(scope=...)
 推荐 action：
 
 ```text
-append()
 replace()
 merge()
 upsert()
 rewrite()
-delta()
-versioned_append()
 summarize()
 reflect()
 profile_update()
@@ -566,6 +592,7 @@ dedup()
 move(target_layer=...)
 consolidate()
 review()
+delta()
 ```
 
 推荐 effect：
@@ -583,7 +610,6 @@ version
 推荐 trigger：
 
 ```text
-after_write
 periodic(every=...)
 on_event("session_end")
 budget_exceeded(threshold=...)
@@ -598,16 +624,13 @@ conditional(...)
 - `action=summarize/reflect/extract_concept/prototype_form` 通常要求 selection 覆盖多个 unit
 - `action=dedup/prune/review` 会影响后续 retrieval 可见内容
 
-示例：
+补充边界：
 
-```text
-memory_evolution : MemoryEvolution(
-    selection=incoming_only(),
-    action=append(),
-    effect=add,
-    trigger=after_write
-)
-```
+- `append`、普通 ingest-time `upsert`、普通 ingest-time `merge` 不应再作为默认 `memory_evolution` 基线
+- 只有当这些动作被理解为额外触发的已有记忆重整时，才应保留在 `memory_evolution` 家族中
+- `evolution_trigger` 默认语义应为 `Never`
+
+示例：
 
 ```text
 memory_evolution : MemoryEvolution(
@@ -776,6 +799,11 @@ readout : CodeInjection(
 
 控制 `memory_evolution` 的触发时机。
 
+这里的 `evolution_trigger` 不再被理解为“常规写入的第二层写触发器”，而是：
+
+- 是否要启动额外 memory evolution
+- 默认应关闭，只有 reflective / maintenance / periodic 场景才打开
+
 ```ebnf
 TriggerBlock    ::= 'triggers' '{' TriggerDecl+ '}'
 
@@ -787,7 +815,7 @@ TriggerExpr     ::= 'Periodic' '(' 'every' '=' INT ')'
                    | 'OnEvent' '(' EventType ')'
                    | 'BudgetExceeded' '(' 'threshold' '=' FLOAT ')'
                    | 'Conditional' '(' Predicate ')'
-                   | 'AfterWrite'
+                   | 'AfterWrite'      (* 显式要求写后立刻执行一次额外演化 *)
                    | 'And' '(' TriggerExpr ',' TriggerExpr ')'
                    | 'Or' '(' TriggerExpr ',' TriggerExpr ')'
                    | 'Never'
@@ -859,13 +887,18 @@ Value           ::= INT | FLOAT | STRING | BOOL | 'None'
 Packet = {
     observation  : Observation?       // A 阶段读
     units        : list[MemoryUnit]?  // A 输出, B/C/D/E 读写
-    decisions    : list[bool]?        // C 输出, filter 读
-    placement    : list[PlacePlan]?   // D 输出, E 读
+    decisions    : list[bool]?        // C 输出, D 读
+    placement    : list[PlacePlan]?   // D 可写, 也可仅作为 trace/plan
     query        : Query?             // G 阶段读
     retrieved    : RetrievedContext?   // G 输出, H 读
     readout      : ReadoutPacket?     // H 输出
 }
 ```
+
+在新的语义下：
+
+- D 槽 `organization` 可以直接修改 `store`
+- E 槽 `memory_evolution` 是额外 pass，而不是默认落库点
 
 ### 3.2 模块的能力声明 (ModuleSpec)
 
