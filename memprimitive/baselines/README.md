@@ -20,7 +20,7 @@ New implementations in this package should follow the same pattern so readers ca
 | `representation.py`   | `representation`         | `BasicRepresentation`      |
 | `write_trigger.py`    | `write_trigger`          | `AlwaysWriteTrigger`       |
 | `organization.py`     | `organization`           | `AppendOrganization`       |
-| `evolution_trigger.py`| `evolution_trigger`      | `AlwaysEvolutionTrigger`   |
+| `evolution_trigger.py`| `evolution_trigger`      | `NeverEvolutionTrigger`    |
 | `memory_evolution.py` | `memory_evolution`       | `AppendOnlyEvolution`      |
 | `retrieval.py`        | `retrieval`              | `RecencyRetrieval`         |
 | `readout.py`          | `readout`                | `ConcatenateReadout`       |

@@ -9,11 +9,11 @@ from ..interfaces import EvolutionTriggerModule
 
 from ._trigger_family import (
     AlwaysOpenGate,
-    AlwaysPolicy,
     ConstantSignal,
     DecisionPolicy,
     Gate,
     IdentityScorer,
+    NeverPolicy,
     ScoreAggregator,
     SignalProvider,
     ThresholdPolicy,
@@ -58,11 +58,11 @@ class _TriggerFamilyEvolutionAdapter(EvolutionTriggerModule):
         )
 
 
-class AlwaysEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
-    """Mark every organized unit as eligible for evolution using the shared family."""
+class NeverEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Keep extra memory evolution disabled by default after normal ingest-time write."""
 
     spec = ModuleSpec(
-        name="always_evolution_trigger",
+        name="never_evolution_trigger",
         slot="evolution_trigger",
         input_requirements=("units", "placements"),
         output_guarantees=("evolution_decisions",),
@@ -74,7 +74,7 @@ class AlwaysEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
                 signal_providers=(ConstantSignal(signal_name="constant", value=1.0),),
                 scorer=IdentityScorer(source="constant"),
                 gate=AlwaysOpenGate(),
-                policy=AlwaysPolicy(),
+                policy=NeverPolicy(),
             )
         )
 
@@ -132,6 +132,6 @@ def compose_evolution_trigger(
 
 BASELINE_SLOT: Final[str] = "evolution_trigger"
 BASELINE_CLASSES: Final[tuple[type[EvolutionTriggerModule], ...]] = (
-    AlwaysEvolutionTrigger,
+    NeverEvolutionTrigger,
     ThresholdEvolutionTrigger,
 )

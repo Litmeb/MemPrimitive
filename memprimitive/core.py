@@ -325,9 +325,9 @@ class Packet:
     """Shared pipeline IR. Each stage reads and fills specific fields.
 
     ``decisions`` is the write-side gating mask used before organization.
-    ``evolution_decisions`` is the evolution-side gating mask used by
-    ``memory_evolution``; when absent, evolution modules may fall back to
-    ``decisions`` for backward compatibility.
+    ``evolution_decisions`` is the extra-evolution gating mask used by
+    ``memory_evolution`` after normal ingest-time organization and write
+    have already completed.
     """
 
     observation: Observation | None = None

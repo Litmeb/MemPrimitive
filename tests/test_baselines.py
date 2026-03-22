@@ -153,10 +153,10 @@ def test_write_trigger_aligns_decisions_with_units() -> None:
 
 def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
     from memprimitive.baselines import (
-        AlwaysEvolutionTrigger,
         AlwaysWriteTrigger,
         AppendOrganization,
         BasicRepresentation,
+        NeverEvolutionTrigger,
         PassThroughUnitFormation,
     )
 
@@ -168,19 +168,19 @@ def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
     packet, store = AlwaysWriteTrigger().run(packet, store)
     packet, store = AppendOrganization().run(packet, store)
 
-    packet_out, _ = AlwaysEvolutionTrigger().run(packet, store)
+    packet_out, _ = NeverEvolutionTrigger().run(packet, store)
 
-    assert packet_out.evolution_decisions == [True]
-    assert packet_out.trace["evolution_trigger"]["policy"] == "always"
+    assert packet_out.evolution_decisions == [False]
+    assert packet_out.trace["evolution_trigger"]["policy"] == "never"
     assert packet_out.trace["evolution_trigger"]["scorer"] == "identity"
-    assert packet_out.trace["evolution_trigger"]["evolution_decisions"] == [True]
+    assert packet_out.trace["evolution_trigger"]["evolution_decisions"] == [False]
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"] == {"constant": 1.0}
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["score"] == 1.0
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["gate"] is True
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is True
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
 
 
-def test_organization_aligns_placements_with_units() -> None:
+def test_organization_aligns_placements_with_units_and_commits_normal_write() -> None:
     from memprimitive.baselines import (
         AlwaysWriteTrigger,
         AppendOrganization,
@@ -195,36 +195,23 @@ def test_organization_aligns_placements_with_units() -> None:
     packet, store = BasicRepresentation().run(packet, store)
     packet, store = AlwaysWriteTrigger().run(packet, store)
 
-    packet_out, _ = AppendOrganization().run(packet, store)
+    packet_out, updated_store = AppendOrganization().run(packet, store)
 
     assert packet_out.placements is not None
     assert len(packet_out.placements) == len(packet_out.units)
     assert packet_out.placements[0].target_layer == "default"
+    assert updated_store.count() == 1
+    assert packet_out.trace["organization"]["written_record_ids"]
+    assert packet_out.trace["organization"]["written_unit_ids"] == [packet_out.units[0].unit_id]
+    assert packet_out.trace["organization"]["skipped_unit_count"] == 0
 
 
-def test_append_only_evolution_mutates_store_only_for_true_decisions() -> None:
+def test_append_only_evolution_is_noop_when_evolution_decisions_are_false() -> None:
     from memprimitive.baselines import AppendOnlyEvolution
 
     packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
     packet = Packet(
         units=packet.units,
-        decisions=[False],
-        placements=packet.placements,
-        trace=packet.trace,
-    )
-
-    _, updated_store = AppendOnlyEvolution().run(packet, store)
-
-    assert updated_store.count() == 0
-
-
-def test_append_only_evolution_prefers_evolution_decisions_over_decisions() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution
-
-    packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
-    packet = Packet(
-        units=packet.units,
-        decisions=[True],
         evolution_decisions=[False],
         placements=packet.placements,
         trace=packet.trace,
@@ -232,17 +219,40 @@ def test_append_only_evolution_prefers_evolution_decisions_over_decisions() -> N
 
     _, updated_store = AppendOnlyEvolution().run(packet, store)
 
-    assert updated_store.count() == 0
+    assert updated_store.count() == 1
 
 
-def test_append_only_evolution_falls_back_to_decisions_when_evolution_decisions_missing() -> None:
+def test_append_only_evolution_records_active_unit_ids_without_mutating_store() -> None:
     from memprimitive.baselines import AppendOnlyEvolution
 
     packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
+    packet = Packet(
+        units=packet.units,
+        evolution_decisions=[True],
+        placements=packet.placements,
+        trace=packet.trace,
+    )
 
-    _, updated_store = AppendOnlyEvolution().run(packet, store)
+    packet_out, updated_store = AppendOnlyEvolution().run(packet, store)
 
     assert updated_store.count() == 1
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "evolution_decisions"
+    assert packet_out.trace["memory_evolution"]["active_unit_ids"] == [packet.units[0].unit_id]
+    assert packet_out.trace["memory_evolution"]["effects"] == []
+
+
+def test_append_only_evolution_requires_explicit_evolution_decisions() -> None:
+    from memprimitive.baselines import AppendOnlyEvolution
+
+    packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        trace=packet.trace,
+    )
+
+    with pytest.raises(ValueError, match="packet.evolution_decisions"):
+        AppendOnlyEvolution().run(packet, store)
 
 
 def test_append_only_evolution_requires_aligned_inputs() -> None:
@@ -250,17 +260,17 @@ def test_append_only_evolution_requires_aligned_inputs() -> None:
 
     with pytest.raises(ValueError, match="aligned units"):
         AppendOnlyEvolution().run(
-            Packet(units=[], decisions=[True], placements=[]),
+            Packet(units=[], evolution_decisions=[True], placements=[]),
             MemoryStore(),
         )
 
 
-def test_write_and_evolution_trigger_share_observable_mask_behavior() -> None:
+def test_write_and_evolution_trigger_are_independent_by_default() -> None:
     from memprimitive.baselines import (
-        AlwaysEvolutionTrigger,
         AlwaysWriteTrigger,
         AppendOrganization,
         BasicRepresentation,
+        NeverEvolutionTrigger,
         PassThroughUnitFormation,
     )
 
@@ -271,9 +281,10 @@ def test_write_and_evolution_trigger_share_observable_mask_behavior() -> None:
     packet, store = BasicRepresentation().run(packet, store)
     write_packet, store = AlwaysWriteTrigger().run(packet, store)
     write_packet, store = AppendOrganization().run(write_packet, store)
-    evolution_packet, _ = AlwaysEvolutionTrigger().run(write_packet, store)
+    evolution_packet, _ = NeverEvolutionTrigger().run(write_packet, store)
 
-    assert write_packet.decisions == evolution_packet.evolution_decisions
+    assert write_packet.decisions == [True]
+    assert evolution_packet.evolution_decisions == [False]
     assert write_packet.trace["write_trigger"]["family"] == evolution_packet.trace["evolution_trigger"]["family"]
 
 
@@ -395,13 +406,11 @@ def test_composed_evolution_trigger_validates_custom_input_requirements_at_entry
 
 
 def test_retrieval_honors_top_k() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+    from memprimitive.baselines import RecencyRetrieval
 
     store = MemoryStore()
-    evolution = AppendOnlyEvolution()
     for text in ("one", "two", "three"):
         packet, store = _stored_pipeline_packet(text, store)
-        _, store = evolution.run(packet, store)
 
     packet_out, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="items")), store)
 
@@ -438,11 +447,10 @@ def test_retrieval_on_empty_store_returns_empty_retrieved_set() -> None:
 
 
 def test_readout_formats_deterministic_text_and_source_ids() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, ConcatenateReadout
+    from memprimitive.baselines import ConcatenateReadout
 
     store = MemoryStore()
     packet, store = _stored_pipeline_packet("Alice likes tea.", store)
-    _, store = AppendOnlyEvolution().run(packet, store)
     retrieved = RetrievedSet(items=list(reversed(store.iter_records())), scores=[])
 
     packet_out, _ = ConcatenateReadout().run(Packet(retrieved=retrieved), store)
@@ -463,12 +471,11 @@ def test_readout_on_empty_retrieval_returns_valid_empty_output() -> None:
 
 
 def test_retrieval_prefers_keyword_matches_when_available() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+    from memprimitive.baselines import RecencyRetrieval
 
     store = MemoryStore()
     for text in ("Alice likes tea", "Bob prefers coffee", "Alice studies graphs"):
         packet, store = _stored_pipeline_packet(text, store)
-        _, store = AppendOnlyEvolution().run(packet, store)
 
     packet_out, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="Alice")), store)
 
@@ -478,12 +485,11 @@ def test_retrieval_prefers_keyword_matches_when_available() -> None:
 
 
 def test_retrieval_returns_latest_records_first_when_falling_back_to_recency() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+    from memprimitive.baselines import RecencyRetrieval
 
     store = MemoryStore()
     for text in ("first item", "second item", "third item"):
         packet, store = _stored_pipeline_packet(text, store)
-        _, store = AppendOnlyEvolution().run(packet, store)
 
     packet_out, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="unmatched")), store)
 
@@ -492,11 +498,10 @@ def test_retrieval_returns_latest_records_first_when_falling_back_to_recency() -
 
 
 def test_retrieval_does_not_mutate_store() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, RecencyRetrieval
+    from memprimitive.baselines import RecencyRetrieval
 
     store = MemoryStore()
     packet, store = _stored_pipeline_packet("Alice likes tea", store)
-    _, store = AppendOnlyEvolution().run(packet, store)
     before_ids = [record.record_id for record in store.iter_records()]
 
     _, store_after = RecencyRetrieval(top_k=1).run(Packet(query=Query(text="Alice")), store)
@@ -713,8 +718,8 @@ def test_embedding_similarity_retrieval_can_target_declared_topology_layer() -> 
     assert packet_out.trace["retrieval"]["candidate_count"] == 1
 
 
-def test_append_only_evolution_can_write_into_declared_non_default_topology_layer() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, AppendOrganization
+def test_organization_can_write_into_declared_non_default_topology_layer() -> None:
+    from memprimitive.baselines import AppendOrganization
 
     topology = StoreTopology.from_layers(
         [
@@ -726,14 +731,12 @@ def test_append_only_evolution_can_write_into_declared_non_default_topology_laye
     packet, store = _stored_pipeline_packet("Alice likes tea.", store)
     packet, store = AppendOrganization(target_layer="episodic").run(packet, store)
 
-    _, updated_store = AppendOnlyEvolution().run(packet, store)
-
-    assert updated_store.count("episodic") == 1
-    assert updated_store.iter_records("episodic")[0].layer == "episodic"
+    assert store.count("episodic") == 1
+    assert store.iter_records("episodic")[0].layer == "episodic"
 
 
 def test_retrieval_can_target_declared_topology_layer() -> None:
-    from memprimitive.baselines import AppendOnlyEvolution, AppendOrganization, RecencyRetrieval
+    from memprimitive.baselines import AppendOrganization, RecencyRetrieval
 
     topology = StoreTopology.from_layers(
         [
@@ -745,7 +748,6 @@ def test_retrieval_can_target_declared_topology_layer() -> None:
     for text in ("episodic first", "episodic second"):
         packet, store = _stored_pipeline_packet(text, store)
         packet, store = AppendOrganization(target_layer="episodic").run(packet, store)
-        _, store = AppendOnlyEvolution().run(packet, store)
 
     packet_out, _ = RecencyRetrieval(top_k=1, layer="episodic").run(Packet(query=Query(text="episodic")), store)
 
@@ -782,3 +784,38 @@ def test_baselines_all_matches_registered_baseline_classes() -> None:
     import memprimitive.baselines as pkg
 
     assert set(pkg.__all__) == registered_baseline_class_names()
+
+
+def test_write_false_skips_normal_write_and_leaves_evolution_noop() -> None:
+    from memprimitive.baselines import (
+        AppendOnlyEvolution,
+        AppendOrganization,
+        BasicRepresentation,
+        PassThroughUnitFormation,
+    )
+
+    store = MemoryStore()
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        store,
+    )
+    packet, store = BasicRepresentation().run(packet, store)
+    packet = Packet(
+        observation=packet.observation,
+        units=packet.units,
+        decisions=[False],
+        trace=packet.trace,
+    )
+    packet, store = AppendOrganization().run(packet, store)
+    packet = Packet(
+        units=packet.units,
+        decisions=packet.decisions,
+        evolution_decisions=[False],
+        placements=packet.placements,
+        trace=packet.trace,
+    )
+    packet, store = AppendOnlyEvolution().run(packet, store)
+
+    assert store.count() == 0
+    assert packet.trace["organization"]["written_record_ids"] == []
+    assert packet.trace["memory_evolution"]["effects"] == []

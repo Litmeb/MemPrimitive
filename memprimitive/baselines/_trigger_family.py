@@ -155,6 +155,18 @@ class AlwaysPolicy(DecisionPolicy):
 
 
 @dataclass(slots=True, frozen=True)
+class NeverPolicy(DecisionPolicy):
+    """Always reject units that reach the policy."""
+
+    @property
+    def name(self) -> str:
+        return "never"
+
+    def decide(self, *, score: float, gate_open: bool) -> bool:
+        return False
+
+
+@dataclass(slots=True, frozen=True)
 class ThresholdPolicy(DecisionPolicy):
     """Accept units whose score meets or exceeds a threshold and whose gate is open."""
 
