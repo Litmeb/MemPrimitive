@@ -3,7 +3,16 @@ from __future__ import annotations
 import pytest
 
 from memprimitive import Observation, Query, create_baseline_pipeline
-from memprimitive.baselines import RecencyRetrieval
+from memprimitive.baselines import (
+    AlwaysWriteTrigger,
+    AppendOnlyEvolution,
+    AppendOrganization,
+    BasicRepresentation,
+    ConcatenateReadout,
+    NeverEvolutionTrigger,
+    PassThroughUnitFormation,
+    RecencyRetrieval,
+)
 from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
     iter_baseline_pipeline_instances,
@@ -46,6 +55,7 @@ def test_create_baseline_pipeline_keeps_recency_retrieval_as_default() -> None:
     pipeline = create_baseline_pipeline(top_k=2)
 
     assert isinstance(pipeline.retrieval, RecencyRetrieval)
+    assert pipeline.retrieval.top_k == 2
 
 
 def test_round_trip_demo_scenario_works_with_baseline_pipeline() -> None:
@@ -127,23 +137,26 @@ def test_default_pipeline_includes_evolution_trigger_trace_and_preserves_behavio
     assert pipeline.store.count() == 1
 
 
-def test_memory_pipeline_defaults_optional_evolution_modules() -> None:
-    from memprimitive.baselines import (
-        AlwaysWriteTrigger,
-        AppendOrganization,
-        BasicRepresentation,
-        ConcatenateReadout,
-        PassThroughUnitFormation,
-        RecencyRetrieval,
-    )
+def test_memory_pipeline_zero_arg_constructor_populates_all_default_modules() -> None:
+    pipeline = MemoryPipeline()
 
+    assert isinstance(pipeline.unit_formation, PassThroughUnitFormation)
+    assert isinstance(pipeline.representation, BasicRepresentation)
+    assert isinstance(pipeline.write_trigger, AlwaysWriteTrigger)
+    assert isinstance(pipeline.organization, AppendOrganization)
+    assert isinstance(pipeline.evolution_trigger, NeverEvolutionTrigger)
+    assert isinstance(pipeline.memory_evolution, AppendOnlyEvolution)
+    assert isinstance(pipeline.retrieval, RecencyRetrieval)
+    assert pipeline.retrieval.top_k == 3
+    assert isinstance(pipeline.readout, ConcatenateReadout)
+
+
+def test_memory_pipeline_defaults_all_modules_when_only_ingest_side_overrides_are_provided() -> None:
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=BasicRepresentation(),
         write_trigger=AlwaysWriteTrigger(),
         organization=AppendOrganization(),
-        retrieval=RecencyRetrieval(top_k=2),
-        readout=ConcatenateReadout(),
     )
 
     packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
@@ -151,6 +164,20 @@ def test_memory_pipeline_defaults_optional_evolution_modules() -> None:
     assert packet.evolution_decisions == [False]
     assert packet.trace["evolution_trigger"]["policy"] == "never"
     assert pipeline.store.count() == 1
+
+
+def test_memory_pipeline_defaults_ingest_side_when_only_recall_side_overrides_are_provided() -> None:
+    pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=2),
+        readout=ConcatenateReadout(),
+    )
+
+    pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    readout = pipeline.recall(Query(text="Alice"))
+
+    assert "Alice" in readout.text
+    assert readout.source_ids
 
 
 def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() -> None:

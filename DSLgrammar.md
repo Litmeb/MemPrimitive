@@ -130,7 +130,7 @@ stores {
 - 每层的 `shape`
 - 每层的 `theme`
 
-跨层流动策略，如写入路由、摘要迁移、提升/降级和 selective read，不放在 `StoreBlock` 中，而由 `organization`、`memory_evolution`、`retrieval` 等模块负责。
+跨层流动策略，如**目标落点（placement）**、摘要迁移、提升/降级和 selective read，不放在 `StoreBlock` 中，而由 `organization`、`memory_evolution`、`retrieval` 等模块负责。
 其中新的语义是：
 
 - `organization` 负责 ingest-time 的组织与常规写入
@@ -437,13 +437,13 @@ write_trigger : WriteTrigger(
 
 ### 2.5.4 Organization 的规范写法（建议）
 
-对 `organization`，推荐统一写成：
+对 `organization`，推荐统一写成（与 `Primitives.md` 一致：**`placement` = 送到哪里；不再单独使用 `routing` 一词**；**`write` = 到达目标层后的层内写入形态**）：
 
 ```text
 Organization(
-  routing=...,
-  links={...},
   placement=...,
+  links={...},
+  write=...,
   ...
 )
 ```
@@ -459,10 +459,10 @@ It is not only a placement-plan generator.
 
 ```text
 Organization is topology-constrained.
-StoreTopology defines the admissible routing targets, link types, and placement modes.
+StoreTopology defines the admissible placement targets, link types, and within-layer write shapes.
 ```
 
-推荐 routing：
+推荐 **placement**（目标 layer / 分区）：
 
 ```text
 default(target_layer=...)
@@ -473,7 +473,7 @@ explicit(field=...)
 agent_selected(tool_to_layer={...})
 ```
 
-推荐 links：
+推荐 **links**：
 
 ```text
 temporal(...)
@@ -484,61 +484,61 @@ graph_edge(edge_types=[...], connection_method=...)
 parent_child(...)
 ```
 
-推荐 placement：
+推荐 **write**（层内写入形态）：
 
 ```text
 append()
 partition(partition_key=...)
 cluster(similarity_threshold=...)
 graph_node(node_policy=...)
-hierarchical_slot(target_level=..., placement_policy=...)
+hierarchical_slot(target_level=..., slot_policy=...)
 ```
 
 推荐约束：
 
-- `placement=graph_node(...)` 要求存在 `shape=Graph` 的 layer
+- `write=graph_node(...)` 要求存在 `shape=Graph` 的 layer
 - `links` 中包含 `graph_edge(...)` 时，通常要求目标 layer 有 `graph` index
-- `placement=hierarchical_slot(...)` 或 `links={parent_child(...)}` 要求 `layer_count > 1`
-- `routing=by_tag(...)` 要求 unit/representation 中可读出 `tags`
+- `write=hierarchical_slot(...)` 或 `links={parent_child(...)}` 要求 `layer_count > 1`
+- `placement=by_tag(...)` 要求 unit/representation 中可读出 `tags`
 - `links={entity(...)}` 要求 unit/representation 中可读出 `entities`
 
 补充语义约束：
 
-- `organization` 默认完成常规写入，因此 `placement=append()` 不再意味着“只产出计划”，而意味着 append-style normal write
-- 某些 `organization` 实现可以包含与 routing / placement 强耦合的 ingest-time merge / upsert / replace
+- `organization` 默认完成常规写入，因此 `write=append()` 不再意味着“只产出计划”，而意味着 append-style normal write
+- 某些 `organization` 实现可以包含与 placement（目标或层内形态）强耦合的 ingest-time merge / upsert / replace
 - 这些 ingest-time update 不单独拆成新 slot，因为它们不构成独立搜索轴
 
 示例：
 
 ```text
 organization : Organization(
-    routing=default(target_layer="episodic"),
+    placement=default(target_layer="episodic"),
     links={temporal()},
-    placement=append()
+    write=append()
 )
 ```
 
 ```text
 organization : Organization(
-    routing=by_unit_type(route_map={"turn": "working", "fact": "semantic"}),
+    placement=by_unit_type(route_map={"turn": "working", "fact": "semantic"}),
     links={},
-    placement=append()
+    write=append()
 )
 ```
 
 ```text
 organization : Organization(
-    routing=default(target_layer="graph_memory"),
+    placement=default(target_layer="graph_memory"),
     links={graph_edge(edge_types=["related_to", "derived_from"], connection_method="llm_inferred")},
-    placement=graph_node(node_policy="append")
+    write=graph_node(node_policy="append")
 )
 ```
 
 ```text
 organization : Organization(
-    routing=by_tag(tag_field="skill_type", route_map={"craft": "craft_skills", "nav": "nav_skills"}),
+    placement=by_tag(tag_field="skill_type", route_map={"craft": "craft_skills", "nav": "nav_skills"}),
     links={},
-    placement=partition(partition_key="skill_type")
+    write=partition(partition_key="skill_type")
 )
 ```
 
@@ -888,7 +888,7 @@ Packet = {
     observation  : Observation?       // A 阶段读
     units        : list[MemoryUnit]?  // A 输出, B/C/D/E 读写
     decisions    : list[bool]?        // C 输出, D 读
-    placement    : list[PlacePlan]?   // D 可写, 也可仅作为 trace/plan
+    placements   : list[PlacePlan]?   // D: 每 unit 目标落点（如 target_layer）；与 Primitives.md 中 placement 语义一致；可写或仅 trace
     query        : Query?             // G 阶段读
     retrieved    : RetrievedContext?   // G 输出, H 读
     readout      : ReadoutPacket?     // H 输出
@@ -968,7 +968,7 @@ memory_evolution: None
 | 不启用某 slot | ✓ | `None` |
 | 触发条件 | ✓ | `TriggerBlock` |
 | 兼容性约束 | ✓ | `ConstraintBlock` |
-| 多层路由 | ✓ | `Organization` 的 target_store / target_layer 参数 |
+| 多层落点（placement） | ✓ | `Organization` 的 `placement`（如 `default` / `by_unit_type`）及 `target_layer` 等参数 |
 | Agent 显式触发 | ✓ | `tool_called(...)` + `explicit_only(...)` |
 | 参数化搜索 | ✓ | `ConfigArgs` 支持任意参数 |
 | 嵌套组合 | ✓ | `ModuleExpr` 可递归嵌套 |

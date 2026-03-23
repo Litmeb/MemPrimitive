@@ -134,12 +134,12 @@ one pipeline, but some slots are layer-aware
 同理：
 
 - `memory_evolution` 仍然是一个 slot
-- 但它内部会根据 `placement.target_layer` 分派给不同 evolution 策略
+- 但它内部会根据每个 unit 的 **目标落点** `Placement.target_layer`（`Packet.placements` 与之一一对应）分派给不同 evolution 策略
 
 再比如：
 
 - `representation` 仍然是一个 slot
-- 但它可以根据目标 layer 或 route 结果，应用不同 representation builder
+- 但它可以根据**已知的**目标 layer（由 organization 的 **placement** 策略确定后），应用不同 representation builder
 
 这保持了两个重要优点：
 
@@ -256,7 +256,7 @@ layer-aware retrieval =
 原因：
 
 - evolution 本来就和目标 layer 强相关
-- `placement.target_layer` 已经提供了分派信号
+- `Placement.target_layer`（目标落点）已经提供了分派信号
 
 一个自然的结构是：
 
@@ -283,7 +283,7 @@ representation 也适合 layer-aware，但应放得更晚一些。
 
 一个更稳的做法是：
 
-- 先让 routing / placement 更成熟
+- 先让 **placement**（目标落点）策略与 **write**（层内写入形态）更成熟
 - 再让 representation 依据目标 layer 应用不同 element builders
 
 ---
@@ -365,7 +365,7 @@ class LayerAwareRetrieval(RetrievalModule):
 ### 9.2 Layer-aware Memory Evolution
 
 ```text
-units + placements + decisions
+units + placements + decisions   // placements: 与 units 对齐；每项含目标落点 target_layer（Primitives.md 中的 placement 语义）
   -> group by target_layer
   -> pick evolution strategy per layer
   -> apply updates
@@ -423,11 +423,11 @@ unit_formation
 因为：
 
 - retrieval 在 recall 路径上天然按 layer 查询
-- evolution 在 ingest 路径上天然按 `placement.target_layer` 分派
+- evolution 在 ingest 路径上天然按 `Placement.target_layer`（目标落点）分派
 
 ### 10.3 `representation` 暂时只预留设计口
 
-如果 `representation` 还发生在 routing / placement 之前，那么：
+如果 `representation` 还发生在 **organization 确定目标落点** 之前，那么：
 
 - 它还不知道最终 target layer
 - 因此不适合立刻强行 layer-aware
@@ -435,7 +435,7 @@ unit_formation
 更合理的选择是：
 
 - 先保持通用 representation
-- 等 organization 或 routing 更成熟后，再考虑 layer-aware override
+- 等 organization 的 **placement / write** 语义更成熟后，再考虑 layer-aware override
 
 ---
 
@@ -453,14 +453,14 @@ unit_formation
 
 目标：
 
-- 按 `placement.target_layer` 选择 evolution 策略
+- 按 `Placement.target_layer`（目标落点）选择 evolution 策略
 - working/semantic/profile 可以拥有不同 update 机制
 
 ### Phase C：最后评估 Layer-aware Representation
 
 前提：
 
-- routing 更稳定
+- **placement**（目标落点）策略更稳定
 - target layer 语义更清晰
 - representation element 体系更成熟
 
