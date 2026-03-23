@@ -755,6 +755,224 @@ def test_retrieval_can_target_declared_topology_layer() -> None:
     assert [record.text for record in packet_out.retrieved.items] == ["episodic second"]
 
 
+def test_layer_aware_retrieval_merges_per_layer_results_and_applies_global_top_k() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval, LayerAwareRetrieval, RecencyRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="working"),
+            StoreLayerSpec(name="semantic"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    store.append(
+        MemoryRecord(
+            record_id="rec-working-1",
+            unit_id="unit-working-1",
+            layer="working",
+            text="working hit",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-semantic-1",
+            unit_id="unit-semantic-1",
+            layer="semantic",
+            text="semantic best",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-semantic-2",
+            unit_id="unit-semantic-2",
+            layer="semantic",
+            text="semantic weaker",
+            timestamp="2026-01-01T00:00:02+00:00",
+            embedding=[0.8, 0.2],
+        )
+    )
+
+    packet_out, _ = LayerAwareRetrieval(
+        default_retriever=RecencyRetrieval(top_k=2),
+        retriever_by_layer={"semantic": EmbeddingSimilarityRetrieval(top_k=2)},
+        top_k=2,
+    ).run(
+        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-semantic-1", "rec-semantic-2"]
+    assert packet_out.retrieved.scores[0]["merge_rank"] == 1
+    assert packet_out.retrieved.scores[0]["merge_key_type"] == "score"
+    assert packet_out.retrieved.scores[0]["layer"] == "semantic"
+    assert packet_out.trace["retrieval"]["merge_strategy"] == "global_rank"
+    assert packet_out.trace["retrieval"]["total_merged_count"] == 3
+    assert packet_out.trace["retrieval"]["final_returned_count"] == 2
+
+
+def test_layer_aware_retrieval_falls_back_to_default_retriever_for_unconfigured_layers() -> None:
+    from memprimitive.baselines import LayerAwareRetrieval, RecencyRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="working"),
+            StoreLayerSpec(name="episodic"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    store.append(
+        MemoryRecord(
+            record_id="rec-working-1",
+            unit_id="unit-working-1",
+            layer="working",
+            text="working latest",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-episodic-1",
+            unit_id="unit-episodic-1",
+            layer="episodic",
+            text="episodic latest",
+            timestamp="2026-01-01T00:00:01+00:00",
+        )
+    )
+
+    packet_out, _ = LayerAwareRetrieval(
+        default_retriever=RecencyRetrieval(top_k=1),
+        retriever_by_layer={"working": RecencyRetrieval(top_k=1)},
+        top_k=2,
+    ).run(Packet(query=Query(text="latest")), store)
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-working-1", "rec-episodic-1"]
+    assert [entry["module"] for entry in packet_out.trace["retrieval"]["per_layer"]] == [
+        "recency_retrieval",
+        "recency_retrieval",
+    ]
+
+
+def test_layer_aware_retrieval_can_limit_active_layers() -> None:
+    from memprimitive.baselines import LayerAwareRetrieval, RecencyRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="working"),
+            StoreLayerSpec(name="episodic"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    store.append(
+        MemoryRecord(
+            record_id="rec-working-1",
+            unit_id="unit-working-1",
+            layer="working",
+            text="working memory",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-episodic-1",
+            unit_id="unit-episodic-1",
+            layer="episodic",
+            text="episodic memory",
+            timestamp="2026-01-01T00:00:01+00:00",
+        )
+    )
+
+    packet_out, _ = LayerAwareRetrieval(
+        default_retriever=RecencyRetrieval(top_k=1),
+        active_layers=("episodic",),
+        top_k=2,
+    ).run(Packet(query=Query(text="memory")), store)
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-episodic-1"]
+    assert packet_out.trace["retrieval"]["active_layers"] == ["episodic"]
+
+
+def test_layer_aware_retrieval_uses_layer_order_to_break_rank_ties() -> None:
+    from memprimitive.baselines import LayerAwareRetrieval, RecencyRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="working"),
+            StoreLayerSpec(name="episodic"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    store.append(
+        MemoryRecord(
+            record_id="rec-working-1",
+            unit_id="unit-working-1",
+            layer="working",
+            text="working rank one",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-episodic-1",
+            unit_id="unit-episodic-1",
+            layer="episodic",
+            text="episodic rank one",
+            timestamp="2026-01-01T00:00:01+00:00",
+        )
+    )
+
+    packet_out, _ = LayerAwareRetrieval(
+        default_retriever=RecencyRetrieval(top_k=1),
+        top_k=2,
+    ).run(Packet(query=Query(text="rank")), store)
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-working-1", "rec-episodic-1"]
+    assert packet_out.retrieved.scores[0]["merge_key_type"] == "rank"
+    assert packet_out.retrieved.scores[1]["merge_key_type"] == "rank"
+
+
+def test_layer_aware_retrieval_returns_valid_empty_result_for_empty_store() -> None:
+    from memprimitive.baselines import LayerAwareRetrieval
+
+    packet_out, store_out = LayerAwareRetrieval(top_k=2).run(
+        Packet(query=Query(text="query")),
+        MemoryStore(),
+    )
+
+    assert packet_out.retrieved is not None
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+    assert packet_out.trace["retrieval"]["per_layer"][0]["candidate_count"] == 0
+    assert store_out.count() == 0
+
+
+def test_layer_aware_retrieval_validates_inputs() -> None:
+    from memprimitive.baselines import LayerAwareRetrieval
+
+    with pytest.raises(ValueError, match="top_k > 0"):
+        LayerAwareRetrieval(top_k=0)
+
+    with pytest.raises(ValueError, match="merge_strategy='global_rank'"):
+        LayerAwareRetrieval(merge_strategy="round_robin")
+
+    with pytest.raises(TypeError, match="default_retriever"):
+        LayerAwareRetrieval(default_retriever=object())
+
+    with pytest.raises(TypeError, match="retriever_by_layer values"):
+        LayerAwareRetrieval(retriever_by_layer={"semantic": object()})
+
+    topology = StoreTopology.from_layers([StoreLayerSpec(name="working")])
+    store = MemoryStore(topology=topology)
+    with pytest.raises(ValueError, match="not declared in the store topology"):
+        LayerAwareRetrieval(active_layers=("missing",)).run(Packet(query=Query(text="query")), store)
+
+
 def test_store_capability_queries_reflect_declared_topology() -> None:
     store = MemoryStore(
         topology=StoreTopology.from_layers(
