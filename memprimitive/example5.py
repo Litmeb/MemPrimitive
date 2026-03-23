@@ -23,6 +23,7 @@ from memprimitive import MemoryPipeline, MemoryStore, Observation, Packet, Query
 from memprimitive.baselines import (
     AppendOrganization,
     BasicRepresentation,
+    ConcatenateReadout,
     EmbeddingSimilarityRetrieval,
     LayerAwareRetrieval,
     RecencyRetrieval,
@@ -60,6 +61,7 @@ def main() -> None:
             retriever_by_layer={"semantic": EmbeddingSimilarityRetrieval(top_k=2)},
             top_k=3,
         ),
+        readout=ConcatenateReadout(separator="\n\n"),
         store=store,
     )
 
