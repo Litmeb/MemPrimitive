@@ -25,6 +25,23 @@ def test_query_embedding_defaults_to_none() -> None:
     query = Query(text="alice")
 
     assert query.embedding is None
+    assert query.embedding_model is None
+
+
+def test_query_embedding_model_cleared_when_embedding_absent() -> None:
+    query = Query(text="alice", embedding_model="ignored-without-embedding")
+
+    assert query.embedding is None
+    assert query.embedding_model is None
+
+
+def test_query_embedding_model_rejects_whitespace_when_embedding_present() -> None:
+    try:
+        Query(text="alice", embedding=[1.0], embedding_model="   ")
+    except ValueError as exc:
+        assert "Query.embedding_model" in str(exc)
+    else:
+        raise AssertionError("Query should reject blank embedding_model when embedding is set.")
 
 
 def test_query_embedding_is_normalized_to_float_list() -> None:

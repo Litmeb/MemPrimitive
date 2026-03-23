@@ -13,6 +13,8 @@ from ..interfaces import RetrievalModule
 
 from ._trace import copy_trace
 
+DEFAULT_EMBEDDING_MODEL: Final[str] = "sentence-transformers/all-MiniLM-L6-v2"
+
 
 class RecencyRetrieval(RetrievalModule):
     """Retrieve up to ``top_k`` records: keyword filter when possible, else by recency.
@@ -92,9 +94,12 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
     ``store.iter_records(layer)``; ``None`` means all layers. ``embedding_model``
     defaults to the same sentence-transformers model as ``BasicRepresentation``.
 
-    ``run`` requires ``packet.query``. Uses ``query.embedding`` when present;
-    otherwise encodes ``query.text`` and returns an updated packet with the cached
-    query embedding. Only records with ``record.embedding`` participate in scoring.
+    ``run`` requires ``packet.query``. Uses ``query.embedding`` when present and
+    ``query.embedding_model`` matches ``self.embedding_model``; otherwise encodes
+    ``query.text`` and returns an updated packet with the cached query embedding
+    and model id. Mismatched or unlabeled cached embeddings raise ``ValueError``
+    so layered retrieval cannot silently reuse another model's vector space.
+    Only records with ``record.embedding`` participate in scoring.
     Records with missing or dimension-mismatched embeddings are skipped. Does not
     mutate the store. Populates ``packet.retrieved`` and score dicts with numeric
     similarity values.
@@ -113,7 +118,7 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         self,
         top_k: int = 3,
         layer: str | None = None,
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     ) -> None:
         if top_k <= 0:
             raise ValueError("EmbeddingSimilarityRetrieval requires top_k > 0.")
@@ -126,10 +131,26 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
             raise ValueError("EmbeddingSimilarityRetrieval requires packet.query.")
 
         query = packet.query
-        reused_query_embedding = query.embedding is not None
-        query_embedding = list(query.embedding) if query.embedding is not None else self._embed_text(query.text)
-        if query.embedding is None:
-            query = replace(query, embedding=query_embedding)
+        if query.embedding is not None:
+            if query.embedding_model is None:
+                raise ValueError(
+                    "Query.embedding is set but Query.embedding_model is None; cannot verify "
+                    "compatibility with this retriever. Set embedding_model to the same string "
+                    f"as EmbeddingSimilarityRetrieval.embedding_model (here {self.embedding_model!r}), "
+                    "or clear embedding so the query is encoded with this retriever's model."
+                )
+            if query.embedding_model != self.embedding_model:
+                raise ValueError(
+                    "Query embedding was produced by a different model than this retriever uses "
+                    f"({query.embedding_model!r} vs {self.embedding_model!r}); reusing it would "
+                    "misrank results across embedding spaces."
+                )
+            reused_query_embedding = True
+            query_embedding = list(query.embedding)
+        else:
+            reused_query_embedding = False
+            query_embedding = self._embed_text(query.text)
+            query = replace(query, embedding=query_embedding, embedding_model=self.embedding_model)
 
         all_records = store.iter_records(self.layer)
         scored_candidates: list[tuple[float, object]] = []

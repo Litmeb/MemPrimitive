@@ -173,17 +173,27 @@ class Placement:
 
 @dataclass(slots=True)
 class Query:
-    """Query used for retrieval."""
+    """Query used for retrieval.
+
+    When ``embedding`` is set, ``embedding_model`` should identify the model that
+    produced it (same string as ``EmbeddingSimilarityRetrieval.embedding_model``).
+    That allows safe reuse checks when multiple retrieval layers share one ``Query``.
+    """
 
     text: str
     query_id: str = field(default_factory=lambda: _default_id("query"))
     timestamp: str = field(default_factory=_utc_now_iso)
     embedding: list[float] | None = None
+    embedding_model: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.text = _require_non_empty_text(self.text, "Query.text")
         self.embedding = None if self.embedding is None else [float(value) for value in self.embedding]
+        if self.embedding is None:
+            self.embedding_model = None
+        elif self.embedding_model is not None:
+            self.embedding_model = _require_non_empty_text(self.embedding_model, "Query.embedding_model")
 
 
 @dataclass(slots=True)

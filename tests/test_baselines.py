@@ -546,7 +546,13 @@ def test_embedding_similarity_retrieval_ranks_records_by_query_embedding() -> No
         store.append(record)
 
     packet_out, store_after = EmbeddingSimilarityRetrieval(top_k=2).run(
-        Packet(query=Query(text="ignored", embedding=[1.0, 0.0])),
+        Packet(
+            query=Query(
+                text="ignored",
+                embedding=[1.0, 0.0],
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            )
+        ),
         store,
     )
 
@@ -597,6 +603,7 @@ def test_embedding_similarity_retrieval_computes_and_caches_query_embedding(monk
 
     assert packet_out.query is not None
     assert packet_out.query.embedding == [1.0, 0.0]
+    assert packet_out.query.embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
     assert packet_out.retrieved is not None
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
     assert packet_out.trace["retrieval"]["reused_query_embedding"] is False
@@ -620,7 +627,13 @@ def test_embedding_similarity_retrieval_uses_record_embedding_not_metadata_summa
     )
 
     packet_out, _ = EmbeddingSimilarityRetrieval(top_k=1).run(
-        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        Packet(
+            query=Query(
+                text="query",
+                embedding=[1.0, 0.0],
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            )
+        ),
         store,
     )
 
@@ -667,7 +680,13 @@ def test_embedding_similarity_retrieval_skips_missing_and_mismatched_embeddings(
     )
 
     packet_out, _ = EmbeddingSimilarityRetrieval(top_k=3).run(
-        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        Packet(
+            query=Query(
+                text="query",
+                embedding=[1.0, 0.0],
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            )
+        ),
         store,
     )
 
@@ -709,13 +728,87 @@ def test_embedding_similarity_retrieval_can_target_declared_topology_layer() -> 
     )
 
     packet_out, _ = EmbeddingSimilarityRetrieval(top_k=1, layer="episodic").run(
-        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        Packet(
+            query=Query(
+                text="query",
+                embedding=[1.0, 0.0],
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            )
+        ),
         store,
     )
 
     assert packet_out.retrieved is not None
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2"]
     assert packet_out.trace["retrieval"]["candidate_count"] == 1
+
+
+def test_embedding_similarity_retrieval_rejects_query_embedding_without_model_id() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="x",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+
+    with pytest.raises(ValueError, match="embedding_model is None"):
+        EmbeddingSimilarityRetrieval(top_k=1).run(
+            Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+            store,
+        )
+
+
+def test_embedding_similarity_retrieval_rejects_query_embedding_from_other_model() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    with pytest.raises(ValueError, match="different model"):
+        EmbeddingSimilarityRetrieval(top_k=1).run(
+            Packet(
+                query=Query(
+                    text="query",
+                    embedding=[1.0, 0.0],
+                    embedding_model="some/other-model",
+                )
+            ),
+            MemoryStore(),
+        )
+
+
+def test_layer_aware_retrieval_raises_when_embedding_retrievers_use_different_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval, LayerAwareRetrieval
+
+    def _fake_embed(self: EmbeddingSimilarityRetrieval, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(EmbeddingSimilarityRetrieval, "_embed_text", _fake_embed)
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="working"),
+            StoreLayerSpec(name="semantic"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+
+    retriever = LayerAwareRetrieval(
+        retriever_by_layer={
+            "working": EmbeddingSimilarityRetrieval(top_k=1, layer="working", embedding_model="model-a"),
+            "semantic": EmbeddingSimilarityRetrieval(top_k=1, layer="semantic", embedding_model="model-b"),
+        },
+        top_k=2,
+    )
+
+    with pytest.raises(ValueError, match="model-a"):
+        retriever.run(Packet(query=Query(text="query")), store)
 
 
 def test_organization_can_write_into_declared_non_default_topology_layer() -> None:
@@ -800,7 +893,13 @@ def test_layer_aware_retrieval_merges_per_layer_results_and_applies_global_top_k
         retriever_by_layer={"semantic": EmbeddingSimilarityRetrieval(top_k=2)},
         top_k=2,
     ).run(
-        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        Packet(
+            query=Query(
+                text="query",
+                embedding=[1.0, 0.0],
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            )
+        ),
         store,
     )
 
