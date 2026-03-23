@@ -326,8 +326,10 @@ class Packet:
 
     ``decisions`` is the write-side gating mask used before organization.
     ``evolution_decisions`` is the extra-evolution gating mask used by
-    ``memory_evolution`` after normal ingest-time organization and write
-    have already completed.
+    ``memory_evolution`` after normal ingest-time placement/write planning
+    (``organization``). :class:`~memprimitive.pipeline.MemoryPipeline` may defer
+    physical ``MemoryStore.append`` until after evolution stages so ingest stays
+    atomic with respect to the store when later stages fail.
     """
 
     observation: Observation | None = None

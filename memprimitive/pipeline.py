@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import ClassVar, Final
 
-from .core import MemoryStore, Observation, Packet, Query, Readout
+from .core import MemoryRecord, MemoryStore, Observation, Packet, Query, Readout
 from .interfaces import (
     EvolutionTriggerModule,
     MemoryEvolutionModule,
