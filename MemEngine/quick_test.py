@@ -71,7 +71,7 @@ def main():
     # STMemory
     st_cfg = make_common_config()
     st_cfg["name"] = "STMemory"
-    st_cfg["store"] = {"method": "LTMemoryStore"}
+    st_cfg["store"] = {"method": "STMemoryStore"}
     st_cfg["recall"].update({"method": "STMemoryRecall", "time_retrieval": {"method": "TimeRetrieval", "mode": "raw", "topk": 5}})
     st = STMemory(MemoryConfig(st_cfg))
     print("STMemory:", run_memory(st, observations[:30], query))

@@ -35,8 +35,8 @@
 - `unit formation`：如何把原始 observation 形成记忆单元
 - `representation`：记忆单元如何编码、结构化和索引化
 - `write trigger`：系统何时决定写入记忆
-- `organization`：写入前如何决定放置位置和关系结构
-- `memory evolution`：已有记忆如何被追加、合并、重写、压缩、迁移、清理和整理
+- `organization`：ingest-time 如何决定放置位置、关系结构并完成常规写入
+- `memory evolution`：默认不启动时，已有记忆如何被额外地重写、压缩、迁移、清理和整理
 - `retrieval`：给定 query 如何选取相关记忆
 - `readout`：检索结果如何转化为 agent 可使用的上下文
 
@@ -61,9 +61,9 @@
 - 它如何形成记忆单元
 - 它如何表示记忆
 - 它何时写入
-- 它如何组织和更新记忆
+- 它如何组织并常规写入记忆
 - 它如何检索与使用记忆
-- 它是否压缩、反思或维护记忆
+- 它是否进行额外的压缩、反思或维护记忆
 
 这样，像 Generative Agents、MemGPT、Reflexion、Voyager、MemoryBank、A-MEM 等经典系统，就可以被看作同一语言中的不同配置，而不是彼此孤立的方法名。
 
@@ -75,7 +75,7 @@
 
 - 固定 `unit formation`，只比较不同 `retrieval`
 - 固定 `retrieval`，只比较不同 `write trigger`
-- 固定 `representation`，比较不同 `memory evolution`
+- 固定 `representation`，比较不同额外 `memory evolution`
 
 这使得 memory 研究从“方法对方法”的比较，转向“机制对机制”的比较。
 
@@ -104,7 +104,7 @@
 
 - 很多有效系统都采用“结构化抽取 + selective write + hybrid retrieval”
 - 某些任务更偏好“append-only + periodic summarization”
-- 某些长期交互场景更需要“entity merge + profile update + memory evolution”
+- 某些长期交互场景更需要“entity merge + profile update + extra memory evolution”
 
 这类结论不是从单篇方法中得到的，而是从系统搜索和机制比较中归纳出来的。
 
@@ -144,7 +144,7 @@
 4. 系统决定哪些 unit 值得写入
 5. unit 被放置到合适的 store，并与已有记忆建立关系
 6. store 被更新，可能发生追加、替换、合并或重写
-7. 在后台触发压缩、抽象、整理、遗忘或迁移
+7. 在后台或额外触发路径中执行压缩、抽象、整理、遗忘或迁移
 8. 当 agent 有 query 或当前任务需要时，系统检索相关记忆
 9. 检索结果被组织成 agent 可消费的 readout
 10. agent 将 readout 纳入自己的推理、规划和响应过程
@@ -247,8 +247,8 @@ memory primitive 之间并非完全自由组合。
 例如：
 
 - `representation` 和 `retrieval` 往往强耦合
-- `unit formation` 和 `memory evolution` 常常强耦合
-- `organization` 决定了后续能否进行 graph 或 hierarchical retrieval
+- `unit formation` 与 `organization` / `memory evolution` 常常强耦合
+- `organization` 决定了后续能否进行 graph 或 hierarchical retrieval，也承担常规写入
 
 因此，一个有效的搜索空间必须同时包含：
 
@@ -304,6 +304,9 @@ memory primitive 之间并非完全自由组合。
 ---
 
 ## 本仓库当前文档的分工
+
+- `memprimitive/baselines/README.md`
+  说明阶段一 baseline 代码如何按 primitive slot 拆分到多个 `.py` 文件、`__init__.py` 与 `simple.py` 的导出关系，以及扩展新实现时的约定。
 
 - `DSLIO.md`
   讨论 memory system 各模块的标准输入输出接口，明确系统中的共享对象、模块签名、副作用与能力约束。

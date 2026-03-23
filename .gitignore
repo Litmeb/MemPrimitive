@@ -1,0 +1,25 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+.cursor/
+.vscode/
+
+# Environment and secrets
+.env
+**/.env
+
+# Local data, logs, exports (JSON / JSONL)
+*.json
+*.jsonl
+*.mdc
+*.yml
