@@ -2,7 +2,7 @@
 
 From the repo root (recommended)::
 
-    python -m memprimitive.example
+    python -m memprimitive.example.example
 
 Or from this directory (script adds the repo root to ``sys.path``)::
 
@@ -14,9 +14,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Running as ``python memprimitive/example.py`` leaves ``__package__`` unset; repo root must be on path.
+# Running as ``python memprimitive/example/example.py`` leaves ``__package__`` unset; repo root must be on path.
 if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import (
