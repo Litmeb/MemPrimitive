@@ -1,0 +1,6 @@
+# Requires Python 3.11 or newer.
+pytest
+python-dotenv
+rank-bm25
+sentence-transformers
+openai

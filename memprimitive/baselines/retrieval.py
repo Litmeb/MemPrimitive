@@ -6,6 +6,7 @@ from dataclasses import replace
 from math import sqrt
 from typing import Any, ClassVar, Final
 
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
 from ..core import MemoryStore, ModuleSpec, Packet, RetrievedSet
@@ -14,13 +15,26 @@ from ..interfaces import RetrievalModule
 from ._trace import copy_trace
 
 
+def _tokenize_text(text: str) -> list[str]:
+    return [token for token in text.casefold().split() if token]
+
+
 def _query_tokens(text: str) -> set[str]:
-    return {token for token in text.casefold().split() if token}
+    return set(_tokenize_text(text))
 
 
 def _representation(record) -> dict[str, Any]:
     value = record.metadata.get("representation", {})
     return value if isinstance(value, dict) else {}
+
+
+def _document_tokens(record) -> list[str]:
+    tokens = _tokenize_text(record.text)
+    keywords = _representation(record).get("keywords", [])
+    if isinstance(keywords, list):
+        for keyword in keywords:
+            tokens.extend(_tokenize_text(str(keyword)))
+    return tokens
 
 
 class RecencyRetrieval(RetrievalModule):
@@ -375,6 +389,90 @@ class EntityRetrieval(RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
+class BM25Retrieval(RetrievalModule):
+    """Rank records with BM25 over text plus representation keywords, then recency."""
+
+    spec = ModuleSpec(
+        name="bm25_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+        if top_k <= 0:
+            raise ValueError("BM25Retrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("BM25Retrieval requires packet.query.")
+
+        query_tokens = _tokenize_text(packet.query.text)
+        all_records = list(reversed(store.iter_records(self.layer)))
+        if not all_records:
+            retrieved = RetrievedSet(
+                items=[],
+                scores=[],
+                trace={
+                    "module": self.spec.name,
+                    "top_k": self.top_k,
+                    "candidate_count": 0,
+                    "scored_count": 0,
+                    "used_recency_fallback": False,
+                },
+            )
+            trace = copy_trace(packet)
+            trace["retrieval"] = retrieved.trace
+            return replace(packet, retrieved=retrieved, trace=trace), store
+
+        document_tokens = [_document_tokens(record) for record in all_records]
+        bm25 = BM25Okapi(document_tokens)
+        raw_scores = bm25.get_scores(query_tokens).tolist()
+        query_token_set = set(query_tokens)
+
+        scored = [
+            (float(score), order_index, record, len(query_token_set & set(tokens)))
+            for order_index, (score, record, tokens) in enumerate(zip(raw_scores, all_records, document_tokens, strict=True))
+        ]
+
+        used_recency_fallback = not any(overlap > 0 for _, _, _, overlap in scored)
+        if used_recency_fallback:
+            selected = [(0.0, order_index, record) for order_index, record in enumerate(all_records[: self.top_k])]
+        else:
+            matching_scored = [(score, order_index, record) for score, order_index, record, overlap in scored if overlap > 0]
+            matching_scored.sort(key=lambda item: (-item[0], item[1]))
+            selected = matching_scored[: self.top_k]
+
+        items = [record for _, _, record in selected]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": score,
+                "strategy": "bm25",
+            }
+            for rank, (score, _, record) in enumerate(selected, start=1)
+        ]
+        avg_doc_len = sum(len(tokens) for tokens in document_tokens) / len(document_tokens) if document_tokens else 0.0
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "candidate_count": len(all_records),
+                "scored_count": len(scored),
+                "avg_doc_len": avg_doc_len,
+                "used_recency_fallback": used_recency_fallback,
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
 class _LayerScopedStore:
     """Proxy ``MemoryStore`` so retrievers only see one logical layer."""
 
@@ -577,5 +675,6 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     EmbeddingSimilarityRetrieval,
     TagRetrieval,
     EntityRetrieval,
+    BM25Retrieval,
     LayerAwareRetrieval,
 )

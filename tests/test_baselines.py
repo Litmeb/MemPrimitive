@@ -1270,6 +1270,92 @@ def test_keyword_count_retrieval_prefers_keyword_hits() -> None:
     assert [record.text for record in packet_out.retrieved.items] == ["Alice studies graphs", "Alice likes tea"]
 
 
+def test_bm25_retrieval_prefers_stronger_lexical_matches() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    store = MemoryStore()
+    for text in ("graph memory retrieval", "graph retrieval", "tea notes"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = BM25Retrieval(top_k=2).run(Packet(query=Query(text="graph memory")), store)
+
+    assert [record.text for record in packet_out.retrieved.items] == ["graph memory retrieval", "graph retrieval"]
+    assert packet_out.retrieved.scores[0]["strategy"] == "bm25"
+    assert packet_out.retrieved.scores[0]["score"] >= packet_out.retrieved.scores[1]["score"]
+
+
+def test_bm25_retrieval_breaks_ties_by_recency() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    store = MemoryStore()
+    for text in ("graph memory", "graph memory"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = BM25Retrieval(top_k=2).run(Packet(query=Query(text="graph memory")), store)
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+
+
+def test_bm25_retrieval_uses_representation_keywords() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="u1",
+            layer="default",
+            text="notes about tea",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"keywords": ["graph", "memory", "graph"]}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="u2",
+            layer="default",
+            text="plain tea notes",
+            timestamp="2026-01-01T00:00:01+00:00",
+        )
+    )
+
+    packet_out, _ = BM25Retrieval(top_k=1).run(Packet(query=Query(text="graph memory")), store)
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+
+
+def test_bm25_retrieval_on_empty_store_returns_empty_retrieved_set() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    packet_out, _ = BM25Retrieval(top_k=2).run(Packet(query=Query(text="Alice")), MemoryStore())
+
+    assert packet_out.retrieved is not None
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+
+
+def test_bm25_retrieval_requires_query() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    with pytest.raises(ValueError, match="packet.query"):
+        BM25Retrieval(top_k=2).run(Packet(), MemoryStore())
+
+
+def test_bm25_retrieval_falls_back_to_recency_when_all_scores_are_zero() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    store = MemoryStore()
+    for text in ("old note", "new note"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = BM25Retrieval(top_k=2).run(Packet(query=Query(text="graph memory")), store)
+
+    assert [record.text for record in packet_out.retrieved.items] == ["new note", "old note"]
+    assert packet_out.retrieved.trace["used_recency_fallback"] is True
+    assert all(score["score"] == 0.0 for score in packet_out.retrieved.scores)
+
+
 def test_tag_retrieval_prefers_matching_tags() -> None:
     from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation, TagRetrieval
 

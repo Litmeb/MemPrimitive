@@ -62,7 +62,12 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `EmbeddingSimilarityRetrieval`
 - `TagRetrieval`
 - `EntityRetrieval`
+- `BM25Retrieval`
 - `LayerAwareRetrieval`
+
+`BM25Retrieval` uses Okapi BM25 from `rank-bm25` over lowercase whitespace tokens from record text plus
+`metadata["representation"]["keywords"]` when present. It sorts by descending BM25 score, uses recency to break
+ties, and falls back to recency when all candidates score zero.
 
 ### Slot `readout` — `readout.py`
 
