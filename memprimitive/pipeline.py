@@ -36,30 +36,25 @@ _RECALL_SLOT_CHECK: Final[tuple[tuple[str, str, type], ...]] = (
 )
 
 
-def _materialize_slot_value(module_or_modules):
-    if module_or_modules is None:
-        return None
-    if isinstance(module_or_modules, PrimitiveModule):
-        return module_or_modules
-    if isinstance(module_or_modules, Iterable) and not isinstance(module_or_modules, (str, bytes)):
-        materialized = tuple(module_or_modules)
-        if not materialized:
-            raise ValueError("MemoryPipeline slot iterables must contain at least one module.")
-        return materialized
-    return module_or_modules
-
-
 def _iter_slot_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
     if isinstance(module_or_modules, PrimitiveModule):
         return (module_or_modules,)
-    if isinstance(module_or_modules, tuple):
-        return module_or_modules
     if isinstance(module_or_modules, Iterable) and not isinstance(module_or_modules, (str, bytes)):
         materialized = tuple(module_or_modules)
         if not materialized:
             raise ValueError("MemoryPipeline slot iterables must contain at least one module.")
         return materialized
     return (module_or_modules,)
+
+
+def _materialize_slot_value(module_or_modules):
+    if module_or_modules is None:
+        return None
+    if isinstance(module_or_modules, PrimitiveModule):
+        return module_or_modules
+    if isinstance(module_or_modules, Iterable) and not isinstance(module_or_modules, (str, bytes)):
+        return _iter_slot_modules(module_or_modules)
+    return module_or_modules
 
 
 def _iter_nested_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
