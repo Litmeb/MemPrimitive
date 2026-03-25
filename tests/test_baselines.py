@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 
 from memprimitive.baselines.registry import (
@@ -1037,3 +1038,331 @@ def test_write_false_skips_normal_write_and_leaves_evolution_noop() -> None:
     assert store.count() == 0
     assert packet.trace["organization"]["written_record_ids"] == []
     assert packet.trace["memory_evolution"]["effects"] == []
+
+
+def test_sentence_split_unit_formation_splits_sentences_and_preserves_provenance() -> None:
+    from memprimitive.baselines import SentenceSplitUnitFormation
+
+    packet_out, _ = SentenceSplitUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea. Bob prefers coffee!", source="dialogue")),
+        MemoryStore(),
+    )
+
+    assert packet_out.units is not None
+    assert [unit.text for unit in packet_out.units] == ["Alice likes tea.", "Bob prefers coffee!"]
+    assert all("provenance" in unit.metadata for unit in packet_out.units)
+
+
+def test_line_split_unit_formation_filters_empty_lines() -> None:
+    from memprimitive.baselines import LineSplitUnitFormation
+
+    packet_out, _ = LineSplitUnitFormation().run(
+        Packet(observation=Observation(text="alpha\n\n beta \n", source="notes")),
+        MemoryStore(),
+    )
+
+    assert packet_out.units is not None
+    assert [unit.text for unit in packet_out.units] == ["alpha", "beta"]
+
+
+def test_windowed_unit_formation_creates_overlapping_windows() -> None:
+    from memprimitive.baselines import WindowedUnitFormation
+
+    packet_out, _ = WindowedUnitFormation(window_size=5, stride=3).run(
+        Packet(observation=Observation(text="abcdefghij", source="notes")),
+        MemoryStore(),
+    )
+
+    assert packet_out.units is not None
+    assert [unit.text for unit in packet_out.units] == ["abcde", "defgh", "ghij"]
+    assert packet_out.units[1].metadata["window_index"] == 1
+
+
+def test_metadata_hint_unit_formation_prefers_hint_and_can_set_unit_type() -> None:
+    from memprimitive.baselines import MetadataHintUnitFormation
+
+    packet_out, _ = MetadataHintUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="fallback",
+                source="notes",
+                metadata={"units": [{"text": "Alice likes tea", "unit_type": "fact"}]},
+            )
+        ),
+        MemoryStore(),
+    )
+
+    assert packet_out.units is not None
+    assert [unit.text for unit in packet_out.units] == ["Alice likes tea"]
+    assert packet_out.units[0].unit_type == "fact"
+    assert packet_out.trace["unit_formation"]["mode"] == "metadata"
+
+
+def test_representation_supports_new_elements_and_persists_them_into_record_metadata() -> None:
+    from memprimitive.baselines import AppendOrganization, AlwaysWriteTrigger, BasicRepresentation, PassThroughUnitFormation
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory on 2026-03-24.", source="notes")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation(
+        elements=("text", "entities", "tags", "keywords", "summary", "time_anchor", "relation_tags", "source_type")
+    ).run(packet, store)
+    packet, store = AlwaysWriteTrigger().run(packet, store)
+    _, store = AppendOrganization().run(packet, store)
+
+    record = store.iter_records()[0]
+    rep = record.metadata["representation"]
+    assert "keywords" in rep
+    assert "summary" in rep
+    assert "time_anchor" in rep
+    assert rep["source_type"] == "notes"
+
+
+def test_keyword_representation_exposes_keyword_summary_without_embedding() -> None:
+    from memprimitive.baselines import KeywordRepresentation, PassThroughUnitFormation
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice builds retrieval tools for memory graphs.", source="notes")),
+        MemoryStore(),
+    )
+    packet, _ = KeywordRepresentation().run(packet, store)
+
+    rep = packet.units[0].metadata["representation"]
+    assert "keywords" in rep
+    assert packet.units[0].embedding is None
+
+
+def test_trigger_family_new_components_compute_scores_and_gates() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+    from memprimitive.baselines._trigger_family import (
+        AverageScorer,
+        HasEntitySignal,
+        QueryOverlapSignal,
+        QueryPresentGate,
+        ThresholdOrGatePolicy,
+    )
+    from memprimitive.baselines.write_trigger import compose_write_trigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies memory graphs", source="dialogue")),
+        MemoryStore(),
+    )
+    packet, store = BasicRepresentation(elements=("text", "entities")).run(packet, store)
+    packet = Packet(observation=packet.observation, units=packet.units, query=Query(text="Alice memory"), trace=packet.trace)
+    trigger = compose_write_trigger(
+        name="query_overlap_gate_trigger",
+        signal_providers=(HasEntitySignal(), QueryOverlapSignal()),
+        scorer=AverageScorer(sources=("has_entity", "query_overlap")),
+        gate=QueryPresentGate(),
+        policy=ThresholdOrGatePolicy(threshold=1.5),
+        input_requirements=("units", "query"),
+    )
+
+    packet_out, _ = trigger.run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] >= 1.0
+
+
+def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
+    from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="working"),
+                StoreLayerSpec(name="semantic", theme="semantic", indices=("entity", "keyword")),
+            ]
+        )
+    )
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        store,
+    )
+    packet, store = BasicRepresentation(elements=("text", "entities", "tags")).run(packet, store)
+    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = ConditionalLayerOrganization(
+        default_layer="working",
+        rules=({"has_entity": True, "target_layer": "semantic"},),
+    ).run(packet, store)
+
+    assert packet.placements[0].target_layer == "semantic"
+    assert store.count("semantic") == 1
+
+
+def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadata() -> None:
+    from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, GraphAppendOrganization, PassThroughUnitFormation
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = BasicRepresentation(elements=("text", "entities", "triple")).run(packet, store)
+    packet, store = AlwaysWriteTrigger().run(packet, store)
+    _, store = GraphAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+
+    record = store.iter_records("knowledge_graph")[0]
+    assert "graph" in record.metadata
+    assert record.metadata["graph"]["triples"]
+
+
+def test_summary_rewrite_evolution_appends_summary_record() -> None:
+    from memprimitive.baselines import SummaryRewriteEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    packet, store = _stored_pipeline_packet("Alice likes jasmine tea.", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        evolution_decisions=[True],
+        trace=packet.trace,
+    )
+
+    packet_out, store = SummaryRewriteEvolution(target_layer="semantic").run(packet, store)
+
+    assert store.count("semantic") == 1
+    assert packet_out.trace["memory_evolution"]["effects"][0]["effect_type"] == "summary_append"
+
+
+def test_layer_move_evolution_copy_appends_unit_to_target_layer() -> None:
+    from memprimitive.baselines import LayerMoveEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    packet, store = _stored_pipeline_packet("Alice likes jasmine tea.", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        evolution_decisions=[True],
+        trace=packet.trace,
+    )
+
+    packet_out, store = LayerMoveEvolution(target_layer="semantic").run(packet, store)
+
+    assert store.count("semantic") == 1
+    assert packet_out.trace["memory_evolution"]["effects"][0]["move_style"] == "copy_append"
+
+
+def test_keyword_count_retrieval_prefers_keyword_hits() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval
+
+    store = MemoryStore()
+    for text in ("Alice likes tea", "Bob likes coffee", "Alice studies graphs"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = KeywordCountRetrieval(top_k=2).run(Packet(query=Query(text="Alice graphs")), store)
+
+    assert [record.text for record in packet_out.retrieved.items] == ["Alice studies graphs", "Alice likes tea"]
+
+
+def test_tag_retrieval_prefers_matching_tags() -> None:
+    from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation, TagRetrieval
+
+    store = MemoryStore()
+    for text in ("Alice likes tea", "Alice studies graph memory", "Bob likes coffee"):
+        packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
+        packet, store = BasicRepresentation(elements=("text", "tags")).run(packet, store)
+        packet, store = AlwaysWriteTrigger().run(packet, store)
+        _, store = AppendOrganization().run(packet, store)
+
+    packet_out, _ = TagRetrieval(top_k=1).run(Packet(query=Query(text="graph")), store)
+
+    assert packet_out.retrieved.items[0].text == "Alice studies graph memory"
+
+
+def test_entity_retrieval_prefers_entity_overlap() -> None:
+    from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, EntityRetrieval, PassThroughUnitFormation
+
+    store = MemoryStore()
+    for text in ("Alice likes tea", "Bob likes coffee", "Alice studies graph memory"):
+        packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
+        packet, store = BasicRepresentation(elements=("text", "entities")).run(packet, store)
+        packet, store = AlwaysWriteTrigger().run(packet, store)
+        _, store = AppendOrganization().run(packet, store)
+
+    packet_out, _ = EntityRetrieval(top_k=2).run(Packet(query=Query(text="Alice")), store)
+
+    assert all("Alice" in record.text for record in packet_out.retrieved.items)
+
+
+def test_layer_aware_retrieval_supports_per_layer_top_k_and_merge_weights() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval, LayerAwareRetrieval, RecencyRetrieval
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="working"), StoreLayerSpec(name="semantic")])
+    )
+    store.append(MemoryRecord(record_id="rec-1", unit_id="u1", layer="working", text="recent working", timestamp="2026-01-01T00:00:00+00:00"))
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="u2",
+            layer="semantic",
+            text="Alice semantic graph",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"representation": {"keywords": ["alice", "semantic", "graph"]}},
+        )
+    )
+
+    packet_out, _ = LayerAwareRetrieval(
+        default_retriever=RecencyRetrieval(top_k=2),
+        retriever_by_layer={"semantic": KeywordCountRetrieval(top_k=2)},
+        top_k=2,
+        top_k_by_layer={"working": 1, "semantic": 1},
+        merge_weight_by_layer={"semantic": 2.0},
+    ).run(Packet(query=Query(text="Alice graph")), store)
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+
+
+def test_bullet_list_readout_formats_bullets() -> None:
+    from memprimitive.baselines import BulletListReadout
+
+    store = MemoryStore()
+    packet, store = _stored_pipeline_packet("Alice likes tea.", store)
+    retrieved = RetrievedSet(items=store.iter_records(), scores=[])
+
+    packet_out, _ = BulletListReadout().run(Packet(retrieved=retrieved), store)
+
+    assert packet_out.readout.text.startswith("- Alice likes tea.")
+
+
+def test_grouped_by_layer_readout_groups_items() -> None:
+    from memprimitive.baselines import GroupedByLayerReadout
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="working"), StoreLayerSpec(name="semantic")])
+    )
+    store.append(MemoryRecord(record_id="rec-1", unit_id="u1", layer="working", text="working", timestamp="2026-01-01T00:00:00+00:00"))
+    store.append(MemoryRecord(record_id="rec-2", unit_id="u2", layer="semantic", text="semantic", timestamp="2026-01-01T00:00:01+00:00"))
+
+    packet_out, _ = GroupedByLayerReadout().run(Packet(retrieved=RetrievedSet(items=store.iter_records(), scores=[])), store)
+
+    assert "[working]" in packet_out.readout.text
+    assert packet_out.readout.metadata["group_counts"] == {"working": 1, "semantic": 1}
+
+
+def test_json_readout_returns_json_string() -> None:
+    from memprimitive.baselines import JSONReadout
+
+    store = MemoryStore()
+    packet, store = _stored_pipeline_packet("Alice likes tea.", store)
+
+    packet_out, _ = JSONReadout().run(Packet(retrieved=RetrievedSet(items=store.iter_records(), scores=[])), store)
+
+    payload = json.loads(packet_out.readout.text)
+    assert payload["items"][0]["text"] == "Alice likes tea."

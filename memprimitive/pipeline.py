@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import ClassVar, Final
 
 from .core import MemoryRecord, MemoryStore, Observation, Packet, Query, Readout
+from .exceptions import IncompatibleCompositionError
 from .interfaces import (
     EvolutionTriggerModule,
     MemoryEvolutionModule,
     OrganizationModule,
+    PrimitiveModule,
     ReadoutModule,
     RepresentationModule,
     RetrievalModule,
@@ -33,6 +36,32 @@ _RECALL_SLOT_CHECK: Final[tuple[tuple[str, str, type], ...]] = (
 )
 
 
+def _materialize_slot_value(module_or_modules):
+    if module_or_modules is None:
+        return None
+    if isinstance(module_or_modules, PrimitiveModule):
+        return module_or_modules
+    if isinstance(module_or_modules, Iterable) and not isinstance(module_or_modules, (str, bytes)):
+        materialized = tuple(module_or_modules)
+        if not materialized:
+            raise ValueError("MemoryPipeline slot iterables must contain at least one module.")
+        return materialized
+    return module_or_modules
+
+
+def _iter_slot_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
+    if isinstance(module_or_modules, PrimitiveModule):
+        return (module_or_modules,)
+    if isinstance(module_or_modules, tuple):
+        return module_or_modules
+    if isinstance(module_or_modules, Iterable) and not isinstance(module_or_modules, (str, bytes)):
+        materialized = tuple(module_or_modules)
+        if not materialized:
+            raise ValueError("MemoryPipeline slot iterables must contain at least one module.")
+        return materialized
+    return (module_or_modules,)
+
+
 class MemoryPipeline:
     """Coordinates the baseline memory pipeline using Packet-based IO.
 
@@ -49,44 +78,85 @@ class MemoryPipeline:
     def __init__(
         self,
         *,
-        unit_formation: UnitFormationModule | None = None,
-        representation: RepresentationModule | None = None,
-        write_trigger: WriteTriggerModule | None = None,
-        organization: OrganizationModule | None = None,
-        evolution_trigger: EvolutionTriggerModule | None = None,
-        memory_evolution: MemoryEvolutionModule | None = None,
-        retrieval: RetrievalModule | None = None,
-        readout: ReadoutModule | None = None,
+        unit_formation: UnitFormationModule | Iterable[UnitFormationModule] | None = None,
+        representation: RepresentationModule | Iterable[RepresentationModule] | None = None,
+        write_trigger: WriteTriggerModule | Iterable[WriteTriggerModule] | None = None,
+        organization: OrganizationModule | Iterable[OrganizationModule] | None = None,
+        evolution_trigger: EvolutionTriggerModule | Iterable[EvolutionTriggerModule] | None = None,
+        memory_evolution: MemoryEvolutionModule | Iterable[MemoryEvolutionModule] | None = None,
+        retrieval: RetrievalModule | Iterable[RetrievalModule] | None = None,
+        readout: ReadoutModule | Iterable[ReadoutModule] | None = None,
         store: MemoryStore | None = None,
     ) -> None:
-        self.unit_formation = unit_formation if unit_formation is not None else _default_unit_formation()
-        self.representation = representation if representation is not None else _default_representation()
-        self.write_trigger = write_trigger if write_trigger is not None else _default_write_trigger()
-        self.organization = organization if organization is not None else _default_organization()
-        self.evolution_trigger = evolution_trigger if evolution_trigger is not None else _default_evolution_trigger()
-        self.memory_evolution = memory_evolution if memory_evolution is not None else _default_memory_evolution()
-        self.retrieval = retrieval if retrieval is not None else _default_retrieval()
-        self.readout = readout if readout is not None else _default_readout()
+        self.unit_formation = _materialize_slot_value(
+            unit_formation if unit_formation is not None else _default_unit_formation()
+        )
+        self.representation = _materialize_slot_value(
+            representation if representation is not None else _default_representation()
+        )
+        self.write_trigger = _materialize_slot_value(
+            write_trigger if write_trigger is not None else _default_write_trigger()
+        )
+        self.organization = _materialize_slot_value(
+            organization if organization is not None else _default_organization()
+        )
+        self.evolution_trigger = _materialize_slot_value(
+            evolution_trigger if evolution_trigger is not None else _default_evolution_trigger()
+        )
+        self.memory_evolution = _materialize_slot_value(
+            memory_evolution if memory_evolution is not None else _default_memory_evolution()
+        )
+        self.retrieval = _materialize_slot_value(
+            retrieval if retrieval is not None else _default_retrieval()
+        )
+        self.readout = _materialize_slot_value(readout if readout is not None else _default_readout())
         self.store = store if store is not None else MemoryStore()
         self._validate_composition()
 
     def _validate_composition(self) -> None:
         for kwarg, expected_slot, base in _INGEST_SLOT_CHECK + _RECALL_SLOT_CHECK:
-            module = getattr(self, kwarg)
-            if not isinstance(module, base):
-                raise TypeError(
-                    f"MemoryPipeline.{kwarg} must be an instance of {base.__name__}, "
-                    f"got {type(module).__name__}."
+            for module in _iter_slot_modules(getattr(self, kwarg)):
+                if not isinstance(module, base):
+                    raise TypeError(
+                        f"MemoryPipeline.{kwarg} must be an instance of {base.__name__}, "
+                        f"got {type(module).__name__}."
+                    )
+                if module.spec.slot != expected_slot:
+                    raise ValueError(
+                        f"MemoryPipeline.{kwarg} expects ModuleSpec.slot={expected_slot!r}, "
+                        f"got {module.spec.slot!r} on {type(module).__name__}."
+                    )
+        self._validate_store_compatibility()
+
+    def _validate_store_compatibility(self) -> None:
+        from .baselines import GraphAppendOrganization
+
+        for organization in _iter_slot_modules(self.organization):
+            if not isinstance(organization, GraphAppendOrganization):
+                continue
+
+            target_layer = organization.target_layer
+            declared_layers = list(self.store.topology.layer_names)
+            if not self.store.has_layer(target_layer):
+                raise IncompatibleCompositionError(
+                    "Incompatible MemoryPipeline composition: "
+                    f"slot='organization', module='{organization.spec.name}' requires "
+                    f"declared graph layer {target_layer!r}, but store topology only declares "
+                    f"{declared_layers}."
                 )
-            if module.spec.slot != expected_slot:
-                raise ValueError(
-                    f"MemoryPipeline.{kwarg} expects ModuleSpec.slot={expected_slot!r}, "
-                    f"got {module.spec.slot!r} on {type(module).__name__}."
+
+            layer_shape = self.store.layer_shape(target_layer)
+            if layer_shape != "Graph":
+                raise IncompatibleCompositionError(
+                    "Incompatible MemoryPipeline composition: "
+                    f"slot='organization', module='{organization.spec.name}' requires "
+                    f"layer {target_layer!r} with shape='Graph', but store topology declares "
+                    f"shape={layer_shape!r}."
                 )
 
     def ingest(self, observation: Observation) -> Packet:
         packet = Packet(observation=observation, trace={"ingest_started": True})
-        for module in (
+        for slot_value in (
             self.unit_formation,
             self.representation,
             self.write_trigger,
@@ -94,13 +164,16 @@ class MemoryPipeline:
             self.evolution_trigger,
             self.memory_evolution,
         ):
-            packet, self.store = module.run(packet, self.store)
+            for module in _iter_slot_modules(slot_value):
+                packet, self.store = module.run(packet, self.store)
         return packet
 
     def recall(self, query: Query) -> Readout:
         packet = Packet(query=query, trace={"recall_started": True})
-        packet, self.store = self.retrieval.run(packet, self.store)
-        packet, self.store = self.readout.run(packet, self.store)
+        for module in _iter_slot_modules(self.retrieval):
+            packet, self.store = module.run(packet, self.store)
+        for module in _iter_slot_modules(self.readout):
+            packet, self.store = module.run(packet, self.store)
         if packet.readout is None:
             raise RuntimeError("Readout module returned no readout.")
         return packet.readout

@@ -96,6 +96,152 @@ class ConstantSignal(SignalProvider):
 
 
 @dataclass(slots=True, frozen=True)
+class UnitLengthSignal(SignalProvider):
+    """Emit the current unit's text length under a fixed signal name."""
+
+    signal_name: str = "unit_length"
+    normalize_by: float = 100.0
+
+    @property
+    def name(self) -> str:
+        return f"unit_length:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        unit = context.packet.units[unit_index]
+        value = len(unit.text.strip())
+        if self.normalize_by > 0:
+            return {self.signal_name: value / float(self.normalize_by)}
+        return {self.signal_name: float(value)}
+
+
+@dataclass(slots=True, frozen=True)
+class KeywordMatchSignal(SignalProvider):
+    """Emit how many query tokens overlap with the unit/representation keywords."""
+
+    signal_name: str = "keyword_match"
+
+    @property
+    def name(self) -> str:
+        return f"keyword_match:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        query = context.packet.query
+        if query is None:
+            raise ValueError("query is required for KeywordMatchSignal.")
+        unit = context.packet.units[unit_index]
+        representation = unit.metadata.get("representation", {})
+        query_tokens = {token for token in query.text.casefold().split() if token}
+        haystack = set(str(item).casefold() for item in representation.get("keywords", []))
+        haystack.update(token.casefold() for token in unit.text.split())
+        matches = len(query_tokens & haystack)
+        return {self.signal_name: float(matches)}
+
+
+@dataclass(slots=True, frozen=True)
+class HasEntitySignal(SignalProvider):
+    """Emit 1.0 when the unit has at least one entity, else 0.0."""
+
+    signal_name: str = "has_entity"
+
+    @property
+    def name(self) -> str:
+        return f"has_entity:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        unit = context.packet.units[unit_index]
+        return {self.signal_name: 1.0 if unit.entities else 0.0}
+
+
+@dataclass(slots=True, frozen=True)
+class HasTripleSignal(SignalProvider):
+    """Emit 1.0 when the unit has at least one triple, else 0.0."""
+
+    signal_name: str = "has_triple"
+
+    @property
+    def name(self) -> str:
+        return f"has_triple:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        unit = context.packet.units[unit_index]
+        return {self.signal_name: 1.0 if unit.triples else 0.0}
+
+
+@dataclass(slots=True, frozen=True)
+class HasKVSignal(SignalProvider):
+    """Emit 1.0 when the unit has key-value pairs, else 0.0."""
+
+    signal_name: str = "has_kv"
+
+    @property
+    def name(self) -> str:
+        return f"has_kv:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        unit = context.packet.units[unit_index]
+        return {self.signal_name: 1.0 if unit.kv else 0.0}
+
+
+@dataclass(slots=True, frozen=True)
+class TagMatchSignal(SignalProvider):
+    """Emit the count of overlap between query tokens and unit tags."""
+
+    signal_name: str = "tag_match"
+
+    @property
+    def name(self) -> str:
+        return f"tag_match:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        query = context.packet.query
+        if query is None:
+            raise ValueError("query is required for TagMatchSignal.")
+        unit = context.packet.units[unit_index]
+        query_tokens = {token for token in query.text.casefold().split() if token}
+        unit_tags = {str(tag).casefold() for tag in unit.tags}
+        return {self.signal_name: float(len(query_tokens & unit_tags))}
+
+
+@dataclass(slots=True, frozen=True)
+class LayerTargetSignal(SignalProvider):
+    """Emit 1.0 when a unit targets one of the declared layers."""
+
+    allowed_layers: tuple[str, ...]
+    signal_name: str = "layer_target"
+
+    @property
+    def name(self) -> str:
+        return f"layer_target:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        placements = context.packet.placements
+        if placements is None:
+            raise ValueError("placements is required for LayerTargetSignal.")
+        placement = placements[unit_index]
+        return {self.signal_name: 1.0 if placement.target_layer in self.allowed_layers else 0.0}
+
+
+@dataclass(slots=True, frozen=True)
+class QueryOverlapSignal(SignalProvider):
+    """Emit token overlap between query text and the current unit text."""
+
+    signal_name: str = "query_overlap"
+
+    @property
+    def name(self) -> str:
+        return f"query_overlap:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        query = context.packet.query
+        if query is None:
+            raise ValueError("query is required for QueryOverlapSignal.")
+        unit = context.packet.units[unit_index]
+        query_tokens = {token for token in query.text.casefold().split() if token}
+        unit_tokens = {token for token in unit.text.casefold().split() if token}
+        return {self.signal_name: float(len(query_tokens & unit_tokens))}
+
+
+@dataclass(slots=True, frozen=True)
 class IdentityScorer(ScoreAggregator):
     """Read a single signal as the score."""
 
@@ -131,6 +277,86 @@ class WeightedSumScorer(ScoreAggregator):
 
 
 @dataclass(slots=True, frozen=True)
+class MaxScorer(ScoreAggregator):
+    """Take the maximum over one or more named signals."""
+
+    sources: tuple[str, ...]
+
+    @property
+    def name(self) -> str:
+        return "max"
+
+    def score(self, signals: SignalMap) -> float:
+        if not self.sources:
+            raise ValueError("MaxScorer requires at least one source signal.")
+        values = []
+        for source in self.sources:
+            if source not in signals:
+                raise ValueError(f"MaxScorer requires signal {source!r}.")
+            values.append(float(signals[source]))
+        return max(values)
+
+
+@dataclass(slots=True, frozen=True)
+class MinScorer(ScoreAggregator):
+    """Take the minimum over one or more named signals."""
+
+    sources: tuple[str, ...]
+
+    @property
+    def name(self) -> str:
+        return "min"
+
+    def score(self, signals: SignalMap) -> float:
+        if not self.sources:
+            raise ValueError("MinScorer requires at least one source signal.")
+        values = []
+        for source in self.sources:
+            if source not in signals:
+                raise ValueError(f"MinScorer requires signal {source!r}.")
+            values.append(float(signals[source]))
+        return min(values)
+
+
+@dataclass(slots=True, frozen=True)
+class AverageScorer(ScoreAggregator):
+    """Average one or more named signals."""
+
+    sources: tuple[str, ...]
+
+    @property
+    def name(self) -> str:
+        return "average"
+
+    def score(self, signals: SignalMap) -> float:
+        if not self.sources:
+            raise ValueError("AverageScorer requires at least one source signal.")
+        values = []
+        for source in self.sources:
+            if source not in signals:
+                raise ValueError(f"AverageScorer requires signal {source!r}.")
+            values.append(float(signals[source]))
+        return sum(values) / len(values)
+
+
+@dataclass(slots=True, frozen=True)
+class ClippedWeightedSumScorer(ScoreAggregator):
+    """Weighted sum with final clipping to a bounded range."""
+
+    weights: dict[str, float]
+    min_score: float = 0.0
+    max_score: float = 1.0
+
+    @property
+    def name(self) -> str:
+        return "clipped_weighted_sum"
+
+    def score(self, signals: SignalMap) -> float:
+        total = WeightedSumScorer(weights=self.weights).score(signals)
+        return max(float(self.min_score), min(float(self.max_score), total))
+
+
+@dataclass(slots=True, frozen=True)
 class AlwaysOpenGate(Gate):
     """Stage-1 baseline gate that never blocks a unit."""
 
@@ -140,6 +366,74 @@ class AlwaysOpenGate(Gate):
 
     def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
         return True
+
+
+@dataclass(slots=True, frozen=True)
+class RequireEntityGate(Gate):
+    """Allow only units that contain entities."""
+
+    @property
+    def name(self) -> str:
+        return "require_entity"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        return bool(context.packet.units[unit_index].entities)
+
+
+@dataclass(slots=True, frozen=True)
+class RequireTripleGate(Gate):
+    """Allow only units that contain triples."""
+
+    @property
+    def name(self) -> str:
+        return "require_triple"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        return bool(context.packet.units[unit_index].triples)
+
+
+@dataclass(slots=True, frozen=True)
+class RequireTagGate(Gate):
+    """Allow only units that contain at least one of the required tags."""
+
+    required_tags: tuple[str, ...]
+
+    @property
+    def name(self) -> str:
+        return "require_tag"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        unit_tags = {str(tag).casefold() for tag in context.packet.units[unit_index].tags}
+        required = {tag.casefold() for tag in self.required_tags}
+        return bool(unit_tags & required)
+
+
+@dataclass(slots=True, frozen=True)
+class LayerAllowedGate(Gate):
+    """Allow only placements targeting one of the declared layers."""
+
+    allowed_layers: tuple[str, ...]
+
+    @property
+    def name(self) -> str:
+        return "layer_allowed"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        if context.packet.placements is None:
+            raise ValueError("placements is required for LayerAllowedGate.")
+        return context.packet.placements[unit_index].target_layer in self.allowed_layers
+
+
+@dataclass(slots=True, frozen=True)
+class QueryPresentGate(Gate):
+    """Allow only when a query is present on the packet."""
+
+    @property
+    def name(self) -> str:
+        return "query_present"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        return context.packet.query is not None
 
 
 @dataclass(slots=True, frozen=True)
@@ -190,6 +484,35 @@ class BooleanGatePolicy(DecisionPolicy):
 
     def decide(self, *, score: float, gate_open: bool) -> bool:
         return gate_open
+
+
+@dataclass(slots=True, frozen=True)
+class BandPassThresholdPolicy(DecisionPolicy):
+    """Accept when the score falls inside an inclusive band and the gate is open."""
+
+    lower: float
+    upper: float
+
+    @property
+    def name(self) -> str:
+        return "band_pass_threshold"
+
+    def decide(self, *, score: float, gate_open: bool) -> bool:
+        return gate_open and float(self.lower) <= score <= float(self.upper)
+
+
+@dataclass(slots=True, frozen=True)
+class ThresholdOrGatePolicy(DecisionPolicy):
+    """Accept when the gate is open or the score passes a threshold."""
+
+    threshold: float
+
+    @property
+    def name(self) -> str:
+        return "threshold_or_gate"
+
+    def decide(self, *, score: float, gate_open: bool) -> bool:
+        return gate_open or score >= float(self.threshold)
 
 
 class TriggerFamilyRunner:

@@ -14,9 +14,11 @@ from .core import (
     StoreLayerSpec,
     StoreTopology,
 )
+from .exceptions import IncompatibleCompositionError
 from .pipeline import MemoryPipeline, create_baseline_pipeline
 
 __all__ = [
+    "IncompatibleCompositionError",
     "MemoryPipeline",
     "MemoryRecord",
     "MemoryStore",
