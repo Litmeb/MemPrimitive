@@ -7,23 +7,34 @@ The ``simple`` submodule re-exports the same symbols for backward compatibility.
 
 from __future__ import annotations
 
-from ..pipeline_slots import ALL_PIPELINE_SLOTS
-from .registry import baseline_classes_by_slot
+from .registry import baseline_classes_by_slot, registered_baseline_class_names
 
-from .memory_evolution import *
-from .evolution_trigger import *
-from .organization import *
-from .readout import *
-from .representation import *
-from .retrieval import *
-from .unit_formation import *
-from .write_trigger import *
+__all__ = tuple(sorted(registered_baseline_class_names()))
 
-_names: list[str] = []
-_by_slot = baseline_classes_by_slot()
-for _slot in ALL_PIPELINE_SLOTS:
-    for _cls in _by_slot[_slot]:
-        globals()[_cls.__name__] = _cls
-        _names.append(_cls.__name__)
+_class_by_name: dict[str, type] | None = None
 
-__all__ = tuple(_names)
+
+def _exports_dict() -> dict[str, type]:
+    global _class_by_name
+    if _class_by_name is None:
+        _class_by_name = {
+            cls.__name__: cls
+            for classes in baseline_classes_by_slot().values()
+            for cls in classes
+        }
+    return _class_by_name
+
+
+def __getattr__(name: str) -> type:
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    try:
+        cls = _exports_dict()[name]
+    except KeyError as e:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from e
+    globals()[name] = cls
+    return cls
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | {k for k in globals() if not k.startswith("_")})
