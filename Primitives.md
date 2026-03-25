@@ -101,54 +101,50 @@ Store 拓扑决定了整个系统的骨架，是最高层的结构性选择。�
 
 **核心问题**：unit 以什么形式存储和索引？
 
-这里不再把表示方式枚举为一批“命名模板”，而是改为：**每个 unit 选择一个 representation element set**。  
-也就是说，表示编码的核心不是选 `A`、`B`、`A+B` 这种名字，而是决定 unit 最终携带哪些表示元素。
+抽象上仍是 **representation element set**（每个 unit 选择携带哪些表示元素）。下面 **B.1** 与当前 `memprimitive.baselines.representation` 实现一一对应；**B.2** 保留搜索空间里尚未在基线中落地的元素，便于和 DSL 对照。
 
+### B.1 Stage-1 基线：`BasicRepresentation` / `KeywordRepresentation`
 
-| 元素 ID | 表示元素               | 含义                                 | 常见来源/参数                     |
-| ----- | ------------------ | ---------------------------------- | --------------------------- |
-| RE-1  | `text`             | 原始或规范化文本内容                         | normalize, text_field       |
-| RE-2  | `embedding`        | dense embedding                    | model, dim                  |
-| RE-3  | `triple`           | `(subject, predicate, object)` 三元组 | schema, ontology            |
-| RE-4  | `kv`               | key-value 结构                       | key_schema                  |
-| RE-5  | `frame`            | slot / frame 填充结构                  | frame_schema                |
-| RE-6  | `entities`         | entity tags / entity links         | entity_linker, entity_types |
-| RE-7  | `tags`             | 标签、topic、category                  | tagger, tag_schema          |
-| RE-8  | `code`             | 可执行代码或代码片段                         | language, parser            |
-| RE-9  | `description`      | 对代码或技能的自然语言描述                      | description_model           |
-| RE-10 | `sparse_embedding` | TF-IDF / BM25 稀疏表示                 | vocab_size, sparse_method   |
+- **模块**：`BasicRepresentation`、`KeywordRepresentation`（后者是薄封装，默认 `elements=("text", "keywords", "tags")`，其余构造函数参数与前者相同）。
+- **输入**：`run` 要求 `packet.units` 已存在；**不修改** `MemoryStore`。
+- **配置**：构造函数 `elements: tuple[str, ...]`，会去重并保持顺序；非法名字在 `__init__` 时 `ValueError`。
+- **合法元素名**：与源码 `_VALID_ELEMENTS` 一致，共 12 个（**没有** `frame` / `code` / `sparse_embedding` 等抽象表中的项）。
 
+下列表格说明：**元素名**、**写入位置**（`MemoryUnit` 字段或 `metadata["representation"]`）、**是否进入** `representation_elements`、**实现逻辑摘要**。
 
-常见表示集合示例：
+| 元素名 | 主要写入位置 | 进入 `representation_elements` | 行为摘要 |
+| ------ | ------------ | -------------------------------- | -------- |
+| `text` | `unit.text`（strip 后） | 是（始终可标） | 规范化空白文本；`normalized_text` 为 casefold 全文。 |
+| `embedding` | `unit.embedding: list[float]` | 是（成功编码后） | `sentence_transformers.SentenceTransformer`（默认 `MEMPRIMITIVE_EMBEDDING_MODEL` 或 `all-MiniLM-L6-v2`），`normalize_embeddings=True`；模型按名缓存。 |
+| `triple` | `unit.triples` | 仅当列表非空 | 优先 `unit.metadata["triples"]` 中形如 `[s,p,o]` 的项；否则用正则从正文抽 “X likes/prefers/… Y”“X is Y” 模式。 |
+| `kv` | `unit.kv` | 仅当 dict 非空 | 优先 `unit.metadata["kv"]`；否则 `Key: value` 行模式 + likes/is 模式生成键值。 |
+| `entities` | `unit.entities` | 仅当列表非空 | 优先 `unit.metadata["entities"]`；否则大写起头的连续词块（启发式 NER），过滤 the/a/an。 |
+| `tags` | `unit.tags` | 仅当列表非空 | 优先 `unit.metadata["tags"]`；否则 `unit_type` + 关键词表（graph/memory/code/…）+ 若已有 entities/kv/triples 则加 `entity_rich` / `structured_kv` / `structured_triple`。 |
+| `keywords` | `metadata["representation"]["keywords"]` | 仅当列表非空 | 优先 `unit.metadata["keywords"]`；否则正文词频（去停用词，最多 6 个）并并入 entities/tags 的补充词。 |
+| `summary` | `metadata["representation"]["summary"]` | 仅当生成非空 | 启发式一句摘要：优先首条 triple，否则首条 kv，否则前两个实体 + 文本前缀，否则截断正文（≤96 字符）。 |
+| `time_anchor` | `metadata["representation"]["time_anchor"]` | 仅当 dict 非空 | 优先 `unit.metadata["time_anchor"]`（dict）；否则用 `unit.timestamp` 拆出 `timestamp` / `date`。 |
+| `relation_tags` | `metadata["representation"]["relation_tags"]` | 仅当列表非空 | 优先 `unit.metadata["relation_tags"]`；否则由 triple 的 predicate 生成 `predicate:...`，实体数≥2 时加 `multi_entity`。 |
+| `source_type` | `metadata["representation"]["source_type"]` | 仅当非空 | 来自 `unit.metadata["source"]` 字符串 strip。 |
+| `description` | `unit.description` | 仅当最终非空 | 若 `unit.description` 已有则保留；否则若配置了 `api_key` + `base_url` + `model` 则调 OpenAI Chat 生成一句描述；否则退回与 `summary` 相同的启发式或原文。 |
 
-- `{text}`
-- `{text, embedding}`
-- `{triple}`
-- `{text, embedding, entities}`
-- `{text, embedding, triple, tags, entities}`
-- `{code, description, embedding}`
-- `{text, sparse_embedding}`
+此外每次 `run` 都会把合并后的摘要写入 `unit.metadata["representation"]`（含 `_representation_summary_from_unit` 与上表中的扩展键）。`representation` slot 的 trace 在 `packet.trace["representation"]`（模块名、`elements`、逐 unit 的 `representation_elements`）。
 
-### 变异轴
+### B.2 抽象搜索空间中的其它表示元素（基线未实现）
 
-- **元素选择**：选择哪些表示元素进入 set
-- **结构化程度**：自由文本 ↔ schema-bound
-- **检索支持**：dense / sparse / symbolic / hybrid
-- **语义增强**：是否加入 entities / tags / description 等附加字段
+下列在概念文档/检索设计中常见，但 **当前 `_VALID_ELEMENTS` 不包含**，需自定义 `RepresentationModule` 或其它阶段补齐：
 
-### 关键约束
+| 概念元素 | 含义 |
+| -------- | ---- |
+| `frame` | slot / frame 填充结构 |
+| `code` | 可执行代码或片段 |
+| `sparse_embedding` | TF-IDF / BM25 等稀疏向量 |
 
-- `{triple}`、`{kv}`、`{frame}` 等结构化表示要求上游 UF 产出结构化内容，或 representation 模块自带转换能力
-- 向量检索 (Ret-1) 要求表示 set 中包含 `embedding`
-- BM25 / sparse retrieval (Ret-2) 要求表示 set 中包含 `text` 或 `sparse_embedding`
-- Entity 相关组织与更新要求表示 set 中包含 `entities`，或由上游 UF 显式产出实体字段
-- `code` 通常与 `description` 或 `embedding` 联合出现，否则复用和检索能力较弱
+### B.3 变异轴与约束（与实现对齐部分）
 
-### 建模说明
-
-- representation 的搜索对象不再是“选哪个命名实现”，而是“选哪些元素进入 set”
-- 这使 `text + embedding`、`text + embedding + entities`、`code + description + embedding` 这类组合都变成同一种语法层次上的配置
-- 原来的 `HybridTextEmbed`、`HybridStructured`、`CodeWithDescription` 等都被视为常见 set 模式，而不是新的 primitive 名字
+- **元素选择**：在 B.1 的 12 个名字中做子集选择；`KeywordRepresentation` 默认偏检索：`text + keywords + tags`。
+- **向量检索**：需要 `embedding` 元素（及 `EmbeddingSimilarityRetrieval` 等）；依赖本地 SentenceTransformer。
+- **关键词/标签类检索**：`keywords` / `tags` / `entities` 与 `KeywordCountRetrieval`、`TagRetrieval`、`EntityRetrieval` 等配合；部分 signal（如 `KeywordMatchSignal`）读 `metadata["representation"]["keywords"]`。
+- **结构化**：`triple` / `kv` 可由 UF 的 metadata 预填，也可全靠 representation 内规则从文本抽。
 
 ---
 
@@ -156,97 +152,103 @@ Store 拓扑决定了整个系统的骨架，是最高层的结构性选择。�
 
 **核心问题**：什么时候该触发某个 memory 生命周期动作？
 
-这里不再把 trigger 建模成很多彼此孤立的命名模块，而是统一为一个**可复用决策框架**：
+Stage-1 把可复用逻辑收在 **`memprimitive.baselines._trigger_family`**，由四个**组件角色**拼成一条每个 unit 的决策链（不是 pipeline 的 DSL slot 名，而是 family 内部子结构）：
 
 ```text
-Trigger = signals + scorer + gates + policy
+TriggerFamily = signal_providers（多路 signal） + scorer + gate + policy
 ```
 
-在 stage-1 runtime 中，`Trigger` 机制可复用于多个 slot：
+运行时 **`TriggerFamilyRunner`** 对每个 `packet.units[i]` 顺序执行：合并所有 `SignalProvider.provide` → `ScoreAggregator.score` → `Gate.evaluate` → `DecisionPolicy.decide`，得到 `bool` 写入 `Packet.decisions`（write）或 `Packet.evolution_decisions`（evolution）。
 
-* `write_trigger`：控制 unit 是否进入常规写入路径
-* `evolution_trigger`：控制是否启动额外的 memory evolution
+* **`write_trigger`**：默认基线 `AlwaysWriteTrigger`、`ThresholdWriteTrigger`；可用 `compose_write_trigger(...)` 自定义 family。
+* **`evolution_trigger`**：默认 `NeverEvolutionTrigger`、`ThresholdEvolutionTrigger`；可用 `compose_evolution_trigger(...)`。适配器默认要求 `packet.placements` 非空（`required_fields`）。
 
-也就是说，slot 是分开的，但 trigger family 可以复用；例如同一个 `always` / `threshold` / `on_event` 机制可以分别实例化成 write trigger 和 evolution trigger。
+共享上下文 **`TriggerContext`**（frozen dataclass）：`packet`、`store`、`output_field`、`trace_key`（供 gate/signal 读 packet 状态；`store` 当前 runner 内未强制使用，但保留扩展点）。
 
+### C.1 四个组件的抽象接口（必须实现的方法）
 
-| 组件        | 含义                         | 典型取值                                                                                                         |
-| --------- | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `signals` | 决策时可观测的信号                  | `importance`, `novelty`, `surprise`, `duplicate_risk`, `task_relevance`, `event_match`, `llm_value_estimate` |
-| `scorer`  | 如何把多个信号聚合为 score 或中间判断     | `identity`, `weighted_sum`, `max`, `product`, `rule_expr`, `llm_judge`                                       |
-| `gates`   | 不经过打分、直接生效的硬条件             | `on_event`, `not_duplicate`, `entity_present`, `tool_called`                                                 |
-| `policy`  | 如何从 score / gates 变成最终写入决定 | `always`, `never`, `threshold`, `top_k_per_window`, `sample_by_score`, `boolean_gate`, `explicit_only`       |
+| 角色 | ABC | 实例属性 | 抽象方法 |
+| ---- | --- | -------- | -------- |
+| Signal | `SignalProvider` | `name: str`（实现类用 `@property`） | `provide(self, context: TriggerContext, unit_index: int) -> SignalMap`，`SignalMap = dict[str, float \| bool]`；可对同一 unit 返回多个键。 |
+| Scorer | `ScoreAggregator` | `name: str` | `score(self, signals: SignalMap) -> float` |
+| Gate | `Gate` | `name: str` | `evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool`（`True` 表示通过硬门控） |
+| Policy | `DecisionPolicy` | `name: str` | `decide(self, *, score: float, gate_open: bool) -> bool`（最终是否触发） |
 
+Runner 内对多个 signal provider 的返回值做 **`signals.update(provided)`**，故后者同名键会覆盖前者。
 
-### 常见 signal
+### C.2 Signal 组件（`SignalProvider` 实现类）
 
+| 类名 | 实现的抽象方法 | 默认输出信号键 | 行为与前置条件 |
+| ---- | -------------- | -------------- | -------------- |
+| `ConstantSignal` | `provide` | `signal_name`（默认 `"constant"`） | 常数 `float(value)`。 |
+| `UnitLengthSignal` | `provide` | `signal_name`（默认 `"unit_length"`） | 当前 unit 文本 strip 后长度；若 `normalize_by>0` 则除以该值。 |
+| `KeywordMatchSignal` | `provide` | `signal_name`（默认 `"keyword_match"`） | **`packet.query` 必须非空**；query 词与 `representation["keywords"]` 及 unit 文本词的交集数量（float）。 |
+| `HasEntitySignal` | `provide` | `signal_name`（默认 `"has_entity"`） | 有实体则 `1.0` 否则 `0.0`。 |
+| `HasTripleSignal` | `provide` | `signal_name`（默认 `"has_triple"`） | 有 triple 则 `1.0` 否则 `0.0`。 |
+| `HasKVSignal` | `provide` | `signal_name`（默认 `"has_kv"`） | 有 kv 则 `1.0` 否则 `0.0`。 |
+| `TagMatchSignal` | `provide` | `signal_name`（默认 `"tag_match"`） | **`packet.query` 必须非空**；query 词与 `unit.tags` 交集数量。 |
+| `LayerTargetSignal` | `provide` | `signal_name`（默认 `"layer_target"`） | **`packet.placements` 必须非空**；`placements[unit_index].target_layer` 是否在 `allowed_layers` 内，是则 `1.0` 否则 `0.0`。 |
+| `QueryOverlapSignal` | `provide` | `signal_name`（默认 `"query_overlap"`） | **`packet.query` 必须非空**；query 与 unit 文本的 token 交集数量。 |
 
-| Signal               | 含义              | 常见来源                     |
-| -------------------- | --------------- | ------------------------ |
-| `importance`         | 内容长期价值或重要性      | heuristics / model / LLM |
-| `novelty`            | 与已有 store 的差异度  | similarity to store      |
-| `surprise`           | 预测误差或意外程度       | surprise model           |
-| `duplicate_risk`     | 与已有 unit 重复的风险  | dedup detector           |
-| `task_relevance`     | 与当前目标/任务的相关性    | task-conditioned scorer  |
-| `user_relevance`     | 与用户稳定画像或偏好的相关性  | profile relevance scorer |
-| `entity_salience`    | 是否涉及高价值实体       | entity-aware scorer      |
-| `event_match`        | 是否命中特定事件类型      | event detector           |
-| `llm_value_estimate` | LLM 对“值不值得记”的估计 | LLM judge                |
+### C.3 Scorer 组件（`ScoreAggregator` 实现类）
 
+| 类名 | 实现的抽象方法 | 行为 |
+| ---- | -------------- | ---- |
+| `IdentityScorer` | `score` | `signals[source]` 转为 `float`；缺键则 `ValueError`。 |
+| `WeightedSumScorer` | `score` | `sum(signals[k] * weights[k])`；缺任一键则 `ValueError`。 |
+| `MaxScorer` | `score` | `sources` 中信号的最大值。 |
+| `MinScorer` | `score` | `sources` 中信号的最小值。 |
+| `AverageScorer` | `score` | `sources` 中信号的算术平均。 |
+| `ClippedWeightedSumScorer` | `score` | 先按 `WeightedSumScorer` 求和，再 clip 到 `[min_score, max_score]`。 |
 
-### 常见 scorer
+### C.4 Gate 组件（`Gate` 实现类）
 
+| 类名 | 实现的抽象方法 | 行为与前置条件 |
+| ---- | -------------- | -------------- |
+| `AlwaysOpenGate` | `evaluate` | 恒为 `True`。 |
+| `RequireEntityGate` | `evaluate` | 当前 unit 有 `entities` 才 `True`。 |
+| `RequireTripleGate` | `evaluate` | 当前 unit 有 `triples` 才 `True`。 |
+| `RequireTagGate` | `evaluate` | `unit.tags` 与 `required_tags`（casefold）有交集才 `True`。 |
+| `LayerAllowedGate` | `evaluate` | **`packet.placements` 必须非空**；`target_layer` 必须在 `allowed_layers` 中。 |
+| `QueryPresentGate` | `evaluate` | `packet.query is not None` 时 `True`。 |
 
-| scorer         | 含义                      | 关键参数                    |
-| -------------- | ----------------------- | ----------------------- |
-| `identity`     | 单信号直接作为 score           | source                  |
-| `weighted_sum` | 多个信号加权求和                | weights                 |
-| `max`          | 取最大信号                   | sources                 |
-| `product`      | 联合门控式相乘                 | sources                 |
-| `rule_expr`    | 用规则表达式组合信号和谓词           | expression              |
-| `llm_judge`    | LLM 直接输出 score 或 yes/no | model, prompt, criteria |
+### C.5 Policy 组件（`DecisionPolicy` 实现类）
 
+| 类名 | 实现的抽象方法 | 行为 |
+| ---- | -------------- | ---- |
+| `AlwaysPolicy` | `decide` | 恒 `True`（忽略 score/gate）。 |
+| `NeverPolicy` | `decide` | 恒 `False`。 |
+| `ThresholdPolicy` | `decide` | `gate_open and score >= threshold`。 |
+| `BooleanGatePolicy` | `decide` | 直接返回 `gate_open`。 |
+| `BandPassThresholdPolicy` | `decide` | `gate_open and lower <= score <= upper`。 |
+| `ThresholdOrGatePolicy` | `decide` | `gate_open or score >= threshold`。 |
 
-### 常见 policy
+### C.6 `TriggerFamilyRunner.run` 与 trace
 
+- **前置**：`packet.units` 非空；并按适配器传入的 `required_fields` 检查 `query` / `placements` 等字段非 `None`。
+- **输出**：在 `packet` 上设置 `output_field`（`decisions` 或 `evolution_decisions`）为 `list[bool]`；`trace[trace_key]` 含 `family`、`policy`/`scorer`/`gate` 的 `name`、`per_unit`（每单元的 signals/score/gate/decision）。
 
-| policy             | 含义             | 关键参数        |
-| ------------------ | -------------- | ----------- |
-| `always`           | 无条件触发          | —           |
-| `never`            | 从不触发           | —           |
-| `threshold`        | score 超过阈值时触发  | threshold   |
-| `top_k_per_window` | 每个窗口只保留 top-k  | k, window   |
-| `sample_by_score`  | 按 score 进行概率采样 | temperature |
-| `boolean_gate`     | gates 满足时触发    | gate_logic  |
-| `explicit_only`    | 只有显式工具调用才触发    | tool_names  |
+### C.7 默认基线与组合 API
 
+| Pipeline slot | 注册类 | 内置 family（摘要） |
+| ------------- | ------ | ------------------- |
+| `write_trigger` | `AlwaysWriteTrigger` | `ConstantSignal(1.0)` + `IdentityScorer("constant")` + `AlwaysOpenGate` + `AlwaysPolicy` |
+| `write_trigger` | `ThresholdWriteTrigger` | 同上 signal/scorer/gate + `ThresholdPolicy(threshold)`（score 实为 `constant` 加权 1.0） |
+| `evolution_trigger` | `NeverEvolutionTrigger` | 同上 + `NeverPolicy` |
+| `evolution_trigger` | `ThresholdEvolutionTrigger` | 同上 + `ThresholdPolicy(threshold)` |
 
-### 常见 gate
+自定义： **`compose_write_trigger`** / **`compose_evolution_trigger`**（`write_trigger.py` / `evolution_trigger.py`），传入 `signal_providers`、`scorer`、`gate`、`policy` 及可选 `input_requirements`（非 `units` 的项会进入 `required_fields`，在 runner 里强制 packet 字段存在）。
 
+### C.8 概念扩展（当前代码中未提供的组件形态）
 
-| gate                           | 含义                 |
-| ------------------------------ | ------------------ |
-| `on_event("task_failure")`     | 特定事件发生时允许触发        |
-| `not_duplicate(threshold=...)` | 重复风险过高时阻止触发        |
-| `tool_called("memory_write")`  | 只有 agent 显式调用工具时触发 |
-| `predicate(...)`               | 命中规则条件时允许触发        |
+下表便于与更宽的搜索空间对照；**未在 `_trigger_family.py` 中实现**：
 
+- Signal：`importance` / `novelty` / `surprise` / `duplicate_risk`、LLM 估计等。
+- Scorer：`product`、`rule_expr`、纯 `llm_judge`。
+- Policy：`top_k_per_window`、`sample_by_score`、`explicit_only`（工具调用门控）等。
+- Gate：`on_event`、`not_duplicate`、`tool_called` 等事件/工具谓词。
 
-### 变异轴
-
-- **信号选择**：看哪些 signals
-- **评分方式**：单信号 / 加权融合 / 规则 / LLM
-- **决策策略**：阈值 / 采样 / 显式调用 / gate
-- **作用位置**：同一 trigger family 可用于 `write_trigger` 或 `evolution_trigger`
-
-### 建模说明
-
-- 不是所有 trigger 都应该强行数值化；更好的统一方式是把它们都视为 `signal + gate + policy` 的组合。
-- `importance`、`novelty`、`surprise` 这类项不再单独作为 primitive，而是 scorer 的输入。
-- `LLMJudge` 和 `AgentToolCall` 也不再是同层级的独立 trigger，而是 `scorer/gates/policy` 的特例。
-- 你提到的“agent 编排 score”可以自然表示为：agent 通过 `tool_called(...)`、动态权重或运行时配置来影响 `scorer` 与 `policy`。
-
-### 常见策略到此框架的映射
+### C.9 常见策略到此框架的映射（概念）
 
 
 | 原写法                    | 此框架写法                                                                  |
