@@ -62,6 +62,15 @@ def _iter_slot_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
     return (module_or_modules,)
 
 
+def _iter_nested_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
+    flattened: list[PrimitiveModule] = []
+    for module in _iter_slot_modules(module_or_modules):
+        flattened.append(module)
+        if hasattr(module, "iter_child_modules"):
+            flattened.extend(_iter_nested_modules(module.iter_child_modules()))
+    return tuple(flattened)
+
+
 class MemoryPipeline:
     """Coordinates the baseline memory pipeline using Packet-based IO.
 
@@ -131,7 +140,7 @@ class MemoryPipeline:
     def _validate_store_compatibility(self) -> None:
         from .baselines import GraphAppendOrganization
 
-        for organization in _iter_slot_modules(self.organization):
+        for organization in _iter_nested_modules(self.organization):
             if not isinstance(organization, GraphAppendOrganization):
                 continue
 

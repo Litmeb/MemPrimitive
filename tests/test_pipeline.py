@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from memprimitive import IncompatibleCompositionError, Observation, Query, create_baseline_pipeline
+from memprimitive import (
+    DispatchOrganization,
+    DispatchReadout,
+    IncompatibleCompositionError,
+    Observation,
+    Query,
+    create_baseline_pipeline,
+)
 from memprimitive.baselines import (
     AlwaysWriteTrigger,
     AppendOnlyEvolution,
@@ -319,6 +326,60 @@ def test_memory_pipeline_validates_each_module_inside_iterable_slot() -> None:
 def test_memory_pipeline_checks_graph_compatibility_for_iterable_organization_slot() -> None:
     with pytest.raises(IncompatibleCompositionError, match=r"slot='organization'.*declared graph layer.*knowledge_graph"):
         MemoryPipeline(organization=[AppendOrganization(), GraphAppendOrganization()])
+
+
+def test_dispatch_organization_fans_out_same_snapshot_and_keeps_primary_packet() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="working"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    pipeline = MemoryPipeline(
+        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+        organization=DispatchOrganization(
+            (
+                AppendOrganization(target_layer="working"),
+                GraphAppendOrganization(target_layer="knowledge_graph"),
+            ),
+            primary_index=0,
+        ),
+        store=store,
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="notes"))
+
+    assert store.count("working") == 1
+    assert store.count("knowledge_graph") == 1
+    assert packet.placements[0].target_layer == "working"
+    assert packet.trace["dispatch"]["organization"]["children"][1]["module"] == "graph_append_organization"
+
+
+def test_dispatch_readout_returns_primary_branch_but_records_all_children() -> None:
+    store = MemoryStore()
+    pipeline = create_baseline_pipeline(top_k=2)
+    pipeline.store = store
+    pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+    pipeline.readout = DispatchReadout((ConcatenateReadout(), BulletListReadout()), primary_index=1)
+
+    readout = pipeline.recall(Query(text="Alice"))
+
+    assert readout.text.startswith("- ")
+
+
+def test_dispatch_organization_validates_child_slots_and_graph_compatibility() -> None:
+    with pytest.raises(TypeError, match="OrganizationModule"):
+        DispatchOrganization((AppendOrganization(), ConcatenateReadout()))
+
+    with pytest.raises(IncompatibleCompositionError, match=r"slot='organization'.*declared graph layer.*knowledge_graph"):
+        MemoryPipeline(
+            organization=DispatchOrganization(
+                (AppendOrganization(), GraphAppendOrganization()),
+                primary_index=0,
+            )
+        )
 
 
 def test_pipeline_accepts_custom_topology_store_without_breaking_baseline_flow() -> None:

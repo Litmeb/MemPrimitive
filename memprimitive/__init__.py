@@ -1,4 +1,4 @@
-"""Stage-1 DSL skeleton for MemPrimitive."""
+"""DSL skeleton for MemPrimitive."""
 
 from .core import (
     MemoryRecord,
@@ -14,10 +14,28 @@ from .core import (
     StoreLayerSpec,
     StoreTopology,
 )
+from .dispatch import (
+    DispatchEvolutionTrigger,
+    DispatchMemoryEvolution,
+    DispatchOrganization,
+    DispatchReadout,
+    DispatchRepresentation,
+    DispatchRetrieval,
+    DispatchUnitFormation,
+    DispatchWriteTrigger,
+)
 from .exceptions import IncompatibleCompositionError
 from .pipeline import MemoryPipeline, create_baseline_pipeline
 
 __all__ = [
+    "DispatchEvolutionTrigger",
+    "DispatchMemoryEvolution",
+    "DispatchOrganization",
+    "DispatchReadout",
+    "DispatchRepresentation",
+    "DispatchRetrieval",
+    "DispatchUnitFormation",
+    "DispatchWriteTrigger",
     "IncompatibleCompositionError",
     "MemoryPipeline",
     "MemoryRecord",
