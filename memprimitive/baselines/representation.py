@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -15,11 +16,61 @@ from ..interfaces import RepresentationModule
 
 from ._trace import copy_trace
 
-_VALID_ELEMENTS: Final[tuple[str, ...]] = ("text", "embedding", "triple", "kv", "entities", "tags", "description")
+_VALID_ELEMENTS: Final[tuple[str, ...]] = (
+    "text",
+    "embedding",
+    "triple",
+    "kv",
+    "entities",
+    "tags",
+    "description",
+    "keywords",
+    "summary",
+    "time_anchor",
+    "relation_tags",
+    "source_type",
+)
 _ENTITY_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b")
 _KV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Za-z][A-Za-z0-9_ ]{0,40}?)\s*:\s*([^.;,\n]+)")
 _LIKES_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][a-z]+)\s+(likes|prefers|loves|hates|works on|studies)\s+([^.;,\n]+)", re.I)
 _IS_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][a-z]+)\s+is\s+([^.;,\n]+)", re.I)
+_WORD_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b")
+_STOPWORDS: Final[frozenset[str]] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "about",
+        "have",
+        "has",
+        "was",
+        "were",
+        "are",
+        "is",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "or",
+        "as",
+        "it",
+        "their",
+        "they",
+        "them",
+        "we",
+        "you",
+        "your",
+    }
+)
 
 
 def _load_local_env() -> dict[str, str]:
@@ -119,6 +170,7 @@ class BasicRepresentation(RepresentationModule):
         entities = list(unit.entities)
         tags = list(unit.tags)
         description = unit.description
+        representation_meta: dict[str, Any] = dict(unit.metadata.get("representation", {}))
 
         if "text" in self.elements:
             elements.add("text")
@@ -141,6 +193,31 @@ class BasicRepresentation(RepresentationModule):
             tags = self._extract_tags(unit, normalized_text, kv=kv, entities=entities, triples=triples)
             if tags:
                 elements.add("tags")
+        if "keywords" in self.elements:
+            keywords = self._extract_keywords(unit, normalized_text, tags=tags, entities=entities)
+            if keywords:
+                representation_meta["keywords"] = keywords
+                elements.add("keywords")
+        if "summary" in self.elements:
+            summary = self._build_summary(normalized_text, kv=kv, entities=entities, triples=triples)
+            if summary:
+                representation_meta["summary"] = summary
+                elements.add("summary")
+        if "time_anchor" in self.elements:
+            time_anchor = self._build_time_anchor(unit)
+            if time_anchor:
+                representation_meta["time_anchor"] = time_anchor
+                elements.add("time_anchor")
+        if "relation_tags" in self.elements:
+            relation_tags = self._build_relation_tags(unit, triples=triples, entities=entities)
+            if relation_tags:
+                representation_meta["relation_tags"] = relation_tags
+                elements.add("relation_tags")
+        if "source_type" in self.elements:
+            source_type = self._build_source_type(unit)
+            if source_type:
+                representation_meta["source_type"] = source_type
+                elements.add("source_type")
         if "description" in self.elements:
             description = self._describe_unit(unit, normalized_text, kv=kv, entities=entities, triples=triples, tags=tags)
             if description:
@@ -162,7 +239,10 @@ class BasicRepresentation(RepresentationModule):
             represented,
             metadata={
                 **represented.metadata,
-                "representation": _representation_summary_from_unit(represented),
+                "representation": {
+                    **_representation_summary_from_unit(represented),
+                    **representation_meta,
+                },
             },
         )
 
@@ -251,6 +331,79 @@ class BasicRepresentation(RepresentationModule):
             tags.append("structured_triple")
         return list(dict.fromkeys(tag for tag in tags if tag))
 
+    def _extract_keywords(self, unit: MemoryUnit, text: str, *, tags: list[str], entities: list[str]) -> list[str]:
+        hinted = unit.metadata.get("keywords")
+        if isinstance(hinted, list) and hinted:
+            return list(dict.fromkeys(str(item).casefold() for item in hinted if str(item).strip()))
+
+        counts = Counter(
+            token.casefold()
+            for token in _WORD_PATTERN.findall(text)
+            if token.casefold() not in _STOPWORDS
+        )
+        ranked = [token for token, _ in counts.most_common(6)]
+        extras = [entity.casefold() for entity in entities] + [tag.casefold() for tag in tags if len(tag) > 2]
+        return list(dict.fromkeys(ranked + extras))
+
+    def _build_summary(
+        self,
+        text: str,
+        *,
+        kv: dict[str, str],
+        entities: list[str],
+        triples: list[tuple[str, str, str]],
+    ) -> str | None:
+        if triples:
+            subject, predicate, obj = triples[0]
+            return f"{subject} {predicate} {obj}".strip()
+        if kv:
+            key, value = next(iter(kv.items()))
+            return f"{key.replace('_', ' ')}: {value}"
+        if entities:
+            return f"{', '.join(entities[:2])}: {text[:80]}".strip()
+        normalized = " ".join(text.split())
+        if not normalized:
+            return None
+        if len(normalized) <= 96:
+            return normalized
+        return f"{normalized[:93].rstrip()}..."
+
+    def _build_time_anchor(self, unit: MemoryUnit) -> dict[str, str] | None:
+        timestamp = unit.metadata.get("time_anchor") if isinstance(unit.metadata.get("time_anchor"), dict) else None
+        if timestamp:
+            return {str(key): str(value) for key, value in timestamp.items()}
+        raw = unit.timestamp
+        if not raw:
+            return None
+        return {
+            "timestamp": raw,
+            "date": raw.split("T", 1)[0],
+        }
+
+    def _build_relation_tags(
+        self,
+        unit: MemoryUnit,
+        *,
+        triples: list[tuple[str, str, str]],
+        entities: list[str],
+    ) -> list[str]:
+        hinted = unit.metadata.get("relation_tags")
+        if isinstance(hinted, list) and hinted:
+            return list(dict.fromkeys(str(item) for item in hinted if str(item).strip()))
+
+        relation_tags: list[str] = []
+        for _, predicate, _ in triples:
+            relation_tags.append(f"predicate:{predicate.replace(' ', '_')}")
+        if len(entities) >= 2:
+            relation_tags.append("multi_entity")
+        return list(dict.fromkeys(relation_tags))
+
+    def _build_source_type(self, unit: MemoryUnit) -> str | None:
+        source = unit.metadata.get("source")
+        if source is None:
+            return None
+        return str(source).strip() or None
+
     def _describe_unit(
         self,
         unit: MemoryUnit,
@@ -264,9 +417,7 @@ class BasicRepresentation(RepresentationModule):
         if unit.description is not None:
             return unit.description
         if not self.api_key or not self.base_url or not self.model:
-            raise ValueError(
-                "Description generation requires MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, and MEMPRIMITIVE_MODEL."
-            )
+            return self._build_summary(text, kv=kv, entities=entities, triples=triples) or text
 
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         prompt = (
@@ -291,5 +442,44 @@ class BasicRepresentation(RepresentationModule):
         return content.strip()
 
 
+class KeywordRepresentation(BasicRepresentation):
+    """Thin wrapper around ``BasicRepresentation`` for keyword-oriented indexing.
+
+    Constructor keeps the same embedding/API options as ``BasicRepresentation``
+    but defaults the element set to ``text + keywords + tags``.
+    """
+
+    spec = ModuleSpec(
+        name="keyword_representation",
+        slot="representation",
+        input_requirements=("units",),
+        output_guarantees=(
+            "units.text",
+            "units.representation_elements",
+            "units.metadata.representation",
+        ),
+    )
+
+    def __init__(
+        self,
+        *,
+        elements: tuple[str, ...] = ("text", "keywords", "tags"),
+        embedding_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(
+            elements=elements,
+            embedding_model=embedding_model,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+
+
 BASELINE_SLOT: Final[str] = "representation"
-BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (BasicRepresentation,)
+BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
+    BasicRepresentation,
+    KeywordRepresentation,
+)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Final
+from typing import Any, Final
 
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
@@ -67,5 +67,165 @@ class AppendOrganization(OrganizationModule):
         return replace(packet, placements=placements, trace=trace), store
 
 
+def _append_records_for_placements(
+    packet: Packet,
+    store: MemoryStore,
+    placements: list[Placement],
+    *,
+    metadata_builder: Any | None = None,
+) -> tuple[list[str], list[str], int]:
+    written_record_ids: list[str] = []
+    written_unit_ids: list[str] = []
+    skipped_units = 0
+    for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+        if not decision:
+            skipped_units += 1
+            continue
+        sequence_id = store.next_sequence_id()
+        record = MemoryRecord.from_unit(unit=unit, layer=placement.target_layer, sequence_id=sequence_id)
+        if metadata_builder is not None:
+            record.metadata.update(metadata_builder(unit, placement))
+        store.append(record)
+        written_record_ids.append(record.record_id)
+        written_unit_ids.append(unit.unit_id)
+    return written_record_ids, written_unit_ids, skipped_units
+
+
+class ConditionalLayerOrganization(OrganizationModule):
+    """Route units to layers based on tags/entities/unit metadata, then append.
+
+    Constructor: ``default_layer`` must be declared in topology or creatable by
+    the store. ``rules`` is an ordered tuple of dict rules using one of
+    ``has_entity``, ``unit_type``, ``tag_contains``, or ``metadata_key`` to pick
+    a ``target_layer``.
+
+    ``run`` requires ``packet.units`` and ``packet.decisions`` with equal length.
+    Emits aligned placements and commits normal append-only writes to the chosen
+    target layers.
+    """
+
+    spec = ModuleSpec(
+        name="conditional_layer_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        side_effects=("modify_store", "append_records"),
+    )
+
+    def __init__(self, *, default_layer: str = "default", rules: tuple[dict[str, Any], ...] = ()) -> None:
+        self.default_layer = default_layer
+        self.rules = rules
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("ConditionalLayerOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("ConditionalLayerOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("ConditionalLayerOrganization requires decisions aligned with units.")
+
+        placements = [
+            Placement(unit_id=unit.unit_id, target_layer=self._target_layer_for_unit(unit))
+            for unit in packet.units
+        ]
+        written_record_ids, written_unit_ids, skipped_units = _append_records_for_placements(packet, store, placements)
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "default_layer": self.default_layer,
+            "placements": [
+                {"unit_id": placement.unit_id, "target_layer": placement.target_layer}
+                for placement in placements
+            ],
+            "written_record_ids": written_record_ids,
+            "written_unit_ids": written_unit_ids,
+            "skipped_unit_count": skipped_units,
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+    def _target_layer_for_unit(self, unit) -> str:
+        for rule in self.rules:
+            target_layer = str(rule.get("target_layer", "")).strip()
+            if not target_layer:
+                continue
+            if rule.get("has_entity") is True and unit.entities:
+                return target_layer
+            if "unit_type" in rule and str(rule["unit_type"]).strip() == unit.unit_type:
+                return target_layer
+            if "tag_contains" in rule and str(rule["tag_contains"]).strip():
+                needle = str(rule["tag_contains"]).casefold()
+                if any(needle in str(tag).casefold() for tag in unit.tags):
+                    return target_layer
+            if "metadata_key" in rule and str(rule["metadata_key"]).strip():
+                if rule["metadata_key"] in unit.metadata:
+                    return target_layer
+        return self.default_layer
+
+
+class GraphAppendOrganization(OrganizationModule):
+    """Append units into a graph-shaped layer while annotating graph metadata.
+
+    Constructor: ``target_layer`` must refer to a declared ``Graph`` layer.
+
+    ``run`` requires ``packet.units`` and ``packet.decisions`` with equal length.
+    The module appends standard ``MemoryRecord`` rows, but enriches metadata with
+    graph-node hints derived from unit entities/triples.
+    """
+
+    spec = ModuleSpec(
+        name="graph_append_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        side_effects=("modify_store", "append_records"),
+    )
+
+    def __init__(self, *, target_layer: str = "knowledge_graph") -> None:
+        self.target_layer = target_layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("GraphAppendOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("GraphAppendOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("GraphAppendOrganization requires decisions aligned with units.")
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(f"GraphAppendOrganization requires target layer {self.target_layer!r} to be Graph.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        written_record_ids, written_unit_ids, skipped_units = _append_records_for_placements(
+            packet,
+            store,
+            placements,
+            metadata_builder=self._graph_metadata,
+        )
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "written_record_ids": written_record_ids,
+            "written_unit_ids": written_unit_ids,
+            "skipped_unit_count": skipped_units,
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+    @staticmethod
+    def _graph_metadata(unit, placement: Placement) -> dict[str, Any]:
+        return {
+            "graph": {
+                "layer": placement.target_layer,
+                "entities": list(unit.entities),
+                "triples": list(unit.triples),
+                "node_count": max(len(unit.entities), 1 if unit.triples else 0),
+            }
+        }
+
+
 BASELINE_SLOT: Final[str] = "organization"
-BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (AppendOrganization,)
+BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
+    AppendOrganization,
+    ConditionalLayerOrganization,
+    GraphAppendOrganization,
+)

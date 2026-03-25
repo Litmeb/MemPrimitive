@@ -14,6 +14,15 @@ from ..interfaces import RetrievalModule
 from ._trace import copy_trace
 
 
+def _query_tokens(text: str) -> set[str]:
+    return {token for token in text.casefold().split() if token}
+
+
+def _representation(record) -> dict[str, Any]:
+    value = record.metadata.get("representation", {})
+    return value if isinstance(value, dict) else {}
+
+
 class RecencyRetrieval(RetrievalModule):
     """Retrieve up to ``top_k`` records: keyword filter when possible, else by recency.
 
@@ -46,7 +55,7 @@ class RecencyRetrieval(RetrievalModule):
             raise ValueError("RecencyRetrieval requires packet.query.")
 
         all_records = store.iter_records(self.layer)
-        query_tokens = {token for token in packet.query.text.casefold().split() if token}
+        query_tokens = _query_tokens(packet.query.text)
 
         ordered = list(reversed(all_records))
         filtered_records = ordered
@@ -77,6 +86,62 @@ class RecencyRetrieval(RetrievalModule):
                 "module": self.spec.name,
                 "top_k": self.top_k,
                 "matched_by_keyword": keyword_mode,
+                "candidate_count": len(all_records),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
+class KeywordCountRetrieval(RetrievalModule):
+    """Rank records by query-token hit count, then break ties by recency."""
+
+    spec = ModuleSpec(
+        name="keyword_count_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+        if top_k <= 0:
+            raise ValueError("KeywordCountRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("KeywordCountRetrieval requires packet.query.")
+
+        tokens = _query_tokens(packet.query.text)
+        all_records = list(reversed(store.iter_records(self.layer)))
+        scored = []
+        for order_index, record in enumerate(all_records):
+            representation = _representation(record)
+            haystack = set(_query_tokens(record.text))
+            haystack.update(str(item).casefold() for item in representation.get("keywords", []))
+            overlap = len(tokens & haystack)
+            scored.append((overlap, order_index, record))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        selected = scored[: self.top_k]
+        items = [record for _, _, record in selected]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": float(overlap),
+                "strategy": "keyword_count",
+            }
+            for rank, (overlap, _, record) in enumerate(selected, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
                 "candidate_count": len(all_records),
             },
         )
@@ -189,6 +254,127 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         return numerator / (left_norm * right_norm)
 
 
+class TagRetrieval(RetrievalModule):
+    """Rank records by overlap between query tokens and representation tags."""
+
+    spec = ModuleSpec(
+        name="tag_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+        if top_k <= 0:
+            raise ValueError("TagRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("TagRetrieval requires packet.query.")
+
+        tokens = _query_tokens(packet.query.text)
+        all_records = list(reversed(store.iter_records(self.layer)))
+        scored = []
+        for order_index, record in enumerate(all_records):
+            tags = {str(tag).casefold() for tag in _representation(record).get("tags", [])}
+            overlap = len(tokens & tags)
+            scored.append((overlap, order_index, record))
+
+        if any(overlap > 0 for overlap, _, _ in scored):
+            scored = [item for item in scored if item[0] > 0]
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        selected = scored[: self.top_k]
+        items = [record for _, _, record in selected]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": float(overlap),
+                "strategy": "tag_overlap",
+            }
+            for rank, (overlap, _, record) in enumerate(selected, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "candidate_count": len(all_records),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
+class EntityRetrieval(RetrievalModule):
+    """Rank records by overlap between query entities/tokens and record entities."""
+
+    spec = ModuleSpec(
+        name="entity_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+        if top_k <= 0:
+            raise ValueError("EntityRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("EntityRetrieval requires packet.query.")
+
+        query_entities = {
+            token
+            for token in packet.query.text.split()
+            if token and token[:1].isupper()
+        }
+        fallback_tokens = _query_tokens(packet.query.text)
+        all_records = list(reversed(store.iter_records(self.layer)))
+        scored = []
+        for order_index, record in enumerate(all_records):
+            representation = _representation(record)
+            record_entities = {str(item) for item in representation.get("entities", [])}
+            lowered_entities = {item.casefold() for item in record_entities}
+            overlap = len({entity.casefold() for entity in query_entities} & lowered_entities)
+            if overlap == 0:
+                overlap = len(fallback_tokens & lowered_entities)
+            scored.append((overlap, order_index, record))
+
+        if any(overlap > 0 for overlap, _, _ in scored):
+            scored = [item for item in scored if item[0] > 0]
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        selected = scored[: self.top_k]
+        items = [record for _, _, record in selected]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": float(overlap),
+                "strategy": "entity_overlap",
+            }
+            for rank, (overlap, _, record) in enumerate(selected, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "candidate_count": len(all_records),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
 class _LayerScopedStore:
     """Proxy ``MemoryStore`` so retrievers only see one logical layer."""
 
@@ -233,6 +419,8 @@ class LayerAwareRetrieval(RetrievalModule):
         retriever_by_layer: dict[str, RetrievalModule] | None = None,
         active_layers: tuple[str, ...] | None = None,
         top_k: int = 3,
+        top_k_by_layer: dict[str, int] | None = None,
+        merge_weight_by_layer: dict[str, float] | None = None,
         merge_strategy: str = "global_rank",
     ) -> None:
         if top_k <= 0:
@@ -256,6 +444,14 @@ class LayerAwareRetrieval(RetrievalModule):
             normalized_overrides[layer_name.strip()] = retriever
         self.retriever_by_layer = normalized_overrides
         self.active_layers = None if active_layers is None else tuple(active_layers)
+        self.top_k_by_layer = {
+            str(layer).strip(): int(value)
+            for layer, value in ({} if top_k_by_layer is None else top_k_by_layer).items()
+        }
+        self.merge_weight_by_layer = {
+            str(layer).strip(): float(value)
+            for layer, value in ({} if merge_weight_by_layer is None else merge_weight_by_layer).items()
+        }
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
@@ -267,7 +463,7 @@ class LayerAwareRetrieval(RetrievalModule):
         merged_candidates: list[dict[str, Any]] = []
 
         for layer_index, layer_name in enumerate(active_layers):
-            retriever = self.retriever_by_layer.get(layer_name, self.default_retriever)
+            retriever = self._retriever_for_layer(layer_name)
             layer_packet = Packet(query=query, trace=packet.trace)
             scoped_store = _LayerScopedStore(store, layer_name)
             layer_packet, _ = retriever.run(layer_packet, scoped_store)
@@ -297,6 +493,7 @@ class LayerAwareRetrieval(RetrievalModule):
                         "layer": layer_name,
                         "layer_index": layer_index,
                         "item_index": item_index,
+                        "merge_weight": self.merge_weight_by_layer.get(layer_name, 1.0),
                     }
                 )
 
@@ -341,6 +538,17 @@ class LayerAwareRetrieval(RetrievalModule):
             raise ValueError(f"LayerAwareRetrieval active_layers are not declared in the store topology: {missing}")
         return self.active_layers
 
+    def _retriever_for_layer(self, layer_name: str) -> RetrievalModule:
+        retriever = self.retriever_by_layer.get(layer_name, self.default_retriever)
+        layer_top_k = self.top_k_by_layer.get(layer_name)
+        if layer_top_k is None:
+            return retriever
+        if hasattr(retriever, "top_k"):
+            params = dict(retriever.__dict__)
+            params["top_k"] = layer_top_k
+            return type(retriever)(**params)
+        return retriever
+
     @staticmethod
     def _extract_numeric_score(score_info: dict[str, Any]) -> float | None:
         raw_score = score_info.get("score")
@@ -357,13 +565,17 @@ class LayerAwareRetrieval(RetrievalModule):
         rank = score_info.get("rank")
         normalized_rank = rank if isinstance(rank, int) and rank > 0 else 10**9
         if numeric_score is not None:
-            return (0, -numeric_score, normalized_rank, candidate["layer_index"], candidate["item_index"])
+            weighted_score = numeric_score * float(candidate.get("merge_weight", 1.0))
+            return (0, -weighted_score, normalized_rank, candidate["layer_index"], candidate["item_index"])
         return (1, normalized_rank, candidate["layer_index"], candidate["item_index"])
 
 
 BASELINE_SLOT: Final[str] = "retrieval"
 BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     RecencyRetrieval,
+    KeywordCountRetrieval,
     EmbeddingSimilarityRetrieval,
+    TagRetrieval,
+    EntityRetrieval,
     LayerAwareRetrieval,
 )

@@ -156,6 +156,11 @@ def _representation_summary_from_unit(unit: MemoryUnit) -> dict[str, Any]:
         summary["tags"] = list(unit.tags)
     if unit.description is not None:
         summary["description"] = unit.description
+    hinted_summary = unit.metadata.get("representation")
+    if isinstance(hinted_summary, dict):
+        for key, value in hinted_summary.items():
+            if key not in summary:
+                summary[key] = value
     return summary
 
 
