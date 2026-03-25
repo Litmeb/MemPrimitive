@@ -91,11 +91,11 @@ For each enabled element, the module updates `MemoryUnit` fields and/or `unit.me
 | `entities` | `MemoryUnit.entities` | Uses `metadata["entities"]` hint if present; else capitalized-word heuristic (`_ENTITY_PATTERN`), filtering trivial tokens. |
 | `tags` | `MemoryUnit.tags` | Uses `metadata["tags"]` hint if present; else keyword heuristics from text plus `unit_type`, entity/kv/triple richness tags. |
 | `keywords` | `metadata["representation"]["keywords"]` only | Uses `metadata["keywords"]` hint if present; else word-frequency top tokens (stopword-filtered) plus entities/tags. |
-| `summary` | `metadata["representation"]["summary"]` | Short string from first triple, first kv pair, entities + text clip, or clipped full text. |
+| `summary` | `metadata["representation"]["summary"]` | Uses `metadata["summary"]` string hint if present. Else requires `api_key`, `base_url`, and `model` (constructor or `MEMPRIMITIVE_*`); calls OpenAI chat completions for a short factual summary. Empty text yields no summary. |
 | `time_anchor` | `metadata["representation"]["time_anchor"]` | Uses `metadata["time_anchor"]` dict if present; else derives `timestamp` / `date` from `MemoryUnit.timestamp`. |
 | `relation_tags` | `metadata["representation"]["relation_tags"]` | Uses `metadata["relation_tags"]` hint if present; else `predicate:…` tags from triples and `multi_entity` when ≥2 entities. |
 | `source_type` | `metadata["representation"]["source_type"]` | From `MemoryUnit.metadata["source"]` when set. |
-| `description` | `MemoryUnit.description` | If `unit.description` already set, kept. Else if `api_key`, `base_url`, and `model` are all non-empty (constructor args or env `MEMPRIMITIVE_*`), calls OpenAI chat completions for a short description. Otherwise falls back to the same heuristic as `summary`, then raw text. |
+| `description` | `MemoryUnit.description` | If `unit.description` already set, kept. Else requires `api_key`, `base_url`, and `model` (constructor or `MEMPRIMITIVE_*`); calls OpenAI chat completions for a short description. |
 
 Constructor env fallbacks (via `.env` next to the package): `MEMPRIMITIVE_EMBEDDING_MODEL`, `MEMPRIMITIVE_API_KEY`, `MEMPRIMITIVE_BASE_URL`, `MEMPRIMITIVE_MODEL`.
 

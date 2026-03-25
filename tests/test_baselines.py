@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import pytest
 
@@ -114,8 +115,29 @@ def test_representation_can_build_hybrid_element_set() -> None:
     assert "memory" in unit.tags
 
 
+def test_representation_description_requires_openai_config() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice writes reusable Python code for graph memory tools.", source="notes")),
+        MemoryStore(),
+    )
+    rep = BasicRepresentation(
+        elements=("text", "description"),
+        api_key="",
+        base_url="",
+        model="",
+    )
+    with pytest.raises(ValueError, match="description.*MEMPRIMITIVE"):
+        rep.run(unit_packet, store)
+
+
 def test_representation_can_generate_real_description_via_api() -> None:
     from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    probe = BasicRepresentation(elements=("text", "description"))
+    if not (probe.api_key and probe.base_url and probe.model):
+        pytest.skip("Requires MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, MEMPRIMITIVE_MODEL for LLM description")
 
     unit_packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice writes reusable Python code for graph memory tools.", source="notes")),
@@ -129,6 +151,44 @@ def test_representation_can_generate_real_description_via_api() -> None:
     assert len(unit.description) > 10
     assert "alice" in unit.description.casefold() or "python" in unit.description.casefold()
     assert unit.metadata["representation"]["description"] == unit.description
+
+
+def test_representation_summary_requires_openai_config() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    rep = BasicRepresentation(
+        elements=("text", "summary"),
+        api_key="",
+        base_url="",
+        model="",
+    )
+    with pytest.raises(ValueError, match="summary.*MEMPRIMITIVE"):
+        rep.run(unit_packet, store)
+
+
+def test_representation_can_generate_real_summary_via_api() -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    probe = BasicRepresentation(elements=("text", "summary"))
+    if not (probe.api_key and probe.base_url and probe.model):
+        pytest.skip("Requires MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, MEMPRIMITIVE_MODEL for LLM summary")
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory and retrieval for long contexts.", source="notes")),
+        MemoryStore(),
+    )
+
+    packet_out, _ = BasicRepresentation(elements=("text", "entities", "tags", "summary")).run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    summary = unit.metadata["representation"].get("summary")
+    assert isinstance(summary, str)
+    assert len(summary) > 8
+    assert "alice" in summary.casefold() or "graph" in summary.casefold() or "memory" in summary.casefold()
 
 
 def test_write_trigger_aligns_decisions_with_units() -> None:
@@ -1104,6 +1164,16 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice studies graph memory on 2026-03-24.", source="notes")),
         MemoryStore(),
+    )
+    u0 = packet.units[0]
+    packet = replace(
+        packet,
+        units=[
+            replace(
+                u0,
+                metadata={**u0.metadata, "summary": "Alice studies graph memory on 2026-03-24."},
+            )
+        ],
     )
     packet, store = BasicRepresentation(
         elements=("text", "entities", "tags", "keywords", "summary", "time_anchor", "relation_tags", "source_type")

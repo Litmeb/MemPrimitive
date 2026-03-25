@@ -199,7 +199,14 @@ class BasicRepresentation(RepresentationModule):
                 representation_meta["keywords"] = keywords
                 elements.add("keywords")
         if "summary" in self.elements:
-            summary = self._build_summary(normalized_text, kv=kv, entities=entities, triples=triples)
+            summary = self._build_summary(
+                unit,
+                normalized_text,
+                kv=kv,
+                entities=entities,
+                triples=triples,
+                tags=tags,
+            )
             if summary:
                 representation_meta["summary"] = summary
                 elements.add("summary")
@@ -345,28 +352,59 @@ class BasicRepresentation(RepresentationModule):
         extras = [entity.casefold() for entity in entities] + [tag.casefold() for tag in tags if len(tag) > 2]
         return list(dict.fromkeys(ranked + extras))
 
+    def _openai_plain_text(self, *, element: str, system: str, user: str) -> str:
+        if not self.api_key or not self.base_url or not self.model:
+            raise ValueError(
+                f"BasicRepresentation element {element!r} requires an OpenAI-compatible API: "
+                "set MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, and MEMPRIMITIVE_MODEL "
+                "(or pass api_key, base_url, model to the constructor). "
+                "Heuristic fallback is not supported."
+            )
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        response = client.chat.completions.create(
+            model=self.model,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        return content.strip()
+
     def _build_summary(
         self,
+        unit: MemoryUnit,
         text: str,
         *,
         kv: dict[str, str],
         entities: list[str],
         triples: list[tuple[str, str, str]],
+        tags: list[str],
     ) -> str | None:
-        if triples:
-            subject, predicate, obj = triples[0]
-            return f"{subject} {predicate} {obj}".strip()
-        if kv:
-            key, value = next(iter(kv.items()))
-            return f"{key.replace('_', ' ')}: {value}"
-        if entities:
-            return f"{', '.join(entities[:2])}: {text[:80]}".strip()
-        normalized = " ".join(text.split())
-        if not normalized:
+        hinted = unit.metadata.get("summary")
+        if isinstance(hinted, str) and hinted.strip():
+            return hinted.strip()
+        collapsed = " ".join(text.split())
+        if not collapsed:
             return None
-        if len(normalized) <= 96:
-            return normalized
-        return f"{normalized[:93].rstrip()}..."
+        prompt = (
+            "Write a concise summary (one to three short sentences) of the main facts in this memory unit, "
+            "suitable for retrieval and indexing.\n"
+            f"unit_type: {unit.unit_type}\n"
+            f"text: {text}\n"
+            f"entities: {entities}\n"
+            f"tags: {tags}\n"
+            f"kv: {kv}\n"
+            f"triples: {triples}\n"
+            "Return plain text only."
+        )
+        out = self._openai_plain_text(
+            element="summary",
+            system="You produce short factual summaries of memory units.",
+            user=prompt,
+        )
+        return out or None
 
     def _build_time_anchor(self, unit: MemoryUnit) -> dict[str, str] | None:
         timestamp = unit.metadata.get("time_anchor") if isinstance(unit.metadata.get("time_anchor"), dict) else None
@@ -416,10 +454,6 @@ class BasicRepresentation(RepresentationModule):
     ) -> str:
         if unit.description is not None:
             return unit.description
-        if not self.api_key or not self.base_url or not self.model:
-            return self._build_summary(text, kv=kv, entities=entities, triples=triples) or text
-
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         prompt = (
             "Write one concise natural-language description for this memory unit.\n"
             f"unit_type: {unit.unit_type}\n"
@@ -430,16 +464,11 @@ class BasicRepresentation(RepresentationModule):
             f"triples: {triples}\n"
             "Return plain text only."
         )
-        response = client.chat.completions.create(
-            model=self.model,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": "You produce short factual descriptions for memory representations."},
-                {"role": "user", "content": prompt},
-            ],
+        return self._openai_plain_text(
+            element="description",
+            system="You produce short factual descriptions for memory representations.",
+            user=prompt,
         )
-        content = response.choices[0].message.content or ""
-        return content.strip()
 
 
 class KeywordRepresentation(BasicRepresentation):
