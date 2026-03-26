@@ -2,11 +2,11 @@
 
 From the repo root (recommended)::
 
-    python -m memprimitive.example.example8
+    python -m memprimitive.example.demonstration.conditional_layer_routing
 
 Or from this directory (script adds the repo root to ``sys.path``)::
 
-    python example8.py
+    python conditional_layer_routing.py
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 from pprint import pprint
 
-# Running as ``python memprimitive/example/example8.py`` leaves ``__package__`` unset; repo root must be on path.
+# Running as ``python memprimitive/example/demonstration/conditional_layer_routing.py`` leaves ``__package__`` unset; repo root must be on path.
 if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import BasicRepresentation, ConditionalLayerOrganization

@@ -1,1 +1,1 @@
-"""Runnable examples for MemPrimitive (``example.py`` … ``example5.py``)."""
+"""Example scripts live under ``memprimitive.example.demonstration`` and ``memprimitive.example.classics``."""

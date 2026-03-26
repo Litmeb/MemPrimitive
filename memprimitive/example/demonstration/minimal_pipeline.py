@@ -2,11 +2,11 @@
 
 From the repo root (recommended)::
 
-    python -m memprimitive.example.example
+    python -m memprimitive.example.demonstration.minimal_pipeline
 
 Or from this directory (script adds the repo root to ``sys.path``)::
 
-    python example.py
+    python minimal_pipeline.py
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Running as ``python memprimitive/example/example.py`` leaves ``__package__`` unset; repo root must be on path.
+# Running as ``python memprimitive/example/demonstration/minimal_pipeline.py`` leaves ``__package__`` unset; repo root must be on path.
 if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import (

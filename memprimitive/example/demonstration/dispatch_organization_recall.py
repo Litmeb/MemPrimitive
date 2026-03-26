@@ -1,12 +1,12 @@
-"""End-to-end example showing explicit dispatch for one slot over shared store state.
+"""End-to-end example: ``DispatchOrganization`` (append + graph) with layer-aware recall on one pipeline.
 
 From the repo root (recommended)::
 
-    python -m memprimitive.example.example10
+    python -m memprimitive.example.demonstration.dispatch_organization_recall
 
 Or from this directory (script adds the repo root to ``sys.path``)::
 
-    python example10.py
+    python dispatch_organization_recall.py
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 from pprint import pprint
 
-# Running as ``python memprimitive/example/example10.py`` leaves ``__package__`` unset; repo root must be on path.
+# Running as ``python memprimitive/example/demonstration/dispatch_organization_recall.py`` leaves ``__package__`` unset; repo root must be on path.
 if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import (
     DispatchOrganization,
@@ -54,8 +54,8 @@ def main() -> None:
     )
     store = MemoryStore(topology=topology)
 
-    pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+    working_writer = MemoryPipeline(
+        representation=BasicRepresentation(elements=("text", "tags", "entities", "triple", "tags")),
         organization=DispatchOrganization(
             (
                 AppendOrganization(target_layer="working"),
@@ -71,15 +71,12 @@ def main() -> None:
         readout=ConcatenateReadout(separator="\n\n"),
         store=store,
     )
-
-    ingest_packet = pipeline.ingest(
-        Observation(text="Alice is debugging graph-backed memory retrieval.", source="notes")
-    )
-    pipeline.ingest(Observation(text="Bob works on semantic memory routing.", source="notes"))
-
+    working_writer.ingest(Observation(text="Alice is debugging the retrieval merge order.", source="dialogue"))
+    working_writer.ingest(Observation(text="The current task is to explain graph-backed recall.", source="dialogue"))
+    
     query = Query(text="Alice")
-    readout = pipeline.recall(query)
-    retrieval_packet, _ = pipeline.retrieval.run(Packet(query=query), store)
+    readout = working_writer.recall(query)
+    packet, _ = working_writer.retrieval.run(Packet(query=query), store)
 
     print("store topology:")
     pprint(
@@ -99,12 +96,8 @@ def main() -> None:
     pprint({name: store.count(name) for name in store.topology.layer_names})
     print()
 
-    print("dispatch trace for organization:")
-    pprint(ingest_packet.trace["dispatch"]["organization"])
-    print()
-
     print("layer-aware retrieval trace:")
-    pprint(retrieval_packet.trace["retrieval"])
+    pprint(packet.trace["retrieval"])
     print()
 
     print("merged readout text:")

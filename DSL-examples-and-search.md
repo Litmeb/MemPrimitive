@@ -1,6 +1,6 @@
 # 经典记忆架构与当前 stage-1 实现的对应关系
 
-本文档把原先 MemDSL 风格的「系统块」改写为**当前仓库里真实存在的 Python 写法**：`MemoryStore` / `StoreTopology` / `MemoryPipeline`，以及 `memprimitive.baselines` 中注册的基元类。编排方式对齐 `memprimitive/example/` 下的示例（显式 `from memprimitive import …`、`MemoryPipeline(..., store=store)` 等）。
+本文档把原先 MemDSL 风格的「系统块」改写为**当前仓库里真实存在的 Python 写法**：`MemoryStore` / `StoreTopology` / `MemoryPipeline`，以及 `memprimitive.baselines` 中注册的基元类。编排方式对齐 `memprimitive/example/demonstration/` 下的示例（显式 `from memprimitive import …`、`MemoryPipeline(..., store=store)` 等）。
 
 **与「完全按论文重实现」还差多少（摘要）**
 
@@ -11,7 +11,7 @@
 
 ## 5. 经典方法 → 当前 Python 表达（近似）
 
-下列代码为**概念对齐**用的骨架；可直接运行的最小闭环见 `memprimitive/example/example.py`（`ingest` + `recall`）。未给出的槽位由 `MemoryPipeline` 默认填充（如 `NeverEvolutionTrigger`、`AppendOnlyEvolution`）。
+下列代码为**概念对齐**用的骨架；可直接运行的最小闭环见 `memprimitive/example/demonstration/minimal_pipeline.py`（`ingest` + `recall`）。未给出的槽位由 `MemoryPipeline` 默认填充（如 `NeverEvolutionTrigger`、`AppendOnlyEvolution`）。
 
 ### 5.1 Generative Agents (Park et al., 2023)
 
@@ -422,7 +422,7 @@ config_vector ≈ [
 | `retrieval` | `retrieval.py` | `RecencyRetrieval`, `KeywordCountRetrieval`, `EmbeddingSimilarityRetrieval`, `TagRetrieval`, `EntityRetrieval`, `BM25Retrieval`, `LayerAwareRetrieval` |
 | `readout` | `readout.py` | `ConcatenateReadout`, `BulletListReadout`, `GroupedByLayerReadout`, `JSONReadout` |
 
-扇出与多子模块：`memprimitive.dispatch` 中的 `DispatchOrganization`、`DispatchRepresentation` 等（参见 `example10.py`）。
+扇出与多子模块：`memprimitive.dispatch` 中的 `DispatchOrganization`、`DispatchRepresentation` 等（参见 `memprimitive/example/demonstration/dispatch_organization_trace.py`）。
 
 ---
 

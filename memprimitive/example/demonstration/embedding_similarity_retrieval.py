@@ -2,11 +2,11 @@
 
 From the repo root (recommended)::
 
-    python -m memprimitive.example.example4
+    python -m memprimitive.example.demonstration.embedding_similarity_retrieval
 
 Or from this directory (script adds the repo root to ``sys.path``)::
 
-    python example4.py
+    python embedding_similarity_retrieval.py
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Running as ``python memprimitive/example/example4.py`` leaves ``__package__`` unset; repo root must be on path.
+# Running as ``python memprimitive/example/demonstration/embedding_similarity_retrieval.py`` leaves ``__package__`` unset; repo root must be on path.
 if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import (
