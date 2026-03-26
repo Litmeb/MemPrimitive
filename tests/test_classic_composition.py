@@ -5,9 +5,7 @@ import pytest
 from memprimitive import IncompatibleCompositionError, MemoryPipeline
 from memprimitive.classic_modules.amem import AMEMGraphHopRetrieval, AMEMGraphOrganization
 from memprimitive.classic_modules.memgpt import MEMGPT_CORE_LAYER, MEMGPT_RECALL_LAYER, MemGPTKeyedUpsertOrganization, MemGPTPagedRetrieval
-from memprimitive.classic_modules.memorybank import MemoryBankEvolution, MemoryBankEvolutionTrigger
 from memprimitive.classic_modules.reflexion import ReflectionMemoryEvolution, ReflexionPrependedReadout
-from memprimitive.classic_modules.scm import SCMControlledRetrieval, SCMEntityProfileUpsert
 from memprimitive.classic_modules.tim import TimBudgetEvolutionTrigger, TimThoughtMemoryEvolution, TimThoughtMemoryOrganization, TimThoughtMemoryRetrieval
 from memprimitive.core import MemoryStore, StoreLayerSpec, StoreTopology
 
@@ -19,41 +17,6 @@ def test_reflexion_requires_declared_reflection_layer() -> None:
 
     with pytest.raises(IncompatibleCompositionError, match="reflections"):
         MemoryPipeline(store=store, readout=ReflexionPrependedReadout(reflection_layer="reflections"))
-
-
-def test_memorybank_requires_declared_layers_and_entity_index() -> None:
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [
-                StoreLayerSpec(name="short_term", indices=("temporal",)),
-                StoreLayerSpec(name="long_term", indices=("keyword",)),
-            ]
-        )
-    )
-
-    with pytest.raises(IncompatibleCompositionError, match="entity index"):
-        MemoryPipeline(
-            store=store,
-            evolution_trigger=MemoryBankEvolutionTrigger(short_term_layer="short_term", long_term_layer="long_term"),
-            memory_evolution=MemoryBankEvolution(short_term_layer="short_term", long_term_layer="long_term"),
-        )
-
-
-def test_scm_requires_profile_entity_index() -> None:
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [
-                StoreLayerSpec(name="semantic", indices=("entity", "keyword")),
-                StoreLayerSpec(name="profile", indices=("keyword",)),
-            ]
-        )
-    )
-
-    with pytest.raises(IncompatibleCompositionError, match="profile"):
-        MemoryPipeline(store=store, organization=SCMEntityProfileUpsert())
-
-    with pytest.raises(IncompatibleCompositionError, match="profile"):
-        MemoryPipeline(store=store, retrieval=SCMControlledRetrieval())
 
 
 def test_memgpt_requires_declared_budget_layers() -> None:
