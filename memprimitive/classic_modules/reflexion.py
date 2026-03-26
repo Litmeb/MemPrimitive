@@ -1,8 +1,7 @@
 """HotPotQA-style Reflexion memory support modules.
 
-This file intentionally contains only the memory-side primitives and the memory
-pipeline builder. The external trial loop / workflow wrapper lives in the
-example entrypoint.
+This file intentionally contains only the memory-side primitives. The external
+pipeline builder and trial loop wrapper live in the example entrypoint.
 """
 
 from __future__ import annotations
@@ -10,11 +9,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Final
 
-from memprimitive.baselines import (
-    AlwaysWriteTrigger,
-    BasicRepresentation,
-    PassThroughUnitFormation,
-)
 from memprimitive.baselines._trace import copy_trace
 from memprimitive.core import (
     MemoryRecord,
@@ -27,8 +21,6 @@ from memprimitive.core import (
     Query,
     Readout,
     RetrievedSet,
-    StoreLayerSpec,
-    StoreTopology,
 )
 from memprimitive.exceptions import IncompatibleCompositionError
 from memprimitive.interfaces import (
@@ -38,7 +30,6 @@ from memprimitive.interfaces import (
     ReadoutModule,
     RetrievalModule,
 )
-from memprimitive.pipeline import MemoryPipeline
 from ._runtime import get_classic_runtime
 
 DEFAULT_REFLECTION_LAYER: Final[str] = "reflections"
@@ -576,65 +567,6 @@ class ReflexionPrependedReadout(ReflexionContextReadout):
         )
 
 
-def build_reflexion_pipeline(
-    *,
-    store: MemoryStore | None = None,
-    reflection_layer: str = DEFAULT_REFLECTION_LAYER,
-    trial_layer: str = DEFAULT_TRIAL_LAYER,
-    strategy: str = _STRATEGY_REFLEXION,
-    memory_size: int = DEFAULT_MEMORY_SIZE,
-    reflection_window: int | None = None,
-    reflection_top_k: int | None = None,
-) -> MemoryPipeline:
-    """Build the Reflexion memory subsystem.
-
-    Compatibility kwargs ``reflection_window`` and ``reflection_top_k`` map to
-    ``memory_size`` when provided.
-    """
-
-    effective_size = memory_size
-    if reflection_window is not None:
-        effective_size = reflection_window
-    if reflection_top_k is not None:
-        effective_size = reflection_top_k
-    if effective_size <= 0:
-        raise ValueError("build_reflexion_pipeline requires memory_size > 0.")
-    if strategy not in _VALID_STRATEGIES:
-        raise ValueError(f"build_reflexion_pipeline requires strategy in {sorted(_VALID_STRATEGIES)}.")
-
-    if store is None:
-        store = MemoryStore(
-            topology=StoreTopology.from_layers(
-                [
-                    StoreLayerSpec(
-                        name=reflection_layer,
-                        theme="semantic",
-                        indices=("temporal", "keyword"),
-                        capacity="sliding_window",
-                    ),
-                ]
-            )
-        )
-    else:
-        _ensure_reflection_layer(store, reflection_layer, theme="semantic")
-
-    return MemoryPipeline(
-        store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "keywords", "tags")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=ReflexionTrialOrganization(target_layer=trial_layer),
-        evolution_trigger=TrialFailureEvolutionTrigger(),
-        memory_evolution=ReflectionMemoryEvolution(target_layer=reflection_layer, memory_size=effective_size),
-        retrieval=ReflexionMemoryRetrieval(reflection_layer=reflection_layer, memory_size=effective_size),
-        readout=ReflexionContextReadout(
-            reflection_layer=reflection_layer,
-            default_strategy=strategy,
-            memory_size=effective_size,
-        ),
-    )
-
-
 __all__ = (
     "DEFAULT_MEMORY_SIZE",
     "DEFAULT_REFLECTION_LAYER",
@@ -645,5 +577,4 @@ __all__ = (
     "ReflexionPrependedReadout",
     "ReflexionTrialOrganization",
     "TrialFailureEvolutionTrigger",
-    "build_reflexion_pipeline",
 )

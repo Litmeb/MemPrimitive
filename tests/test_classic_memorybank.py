@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from memprimitive import Observation, Query
-from memprimitive.classic_modules.memorybank import MemoryBankConfig, build_memorybank_pipeline
+from memprimitive.classic_modules.memorybank import MemoryBankConfig
+from memprimitive.example.classics.memorybank import build_memorybank_pipeline
 
 
 pytestmark = pytest.mark.usefixtures("require_real_classic_runtime")

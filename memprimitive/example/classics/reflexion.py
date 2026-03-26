@@ -20,11 +20,17 @@ from typing import Any
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import MemoryStore, Observation, Query, Readout
+from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, Readout, StoreLayerSpec, StoreTopology
+from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, PassThroughUnitFormation
 from memprimitive.classic_modules.reflexion import (
     DEFAULT_MEMORY_SIZE,
     DEFAULT_REFLECTION_LAYER,
-    build_reflexion_pipeline,
+    DEFAULT_TRIAL_LAYER,
+    ReflectionMemoryEvolution,
+    ReflexionContextReadout,
+    ReflexionMemoryRetrieval,
+    ReflexionTrialOrganization,
+    TrialFailureEvolutionTrigger,
 )
 
 REFLECTION_HEADER = (
@@ -77,6 +83,60 @@ class ReflexionTrial:
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value).strip().split())
+
+
+def build_reflexion_pipeline(
+    *,
+    store: MemoryStore | None = None,
+    reflection_layer: str = DEFAULT_REFLECTION_LAYER,
+    trial_layer: str = DEFAULT_TRIAL_LAYER,
+    strategy: str = ReflexionStrategy.REFLEXION.value,
+    memory_size: int = DEFAULT_MEMORY_SIZE,
+    reflection_window: int | None = None,
+    reflection_top_k: int | None = None,
+) -> MemoryPipeline:
+    effective_size = memory_size
+    if reflection_window is not None:
+        effective_size = reflection_window
+    if reflection_top_k is not None:
+        effective_size = reflection_top_k
+    if effective_size <= 0:
+        raise ValueError("build_reflexion_pipeline requires memory_size > 0.")
+    valid_strategies = {item.value for item in ReflexionStrategy}
+    if strategy not in valid_strategies:
+        raise ValueError(f"build_reflexion_pipeline requires strategy in {sorted(valid_strategies)}.")
+
+    if store is None:
+        store = MemoryStore(
+            topology=StoreTopology.from_layers(
+                [
+                    StoreLayerSpec(
+                        name=reflection_layer,
+                        theme="semantic",
+                        indices=("temporal", "keyword"),
+                        capacity="sliding_window",
+                    ),
+                ]
+            )
+        )
+    elif not store.has_layer(reflection_layer):
+        store.ensure_layer(reflection_layer, allow_create=True, theme="semantic")
+
+    return MemoryPipeline(
+        store=store,
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(elements=("text", "keywords", "tags")),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=ReflexionTrialOrganization(target_layer=trial_layer),
+        evolution_trigger=TrialFailureEvolutionTrigger(),
+        memory_evolution=ReflectionMemoryEvolution(target_layer=reflection_layer, memory_size=effective_size),
+        retrieval=ReflexionMemoryRetrieval(reflection_layer=reflection_layer, memory_size=effective_size),
+        readout=ReflexionContextReadout(
+            reflection_layer=reflection_layer,
+            default_strategy=strategy,
+            memory_size=effective_size,
+        ),
+    )
 
 
 class ReflexionWorkstream:
@@ -281,4 +341,5 @@ __all__ = (
     "ReflexionStrategy",
     "ReflexionTrial",
     "ReflexionWorkstream",
+    "build_reflexion_pipeline",
 )

@@ -12,7 +12,6 @@ import re
 from typing import Any, Final
 
 from memprimitive import (
-    MemoryPipeline,
     MemoryRecord,
     MemoryStore,
     MemoryUnit,
@@ -711,47 +710,9 @@ class SCMControlledRetrieval(RetrievalModule):
         )
 
 
-def build_scm_pipeline(
-    *,
-    top_k: int = 3,
-    threshold: float = 0.55,
-    semantic_layer: str = "semantic",
-    profile_layer: str = "profile",
-    store: MemoryStore | None = None,
-) -> MemoryPipeline:
-    """Convenience builder for the SCM example pipeline."""
-
-    if store is None:
-        from memprimitive import StoreLayerSpec, StoreTopology
-
-        store = MemoryStore(
-            topology=StoreTopology.from_layers(
-                [
-                    StoreLayerSpec(name=semantic_layer, theme="semantic", indices=("entity", "keyword", "vector")),
-                    StoreLayerSpec(name=profile_layer, theme="profile", indices=("entity", "keyword")),
-                ]
-            )
-        )
-
-    from memprimitive.baselines import AppendOnlyEvolution, BasicRepresentation, ConcatenateReadout, NeverEvolutionTrigger
-
-    return MemoryPipeline(
-        store=store,
-        unit_formation=SCMStructuredExtraction(),
-        representation=BasicRepresentation(elements=("text",)),
-        write_trigger=SCMJudgeGateWrite(threshold=threshold),
-        organization=SCMEntityProfileUpsert(semantic_layer=semantic_layer, profile_layer=profile_layer),
-        evolution_trigger=NeverEvolutionTrigger(),
-        memory_evolution=AppendOnlyEvolution(),
-        retrieval=SCMControlledRetrieval(top_k=top_k, semantic_layer=semantic_layer, profile_layer=profile_layer),
-        readout=ConcatenateReadout(separator="\n\n"),
-    )
-
-
 __all__ = [
     "SCMControlledRetrieval",
     "SCMEntityProfileUpsert",
     "SCMJudgeGateWrite",
     "SCMStructuredExtraction",
-    "build_scm_pipeline",
 ]

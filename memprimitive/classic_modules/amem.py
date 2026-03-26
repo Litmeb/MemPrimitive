@@ -1,17 +1,16 @@
-"""A-MEM style graph-memory support for the classic example."""
+"""A-MEM memory-side modules aligned to the agentic-memory paper motif."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import re
+import json
 from typing import Any, Final
 
 from memprimitive import (
-    MemoryPipeline,
     MemoryRecord,
     MemoryStore,
+    MemoryUnit,
     ModuleSpec,
-    Observation,
     Packet,
     Placement,
     Query,
@@ -20,182 +19,246 @@ from memprimitive import (
     StoreLayerSpec,
     StoreTopology,
 )
-from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, PassThroughUnitFormation
 from memprimitive.baselines._trace import copy_trace
 from memprimitive.exceptions import IncompatibleCompositionError
-from memprimitive.interfaces import EvolutionTriggerModule, MemoryEvolutionModule, OrganizationModule, ReadoutModule, RetrievalModule
-from ._runtime import ClassicRuntime
+from memprimitive.interfaces import (
+    EvolutionTriggerModule,
+    MemoryEvolutionModule,
+    OrganizationModule,
+    ReadoutModule,
+    RepresentationModule,
+    RetrievalModule,
+    WriteTriggerModule,
+)
+from ._runtime import ClassicRuntime, get_classic_runtime
 
 AMEM_GRAPH_LAYER: Final[str] = "memory_graph"
-_GENERIC_TAGS: Final[frozenset[str]] = frozenset({"amem", "graph_note", "entity_rich", "keyword_rich", "relation_rich"})
-_GENERIC_KEYWORDS: Final[frozenset[str]] = frozenset({"observation", "entity_rich", "structured_triple", "structured_kv"})
-_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_']*")
-_ENTITY_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*)*)\b")
-_TRIPLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\(([^,()]+?),\s*([^,()]+?),\s*([^,()]+?)\)")
-_RELATION_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b([A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*)*)\s+"
-    r"(likes|prefers|studies|works on|works with|builds|uses|cares about)\s+"
-    r"([^.;,\n]+)",
-    re.I,
-)
+_EMBEDDING_VERSION: Final[str] = "content_context_keywords_tags_v2"
+_DEFAULT_CATEGORY: Final[str] = "Uncategorized"
 
 
-def _dedupe(items: list[str]) -> list[str]:
-    return list(dict.fromkeys(item for item in items if item))
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
 
 
-def _tokenize(text: str) -> list[str]:
-    return [token.casefold() for token in _TOKEN_PATTERN.findall(text)]
+def _dedupe_text_list(values: Any) -> list[str]:
+    if isinstance(values, str):
+        raw_values = [part.strip() for part in values.split(",")]
+    elif isinstance(values, list):
+        raw_values = [str(item).strip() for item in values]
+    else:
+        raw_values = []
+    return list(dict.fromkeys(item for item in raw_values if item))
 
 
-def _normalize_text(text: str) -> str:
-    return " ".join(text.strip().split())
+def _normalize_attributes(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, raw in value.items():
+        normalized_key = _normalize_text(key)
+        normalized_value = _normalize_text(raw)
+        if normalized_key and normalized_value:
+            out[normalized_key] = normalized_value
+    return out
 
 
-def _entity_list(text: str, *, hint: Any | None = None) -> list[str]:
-    if isinstance(hint, list) and hint:
-        return _dedupe([str(item).strip() for item in hint if str(item).strip()])
-    entities: list[str] = []
-    for match in _ENTITY_PATTERN.finditer(text):
-        candidate = match.group(1).strip()
-        if candidate.casefold() in _GENERIC_TAGS:
-            continue
-        entities.append(candidate)
-    return _dedupe(entities)
-
-
-def _triple_list(text: str, *, hint: Any | None = None) -> list[tuple[str, str, str]]:
-    if isinstance(hint, list):
-        triples: list[tuple[str, str, str]] = []
-        for item in hint:
-            if isinstance(item, (list, tuple)) and len(item) == 3:
-                triples.append((str(item[0]).strip(), str(item[1]).strip(), str(item[2]).strip()))
-        if triples:
-            return triples
-    triples: list[tuple[str, str, str]] = []
-    for match in _TRIPLE_PATTERN.finditer(text):
-        triples.append(tuple(part.strip() for part in match.groups()))
-    for match in _RELATION_PATTERN.finditer(text):
-        subject, relation, obj = match.groups()
-        triples.append((subject.strip(), relation.lower().strip(), obj.strip()))
-    return triples
-
-
-def _keyword_list(text: str, *, entities: list[str], tags: list[str], hint: Any | None = None) -> list[str]:
-    if isinstance(hint, list) and hint:
-        return _dedupe([str(item).casefold().strip() for item in hint if str(item).strip()])
-    counts: dict[str, int] = {}
-    for token in _tokenize(text):
-        if token in {"the", "and", "for", "with", "that", "this", "from", "into", "about", "have", "has"}:
-            continue
-        counts[token] = counts.get(token, 0) + 1
-    ranked = [token for token, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
-    extras = [entity.casefold() for entity in entities] + [tag.casefold() for tag in tags if tag.casefold() not in _GENERIC_TAGS]
-    return _dedupe(ranked[:8] + extras)
-
-
-def _representation_profile(record_or_unit) -> dict[str, Any]:
-    metadata = record_or_unit.metadata if hasattr(record_or_unit, "metadata") else {}
-    representation = metadata.get("representation", {}) if isinstance(metadata.get("representation"), dict) else {}
-    text = _normalize_text(getattr(record_or_unit, "text", representation.get("text", "")))
-    entities = representation.get("entities") if isinstance(representation.get("entities"), list) else []
-    triples = representation.get("triples") if isinstance(representation.get("triples"), list) else []
-    keywords = representation.get("keywords") if isinstance(representation.get("keywords"), list) else []
-    tags = representation.get("tags") if isinstance(representation.get("tags"), list) else []
-    if not entities:
-        entities = _entity_list(text, hint=metadata.get("entities"))
-    if not triples:
-        triples = _triple_list(text, hint=metadata.get("triples"))
-    if not keywords:
-        keywords = _keyword_list(text, entities=entities, tags=tags, hint=metadata.get("keywords"))
-    if not tags:
-        tags = _dedupe([getattr(record_or_unit, "unit_type", "note").casefold(), "amem", "graph_note"])
+def _repair_note_payload(payload: dict[str, Any], *, fallback_content: str) -> dict[str, Any]:
+    content = _normalize_text(payload.get("content") or fallback_content)
+    note_text = _normalize_text(payload.get("note_text") or content)
+    context = _normalize_text(payload.get("context") or content)
+    keywords = _dedupe_text_list(payload.get("keywords"))
+    tags = _dedupe_text_list(payload.get("tags"))
+    category = _normalize_text(payload.get("category") or _DEFAULT_CATEGORY)
+    attributes = _normalize_attributes(payload.get("attributes"))
+    if not tags and keywords:
+        tags = keywords[:3]
     return {
-        "text": text,
-        "entities": [str(item) for item in entities],
-        "triples": [tuple(str(part) for part in triple) for triple in triples],
-        "keywords": [str(item).casefold() for item in keywords],
-        "tags": [str(item).casefold() for item in tags],
-        "embedding": getattr(record_or_unit, "embedding", None),
+        "content": content,
+        "note_text": note_text,
+        "context": context,
+        "keywords": keywords,
+        "tags": tags,
+        "category": category,
+        "attributes": attributes,
     }
 
 
-def _shared_signal_details(left, right) -> dict[str, Any]:
-    left_profile = _representation_profile(left)
-    right_profile = _representation_profile(right)
-    left_entities = {item.casefold() for item in left_profile["entities"]}
-    right_entities = {item.casefold() for item in right_profile["entities"]}
-    left_keywords = {item.casefold() for item in left_profile["keywords"] if item.casefold() not in _GENERIC_KEYWORDS}
-    right_keywords = {item.casefold() for item in right_profile["keywords"] if item.casefold() not in _GENERIC_KEYWORDS}
-    left_tags = {item.casefold() for item in left_profile["tags"] if item.casefold() not in _GENERIC_TAGS}
-    right_tags = {item.casefold() for item in right_profile["tags"] if item.casefold() not in _GENERIC_TAGS}
-    left_triples = {tuple(part for part in triple) for triple in left_profile["triples"]}
-    right_triples = {tuple(part for part in triple) for triple in right_profile["triples"]}
-    shared_entities = sorted(left_entities & right_entities)
-    shared_keywords = sorted(left_keywords & right_keywords)
-    shared_tags = sorted(left_tags & right_tags)
-    shared_triples = sorted(tuple(part for part in triple) for triple in left_triples & right_triples)
-    embedding_similarity = ClassicRuntime.cosine_similarity(left_profile["embedding"], right_profile["embedding"])
-    score = (
-        (2.0 * embedding_similarity)
-        + (1.8 * len(shared_entities))
-        + (1.0 * len(shared_keywords))
-        + (2.5 * len(shared_triples))
+def _build_enhanced_embedding_text(
+    *,
+    content: str,
+    context: str,
+    keywords: list[str],
+    tags: list[str],
+) -> str:
+    parts = [
+        f"content: {content}",
+        f"context: {context}",
+        f"keywords: {', '.join(keywords)}",
+        f"tags: {', '.join(tags)}",
+    ]
+    return " | ".join(part for part in parts if _normalize_text(part))
+
+
+def _representation_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    enhanced_embedding_text = _build_enhanced_embedding_text(
+        content=payload["content"],
+        context=payload["context"],
+        keywords=payload["keywords"],
+        tags=payload["tags"],
     )
-    return {
-        "score": score,
-        "embedding_similarity": embedding_similarity,
-        "shared_entities": shared_entities,
-        "shared_keywords": shared_keywords,
-        "shared_tags": shared_tags,
-        "shared_triples": shared_triples,
+    representation = {
+        "text": payload["content"],
+        "normalized_text": payload["content"].casefold(),
+        "note_text": payload["note_text"],
+        "context": payload["context"],
+        "keywords": list(payload["keywords"]),
+        "tags": list(payload["tags"]),
+        "category": payload["category"],
+        "attributes": dict(payload["attributes"]),
+        "enhanced_embedding_text": enhanced_embedding_text,
+        "embedding_version": _EMBEDDING_VERSION,
     }
+    payload["enhanced_embedding_text"] = enhanced_embedding_text
+    return representation
 
 
-def _update_record_graph_metadata(
+def _amem_payload_from_record(record: MemoryRecord) -> dict[str, Any]:
+    amem_meta = record.metadata.get("amem", {})
+    if isinstance(amem_meta, dict):
+        payload = dict(amem_meta)
+    else:
+        payload = {}
+    payload.setdefault("content", record.text)
+    payload.setdefault("note_text", record.text)
+    representation = record.metadata.get("representation", {})
+    if isinstance(representation, dict):
+        for key in ("context", "keywords", "tags", "category", "attributes", "enhanced_embedding_text", "embedding_version"):
+            if key in representation and key not in payload:
+                payload[key] = representation[key]
+    return _repair_note_payload(payload, fallback_content=record.text)
+
+
+def _record_links(record: MemoryRecord) -> list[str]:
+    graph = record.metadata.get("graph", {})
+    if not isinstance(graph, dict):
+        return []
+    links = graph.get("links", [])
+    if not isinstance(links, list):
+        return []
+    return [str(item) for item in links if str(item).strip()]
+
+
+def _rewrite_record_from_payload(
     store: MemoryStore,
     *,
     layer: str,
-    record_id: str,
-    additions: dict[str, dict[str, Any]],
+    record: MemoryRecord,
+    payload: dict[str, Any],
+    preserve_graph: bool = True,
 ) -> MemoryRecord:
-    record = next(record for record in store.iter_records(layer) if record.record_id == record_id)
-    graph = dict(record.metadata.get("graph", {})) if isinstance(record.metadata.get("graph"), dict) else {}
-    links = [str(value) for value in graph.get("links", [])]
-    strengths = dict(graph.get("link_strengths", {})) if isinstance(graph.get("link_strengths"), dict) else {}
-    reasons = dict(graph.get("link_reasons", {})) if isinstance(graph.get("link_reasons"), dict) else {}
-    for neighbor_id, detail in additions.items():
-        if neighbor_id not in links:
-            links.append(neighbor_id)
-        strengths[neighbor_id] = float(detail.get("score", 0.0))
-        reasons[neighbor_id] = list(detail.get("shared_keywords", [])) + list(detail.get("shared_entities", []))
+    repaired = _repair_note_payload(payload, fallback_content=record.text)
+    representation = _representation_from_payload(repaired)
     updated = replace(
         record,
+        text=repaired["note_text"],
+        embedding=get_classic_runtime().embed(representation["enhanced_embedding_text"]),
         metadata={
             **record.metadata,
-            "graph": {
-                **graph,
-                "links": links,
-                "link_count": len(links),
-                "link_strengths": strengths,
-                "link_reasons": reasons,
+            "amem": {
+                **repaired,
+                "enhanced_embedding_text": representation["enhanced_embedding_text"],
+                "embedding_version": _EMBEDDING_VERSION,
             },
+            "representation": representation,
+            **({"graph": record.metadata.get("graph", {})} if preserve_graph else {}),
         },
     )
-    store.replace_record(layer, record_id, updated)
+    store.replace_record(layer, record.record_id, updated)
     return updated
+
+
+def _stringify_candidates(records: list[MemoryRecord]) -> str:
+    lines: list[str] = []
+    for index, record in enumerate(records):
+        payload = _amem_payload_from_record(record)
+        lines.append(
+            "\n".join(
+                [
+                    f"memory index:{index}",
+                    f"talk start time:{record.timestamp}",
+                    f"memory content: {payload['content']}",
+                    f"memory context: {payload['context']}",
+                    f"memory keywords: {payload['keywords']}",
+                    f"memory tags: {payload['tags']}",
+                ]
+            )
+        )
+    return "\n".join(lines)
+
+
+def _retrieve_candidates_by_embedding(
+    *,
+    store: MemoryStore,
+    layer: str,
+    query_embedding: list[float],
+    top_k: int,
+) -> list[tuple[float, MemoryRecord]]:
+    scored: list[tuple[float, MemoryRecord]] = []
+    for record in store.iter_records(layer):
+        score = ClassicRuntime.cosine_similarity(query_embedding, record.embedding)
+        scored.append((float(score), record))
+    scored.sort(key=lambda item: (-item[0], item[1].timestamp, item[1].record_id))
+    return scored[:top_k]
+
+
+def _collect_neighbor_candidates(
+    *,
+    store: MemoryStore,
+    layer: str,
+    seed_records: list[MemoryRecord],
+    neighbor_expansion_k: int,
+) -> list[MemoryRecord]:
+    if neighbor_expansion_k <= 0:
+        return []
+    selected: list[MemoryRecord] = []
+    seen: set[str] = set()
+    for seed in seed_records:
+        for neighbor_id in _record_links(seed):
+            if neighbor_id in seen:
+                continue
+            neighbor = next((record for record in store.iter_records(layer) if record.record_id == neighbor_id), None)
+            if neighbor is None:
+                continue
+            seen.add(neighbor_id)
+            selected.append(neighbor)
+            if len(selected) >= neighbor_expansion_k:
+                return selected
+    return selected
+
+
+def _merge_records_by_id(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    merged: list[MemoryRecord] = []
+    seen: set[str] = set()
+    for record in records:
+        if record.record_id in seen:
+            continue
+        seen.add(record.record_id)
+        merged.append(record)
+    return merged
 
 
 @dataclass(slots=True)
 class AMEMConfig:
     graph_layer: str = AMEM_GRAPH_LAYER
+    candidate_k: int = 5
     top_k: int = 5
-    max_hops: int = 2
-    seed_k: int = 2
+    neighbor_expansion_k: int = 3
+    agentic_search: bool = False
+    strict_llm: bool = True
+    write_decision_enabled: bool = False
+    query_expand_with_llm: bool = False
     max_links_per_record: int = 4
-    link_threshold: float = 1.0
-    hop_decay: float = 0.72
-    fallback_recent_if_isolated: bool = True
 
 
 def build_amem_store(*, graph_layer: str = AMEM_GRAPH_LAYER) -> MemoryStore:
@@ -206,87 +269,242 @@ def build_amem_store(*, graph_layer: str = AMEM_GRAPH_LAYER) -> MemoryStore:
                     name=graph_layer,
                     theme="knowledge_graph",
                     shape="Graph",
-                    indices=("graph", "entity", "keyword", "tag"),
+                    indices=("graph", "vector", "entity", "keyword", "tag"),
                 )
             ]
         )
     )
 
 
-class AMEMGraphOrganization(OrganizationModule):
-    """Append graph memories and update links to related prior memories."""
+class AMEMAgenticRepresentation(RepresentationModule):
+    """Generate comprehensive notes plus structured metadata using the classic runtime."""
 
     spec = ModuleSpec(
-        name="amem_graph_organization",
+        name="amem_agentic_representation",
+        slot="representation",
+        input_requirements=("units",),
+        output_guarantees=("units.text", "units.embedding", "units.metadata.amem", "units.metadata.representation"),
+    )
+
+    def __init__(self, *, strict_llm: bool = True) -> None:
+        self.strict_llm = strict_llm
+        if not self.strict_llm:
+            raise ValueError("A-MEM classic implementation requires strict_llm=True.")
+
+    def _analyze_content(self, content: str) -> dict[str, Any]:
+        runtime = get_classic_runtime()
+        runtime.require_llm(capability="A-MEM note analysis")
+        payload = runtime.json(
+            system=(
+                "You are the A-MEM note generator. Produce a comprehensive note with context, "
+                "keywords, tags, category, and structured attributes. Return JSON only."
+            ),
+            user=json.dumps(
+                {
+                    "content": content,
+                    "required_fields": [
+                        "note_text",
+                        "context",
+                        "keywords",
+                        "tags",
+                        "category",
+                        "attributes",
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("A-MEM note analysis must return a JSON object.")
+        return _repair_note_payload(payload, fallback_content=content)
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("AMEMAgenticRepresentation requires packet.units.")
+
+        represented_units: list[MemoryUnit] = []
+        per_unit: list[dict[str, Any]] = []
+        for unit in packet.units:
+            note_payload = self._analyze_content(unit.text)
+            representation = _representation_from_payload(note_payload)
+            represented_units.append(
+                replace(
+                    unit,
+                    text=note_payload["content"],
+                    normalized_text=note_payload["content"].casefold(),
+                    embedding=get_classic_runtime().embed(representation["enhanced_embedding_text"]),
+                    description=note_payload["context"],
+                    tags=list(note_payload["tags"]),
+                    representation_elements=("text", "embedding", "description", "keywords", "tags"),
+                    metadata={
+                        **unit.metadata,
+                        "amem": {
+                            **note_payload,
+                            "enhanced_embedding_text": representation["enhanced_embedding_text"],
+                            "embedding_version": _EMBEDDING_VERSION,
+                        },
+                        "representation": representation,
+                    },
+                )
+            )
+            per_unit.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "content": note_payload["content"],
+                    "note_text": note_payload["note_text"],
+                    "context": note_payload["context"],
+                    "keywords": list(note_payload["keywords"]),
+                    "tags": list(note_payload["tags"]),
+                    "category": note_payload["category"],
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["representation"] = {
+            "module": self.spec.name,
+            "strict_llm": True,
+            "per_unit": per_unit,
+        }
+        return replace(packet, units=represented_units, trace=trace), store
+
+
+class AMEMAgenticWriteTrigger(WriteTriggerModule):
+    """Use the LLM to decide whether a generated note should be stored."""
+
+    spec = ModuleSpec(
+        name="amem_agentic_write_trigger",
+        slot="write_trigger",
+        input_requirements=("units",),
+        output_guarantees=("decisions",),
+    )
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = enabled
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("AMEMAgenticWriteTrigger requires packet.units.")
+
+        decisions: list[bool] = []
+        per_unit: list[dict[str, Any]] = []
+        for unit in packet.units:
+            if not self.enabled:
+                decision = True
+                reason = "write_decision_disabled"
+                confidence = 1.0
+            else:
+                runtime = get_classic_runtime()
+                runtime.require_llm(capability="A-MEM write decision")
+                amem_meta = unit.metadata.get("amem", {})
+                payload = runtime.json(
+                    system=(
+                        "You are the A-MEM write controller. Decide if a note should be stored. "
+                        "Return JSON with fields decision, reason, confidence."
+                    ),
+                    user=json.dumps(
+                        {
+                            "content": unit.text,
+                            "note_text": amem_meta.get("note_text", unit.text),
+                            "context": amem_meta.get("context", ""),
+                            "keywords": amem_meta.get("keywords", []),
+                            "tags": amem_meta.get("tags", []),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                if not isinstance(payload, dict):
+                    raise ValueError("A-MEM write decision must return a JSON object.")
+                decision = str(payload.get("decision", "write")).strip().casefold() != "skip"
+                reason = _normalize_text(payload.get("reason") or "unspecified")
+                raw_confidence = payload.get("confidence", 1.0)
+                confidence = float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 1.0
+            decisions.append(decision)
+            per_unit.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "decision": "write" if decision else "skip",
+                    "reason": reason,
+                    "confidence": confidence,
+                    "content": unit.text,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["write_trigger"] = {
+            "module": self.spec.name,
+            "per_unit": per_unit,
+            "decisions": list(decisions),
+        }
+        return replace(packet, decisions=decisions, trace=trace), store
+
+
+class AMEMAgenticOrganization(OrganizationModule):
+    """Append note records to the graph layer while preserving A-MEM metadata."""
+
+    spec = ModuleSpec(
+        name="amem_agentic_organization",
         slot="organization",
         input_requirements=("units", "decisions"),
         output_guarantees=("placements",),
         side_effects=("modify_store", "append_records"),
-        store_requirements=("index:graph", "index:entity", "index:keyword"),
+        store_requirements=("index:graph", "index:vector", "index:keyword", "index:tag"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph"),
     )
 
-    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER, max_links_per_record: int = 4, link_threshold: float = 1.0) -> None:
+    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER) -> None:
         self.target_layer = target_layer
-        self.max_links_per_record = max_links_per_record
-        self.link_threshold = link_threshold
 
     def validate_store(self, store: MemoryStore) -> None:
         if not store.has_layer(self.target_layer):
-            raise IncompatibleCompositionError(f"AMEMGraphOrganization requires declared layer {self.target_layer!r}.")
+            raise IncompatibleCompositionError(f"AMEMAgenticOrganization requires declared layer {self.target_layer!r}.")
         if store.layer_shape(self.target_layer) != "Graph":
-            raise IncompatibleCompositionError(f"AMEMGraphOrganization requires layer {self.target_layer!r} with shape='Graph'.")
+            raise IncompatibleCompositionError(f"AMEMAgenticOrganization requires layer {self.target_layer!r} with shape='Graph'.")
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None or packet.decisions is None:
-            raise ValueError("AMEMGraphOrganization requires packet.units and packet.decisions.")
+            raise ValueError("AMEMAgenticOrganization requires packet.units and packet.decisions.")
         if len(packet.units) != len(packet.decisions):
-            raise ValueError("AMEMGraphOrganization requires aligned units and decisions.")
+            raise ValueError("AMEMAgenticOrganization requires aligned units and decisions.")
 
         placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
         effects: list[dict[str, Any]] = []
-        existing_records = store.iter_records(self.target_layer)
         for unit, decision in zip(packet.units, packet.decisions, strict=True):
             if not decision:
+                effects.append({"unit_id": unit.unit_id, "effect_type": "skipped"})
                 continue
             sequence_id = store.next_sequence_id()
+            amem_payload = dict(unit.metadata.get("amem", {}))
+            representation = dict(unit.metadata.get("representation", {}))
             record = MemoryRecord.from_unit(unit=unit, layer=self.target_layer, sequence_id=sequence_id)
-            candidate_details = []
-            for candidate in existing_records:
-                detail = _shared_signal_details(record, candidate)
-                if detail["score"] >= self.link_threshold:
-                    candidate_details.append((candidate, detail))
-            candidate_details.sort(key=lambda item: (-float(item[1]["score"]), item[0].timestamp, item[0].record_id))
-            selected = candidate_details[: self.max_links_per_record]
-            linked_record_ids = [candidate.record_id for candidate, _ in selected]
             record = replace(
                 record,
+                embedding=list(unit.embedding) if unit.embedding is not None else None,
                 metadata={
                     **record.metadata,
+                    "amem": {
+                        **amem_payload,
+                        "enhanced_embedding_text": representation.get("enhanced_embedding_text", ""),
+                        "embedding_version": _EMBEDDING_VERSION,
+                    },
+                    "representation": {
+                        **representation,
+                        "embedding_version": _EMBEDDING_VERSION,
+                    },
                     "graph": {
-                        "layer": self.target_layer,
-                        "links": linked_record_ids,
-                        "link_count": len(linked_record_ids),
-                        "link_strengths": {candidate.record_id: float(detail["score"]) for candidate, detail in selected},
-                        "link_reasons": {
-                            candidate.record_id: list(detail["shared_keywords"]) + list(detail["shared_entities"])
-                            for candidate, detail in selected
-                        },
+                        "links": [],
+                        "link_count": 0,
                     },
                 },
             )
             store.append(record)
-            for candidate_id in linked_record_ids:
-                store.add_graph_links(self.target_layer, candidate_id, [record.record_id])
             effects.append(
                 {
-                    "effect_type": "graph_link_update",
                     "unit_id": unit.unit_id,
                     "record_id": record.record_id,
-                    "linked_record_ids": linked_record_ids,
+                    "effect_type": "append_note",
+                    "target_layer": self.target_layer,
                 }
             )
-            existing_records = store.iter_records(self.target_layer)
 
         trace = copy_trace(packet)
         trace["organization"] = {
@@ -297,122 +515,247 @@ class AMEMGraphOrganization(OrganizationModule):
         return replace(packet, placements=placements, trace=trace), store
 
 
-class AMEMGraphEvolutionTrigger(EvolutionTriggerModule):
-    """Open the evolution stage when a note already has graph links."""
+class AMEMAgenticEvolutionTrigger(EvolutionTriggerModule):
+    """Run A-MEM evolution when a freshly written note has nearby memories."""
 
     spec = ModuleSpec(
-        name="amem_graph_evolution_trigger",
+        name="amem_agentic_evolution_trigger",
         slot="evolution_trigger",
         input_requirements=("units", "placements"),
         output_guarantees=("evolution_decisions",),
+        store_requirements=("index:vector",),
     )
 
-    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER) -> None:
+    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER, candidate_k: int = 5) -> None:
         self.target_layer = target_layer
+        self.candidate_k = candidate_k
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None or packet.placements is None:
-            raise ValueError("AMEMGraphEvolutionTrigger requires packet.units and packet.placements.")
+            raise ValueError("AMEMAgenticEvolutionTrigger requires packet.units and packet.placements.")
+
         decisions: list[bool] = []
         per_unit: list[dict[str, Any]] = []
         for unit in packet.units:
-            record = next((record for record in store.iter_records(self.target_layer) if record.unit_id == unit.unit_id), None)
-            linked_record_ids: list[str] = []
-            if record is not None:
-                graph = record.metadata.get("graph", {})
-                if isinstance(graph, dict):
-                    linked_record_ids = [str(value) for value in graph.get("links", [])]
-            decision = bool(linked_record_ids)
+            if unit.embedding is None:
+                raise ValueError("A-MEM evolution trigger requires unit embeddings.")
+            candidates = [
+                record
+                for _, record in _retrieve_candidates_by_embedding(
+                    store=store,
+                    layer=self.target_layer,
+                    query_embedding=unit.embedding,
+                    top_k=self.candidate_k + 1,
+                )
+                if record.unit_id != unit.unit_id
+            ]
+            decision = bool(candidates)
             decisions.append(decision)
-            per_unit.append({"unit_id": unit.unit_id, "decision": decision, "linked_record_ids": linked_record_ids})
+            per_unit.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "candidate_record_ids": [record.record_id for record in candidates[: self.candidate_k]],
+                    "decision": decision,
+                }
+            )
+
         trace = copy_trace(packet)
         trace["evolution_trigger"] = {
             "module": self.spec.name,
-            "target_layer": self.target_layer,
             "per_unit": per_unit,
-            "evolution_decisions": decisions,
+            "evolution_decisions": list(decisions),
         }
         return replace(packet, evolution_decisions=decisions, trace=trace), store
 
 
-class AMEMGraphLinkEvolution(MemoryEvolutionModule):
-    """Strengthen reciprocal links with graph metadata."""
+class AMEMAgenticEvolution(MemoryEvolutionModule):
+    """Apply the original A-MEM strengthen/update-neighbor evolution loop."""
 
     spec = ModuleSpec(
-        name="amem_graph_link_evolution",
+        name="amem_agentic_evolution",
         slot="memory_evolution",
         input_requirements=("units", "placements", "evolution_decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         side_effects=("modify_store",),
+        store_requirements=("index:graph", "index:vector"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph"),
     )
 
-    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER) -> None:
+    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER, candidate_k: int = 5, max_links_per_record: int = 4) -> None:
         self.target_layer = target_layer
+        self.candidate_k = candidate_k
+        self.max_links_per_record = max_links_per_record
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None or packet.placements is None or packet.evolution_decisions is None:
-            raise ValueError("AMEMGraphLinkEvolution requires packet.units, packet.placements, and packet.evolution_decisions.")
+            raise ValueError("AMEMAgenticEvolution requires packet.units, packet.placements, and packet.evolution_decisions.")
         if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
-            raise ValueError("AMEMGraphLinkEvolution requires aligned units, placements, and evolution decisions.")
+            raise ValueError("AMEMAgenticEvolution requires aligned units, placements, and evolution decisions.")
 
+        runtime = get_classic_runtime()
+        runtime.require_llm(capability="A-MEM memory evolution")
         effects: list[dict[str, Any]] = []
         for unit, decision in zip(packet.units, packet.evolution_decisions, strict=True):
             if not decision:
                 continue
-            record = next((record for record in store.iter_records(self.target_layer) if record.unit_id == unit.unit_id), None)
-            if record is None:
+
+            current_record = next(
+                (record for record in store.iter_records(self.target_layer) if record.unit_id == unit.unit_id),
+                None,
+            )
+            if current_record is None or current_record.embedding is None:
                 continue
-            graph = record.metadata.get("graph", {})
-            linked_record_ids = [str(value) for value in graph.get("links", [])] if isinstance(graph, dict) else []
-            for linked_record_id in linked_record_ids:
-                linked_record = next(
-                    (candidate for candidate in store.iter_records(self.target_layer) if candidate.record_id == linked_record_id),
-                    None,
-                )
-                if linked_record is None:
-                    continue
-                detail = _shared_signal_details(record, linked_record)
-                _update_record_graph_metadata(
-                    store,
+
+            neighbor_candidates = [
+                record
+                for _, record in _retrieve_candidates_by_embedding(
+                    store=store,
                     layer=self.target_layer,
-                    record_id=linked_record.record_id,
-                    additions={
-                        record.record_id: {
-                            "score": detail["score"],
-                            "shared_entities": detail["shared_entities"],
-                            "shared_keywords": detail["shared_keywords"],
-                            "shared_tags": detail["shared_tags"],
-                            "shared_triples": detail["shared_triples"],
-                        }
+                    query_embedding=current_record.embedding,
+                    top_k=self.candidate_k + 1,
+                )
+                if record.record_id != current_record.record_id
+            ][: self.candidate_k]
+            if not neighbor_candidates:
+                continue
+
+            current_payload = _amem_payload_from_record(current_record)
+            decision_payload = runtime.json(
+                system=(
+                    "You are an AI memory evolution agent. Decide whether the new memory should "
+                    "strengthen links and/or update neighbor context/tags. Return JSON only."
+                ),
+                user=json.dumps(
+                    {
+                        "context": current_payload["context"],
+                        "content": current_payload["content"],
+                        "keywords": current_payload["keywords"],
+                        "nearest_neighbors_memories": _stringify_candidates(neighbor_candidates),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            if not isinstance(decision_payload, dict):
+                raise ValueError("A-MEM evolution decision must return a JSON object.")
+            evolution_decision = str(decision_payload.get("decision", "NO_EVOLUTION")).strip().upper()
+            reason = _normalize_text(decision_payload.get("reason") or "")
+
+            strengthened_links: list[str] = []
+            updated_neighbor_record_ids: list[str] = []
+            rewritten_record_ids: list[str] = []
+
+            if evolution_decision in {"STRENGTHEN", "STRENGTHEN_AND_UPDATE"}:
+                strengthen_payload = runtime.json(
+                    system=(
+                        "Given a new memory and its neighbors, select related neighbor indices and "
+                        "return updated tags for the new memory. Return JSON only."
+                    ),
+                    user=json.dumps(
+                        {
+                            "content": current_payload["content"],
+                            "keywords": current_payload["keywords"],
+                            "nearest_neighbors_memories": _stringify_candidates(neighbor_candidates),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                if not isinstance(strengthen_payload, dict):
+                    raise ValueError("A-MEM strengthen details must return a JSON object.")
+                connection_indices = strengthen_payload.get("connections", [])
+                if not isinstance(connection_indices, list):
+                    connection_indices = []
+                tags = _dedupe_text_list(strengthen_payload.get("tags"))
+                strengthened_neighbors = [
+                    neighbor_candidates[index]
+                    for index in connection_indices
+                    if isinstance(index, int) and 0 <= index < len(neighbor_candidates)
+                ][: self.max_links_per_record]
+                strengthened_links = [record.record_id for record in strengthened_neighbors]
+                merged_links = list(dict.fromkeys(_record_links(current_record) + strengthened_links))
+                updated_payload = {
+                    **current_payload,
+                    "tags": tags or current_payload["tags"],
+                }
+                rewritten_current = _rewrite_record_from_payload(store, layer=self.target_layer, record=current_record, payload=updated_payload)
+                current_record = replace(
+                    rewritten_current,
+                    metadata={
+                        **rewritten_current.metadata,
+                        "graph": {
+                            **(rewritten_current.metadata.get("graph", {}) if isinstance(rewritten_current.metadata.get("graph"), dict) else {}),
+                            "links": merged_links,
+                            "link_count": len(merged_links),
+                        },
                     },
                 )
+                store.replace_record(self.target_layer, current_record.record_id, current_record)
+                rewritten_record_ids.append(current_record.record_id)
+
+            if evolution_decision in {"UPDATE_NEIGHBOR", "STRENGTHEN_AND_UPDATE"}:
+                update_payload = runtime.json(
+                    system=(
+                        "Update each neighbor's context and tags based on holistic understanding of the "
+                        "new memory and neighbors. Return JSON with updates list."
+                    ),
+                    user=json.dumps(
+                        {
+                            "content": current_payload["content"],
+                            "context": current_payload["context"],
+                            "nearest_neighbors_memories": _stringify_candidates(neighbor_candidates),
+                            "neighbor_count": len(neighbor_candidates),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                if not isinstance(update_payload, dict):
+                    raise ValueError("A-MEM neighbor updates must return a JSON object.")
+                updates = update_payload.get("updates", [])
+                if not isinstance(updates, list):
+                    updates = []
+                for index, update in enumerate(updates[: len(neighbor_candidates)]):
+                    if not isinstance(update, dict):
+                        continue
+                    neighbor_record = neighbor_candidates[index]
+                    neighbor_payload = _amem_payload_from_record(neighbor_record)
+                    patched_payload = {
+                        **neighbor_payload,
+                        "context": _normalize_text(update.get("context") or neighbor_payload["context"]),
+                        "tags": _dedupe_text_list(update.get("tags")) or neighbor_payload["tags"],
+                    }
+                    _rewrite_record_from_payload(store, layer=self.target_layer, record=neighbor_record, payload=patched_payload)
+                    updated_neighbor_record_ids.append(neighbor_record.record_id)
+                    rewritten_record_ids.append(neighbor_record.record_id)
+
             effects.append(
                 {
-                    "effect_type": "link_strength_update",
                     "unit_id": unit.unit_id,
-                    "record_id": record.record_id,
-                    "linked_record_ids": linked_record_ids,
+                    "record_id": current_record.record_id,
+                    "effect_type": "agentic_evolution",
+                    "decision": evolution_decision,
+                    "reason": reason,
+                    "strengthened_links": strengthened_links,
+                    "updated_neighbor_record_ids": updated_neighbor_record_ids,
+                    "rewritten_record_ids": rewritten_record_ids,
                 }
             )
 
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "target_layer": self.target_layer,
             "effects": effects,
         }
         return replace(packet, trace=trace), store
 
 
-class AMEMGraphHopRetrieval(RetrievalModule):
-    """Retrieve graph memories by query seeds and graph hops."""
+class AMEMEnhancedRetrieval(RetrievalModule):
+    """Run original-style vector retrieval with optional linked-neighbor expansion."""
 
     spec = ModuleSpec(
-        name="amem_graph_hop_retrieval",
+        name="amem_enhanced_retrieval",
         slot="retrieval",
         input_requirements=("query.text",),
         output_guarantees=("retrieved.items", "retrieved.scores"),
-        store_requirements=("index:graph", "index:entity", "index:keyword"),
+        store_requirements=("index:graph", "index:vector"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph"),
     )
 
@@ -420,267 +763,212 @@ class AMEMGraphHopRetrieval(RetrievalModule):
         self,
         *,
         target_layer: str = AMEM_GRAPH_LAYER,
+        candidate_k: int = 5,
         top_k: int = 5,
-        max_hops: int = 2,
-        seed_k: int = 2,
-        hop_decay: float = 0.72,
-        fallback_recent_if_isolated: bool = True,
+        neighbor_expansion_k: int = 3,
+        agentic_search: bool = False,
+        query_expand_with_llm: bool = False,
     ) -> None:
-        if top_k <= 0:
-            raise ValueError("AMEMGraphHopRetrieval requires top_k > 0.")
+        if candidate_k <= 0 or top_k <= 0:
+            raise ValueError("AMEMEnhancedRetrieval requires candidate_k > 0 and top_k > 0.")
         self.target_layer = target_layer
+        self.candidate_k = candidate_k
         self.top_k = top_k
-        self.max_hops = max_hops
-        self.seed_k = seed_k
-        self.hop_decay = hop_decay
-        self.fallback_recent_if_isolated = fallback_recent_if_isolated
+        self.neighbor_expansion_k = neighbor_expansion_k
+        self.agentic_search = agentic_search
+        self.query_expand_with_llm = query_expand_with_llm
 
     def validate_store(self, store: MemoryStore) -> None:
         if not store.has_layer(self.target_layer):
-            raise IncompatibleCompositionError(f"AMEMGraphHopRetrieval requires declared layer {self.target_layer!r}.")
+            raise IncompatibleCompositionError(f"AMEMEnhancedRetrieval requires declared layer {self.target_layer!r}.")
         if store.layer_shape(self.target_layer) != "Graph":
-            raise IncompatibleCompositionError(f"AMEMGraphHopRetrieval requires layer {self.target_layer!r} with shape='Graph'.")
+            raise IncompatibleCompositionError(f"AMEMEnhancedRetrieval requires layer {self.target_layer!r} with shape='Graph'.")
+
+    def _query_payload(self, query: Query) -> dict[str, Any]:
+        if not self.query_expand_with_llm:
+            payload = {
+                "query_text": query.text,
+                "content": query.text,
+                "context": "",
+                "keywords": [],
+                "tags": [],
+                "category": "query",
+                "attributes": {},
+            }
+        else:
+            runtime = get_classic_runtime()
+            runtime.require_llm(capability="A-MEM query expansion")
+            raw = runtime.json(
+                system=(
+                    "Expand the query for A-MEM retrieval. Return JSON with fields query_text, context, "
+                    "keywords, tags, category, attributes."
+                ),
+                user=json.dumps({"query": query.text}, ensure_ascii=False),
+            )
+            if not isinstance(raw, dict):
+                raise ValueError("A-MEM query expansion must return a JSON object.")
+            payload = _repair_note_payload(raw, fallback_content=query.text)
+        payload["query_text"] = _normalize_text(payload.get("query_text") or payload.get("note_text") or query.text)
+        payload["note_text"] = payload["query_text"]
+        payload["content"] = _normalize_text(payload.get("content") or payload["query_text"])
+        return payload
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
-            raise ValueError("AMEMGraphHopRetrieval requires packet.query.")
+            raise ValueError("AMEMEnhancedRetrieval requires packet.query.")
 
-        records = store.iter_records(self.target_layer)
-        if not records:
-            retrieved = RetrievedSet(items=[], scores=[], trace={"module": self.spec.name, "candidate_count": 0})
-            trace = copy_trace(packet)
-            trace["retrieval"] = retrieved.trace
-            return replace(packet, retrieved=retrieved, trace=trace), store
+        query_payload = self._query_payload(packet.query)
+        runtime = get_classic_runtime()
+        if packet.query.embedding is not None:
+            query_embedding = list(packet.query.embedding)
+        elif self.query_expand_with_llm:
+            enhanced_query_text = _build_enhanced_embedding_text(
+                content=query_payload["content"],
+                context=query_payload["context"],
+                keywords=query_payload["keywords"],
+                tags=query_payload["tags"],
+            )
+            query_embedding = runtime.embed(enhanced_query_text)
+        else:
+            query_embedding = runtime.embed(packet.query.text)
+        query = replace(packet.query, embedding=list(query_embedding))
 
-        query_profile = _representation_profile(packet.query)
-        seed_candidates: list[tuple[float, int, MemoryRecord, dict[str, Any]]] = []
-        for order_index, record in enumerate(reversed(records)):
-            detail = _shared_signal_details(packet.query, record)
-            seed_candidates.append((detail["score"], order_index, record, detail))
-        seed_candidates.sort(key=lambda item: (-float(item[0]), item[1], item[2].record_id))
-        if any(score > 0 for score, _, _, _ in seed_candidates):
-            seed_candidates = [item for item in seed_candidates if item[0] > 0]
-        selected_seeds = seed_candidates[: self.seed_k]
-        if not selected_seeds and self.fallback_recent_if_isolated:
-            selected_seeds = [
-                (0.0, idx, record, {"score": 0.0, "shared_entities": [], "shared_keywords": [], "shared_tags": [], "shared_triples": []})
-                for idx, record in enumerate(reversed(records[-self.seed_k :]))
+        primary = _retrieve_candidates_by_embedding(
+            store=store,
+            layer=self.target_layer,
+            query_embedding=list(query_embedding),
+            top_k=self.candidate_k,
+        )
+        primary_records = [record for _, record in primary]
+        neighbor_records = _collect_neighbor_candidates(
+            store=store,
+            layer=self.target_layer,
+            seed_records=primary_records,
+            neighbor_expansion_k=self.neighbor_expansion_k,
+        )
+        merged_records = _merge_records_by_id(primary_records + neighbor_records)
+        candidate_payload = []
+        for record in merged_records:
+            payload = _amem_payload_from_record(record)
+            candidate_payload.append(
+                {
+                    "id": record.record_id,
+                    "content": payload["content"],
+                    "note_text": payload["note_text"],
+                    "context": payload["context"],
+                    "tags": payload["tags"],
+                    "keywords": payload["keywords"],
+                    "score": next((score for score, candidate in primary if candidate.record_id == record.record_id), 0.0),
+                }
+            )
+        if self.agentic_search:
+            reranked = runtime.rerank(
+                query=query.text,
+                candidates=candidate_payload,
+                task="Perform A-MEM search_agentic retrieval over comprehensive memory notes.",
+                top_k=self.top_k,
+            )
+        else:
+            reranked = [
+                {"id": record.record_id, "score": score, "rationale": "embedding retrieval"}
+                for score, record in primary[: self.top_k]
             ]
 
-        best_states: dict[str, dict[str, Any]] = {}
-        frontier: list[dict[str, Any]] = []
-        for score, _, record, detail in selected_seeds:
-            state = {"record": record, "hop": 0, "score": float(score), "path": [record.record_id], "detail": detail}
-            best_states[record.record_id] = state
-            frontier.append(state)
-
-        for hop in range(1, self.max_hops + 1):
-            next_frontier: list[dict[str, Any]] = []
-            for state in frontier:
-                for neighbor in store.iter_graph_neighbors(self.target_layer, state["record"].record_id):
-                    detail = _shared_signal_details(state["record"], neighbor)
-                    hop_score = (state["score"] * self.hop_decay) + (0.5 * min(1.0, detail["score"]))
-                    existing = best_states.get(neighbor.record_id)
-                    if existing is not None and existing["score"] >= hop_score and existing["hop"] <= hop:
-                        continue
-                    new_state = {
-                        "record": neighbor,
-                        "hop": hop,
-                        "score": float(hop_score),
-                        "path": [*state["path"], neighbor.record_id],
-                        "detail": detail,
-                    }
-                    best_states[neighbor.record_id] = new_state
-                    next_frontier.append(new_state)
-            frontier = next_frontier
-            if not frontier:
-                break
-
-        if len(best_states) < self.top_k and self.fallback_recent_if_isolated:
-            for record in reversed(records):
-                if record.record_id in best_states:
-                    continue
-                best_states[record.record_id] = {
-                    "record": record,
-                    "hop": self.max_hops + 1,
-                    "score": 0.0,
-                    "path": [record.record_id],
-                    "detail": {"score": 0.0, "shared_entities": [], "shared_keywords": [], "shared_tags": [], "shared_triples": []},
-                }
-                if len(best_states) >= self.top_k:
-                    break
-
-        selected_states = sorted(
-            best_states.values(),
-            key=lambda state: (state["hop"], -state["score"], state["record"].timestamp, state["record"].record_id),
-        )[: self.top_k]
-        items = [state["record"] for state in selected_states]
+        ordered_ids = [item["id"] for item in reranked]
+        record_by_id = {record.record_id: record for record in merged_records}
+        items = [record_by_id[record_id] for record_id in ordered_ids if record_id in record_by_id][: self.top_k]
         scores = [
             {
-                "record_id": state["record"].record_id,
-                "rank": rank,
-                "score": round(float(state["score"]), 4),
-                "hop": state["hop"],
-                "path": list(state["path"]),
-                "strategy": "graph_hop",
+                "record_id": item["id"],
+                "score": float(item.get("score", 0.0)),
+                "rationale": _normalize_text(item.get("rationale") or ""),
+                "strategy": "search_agentic" if self.agentic_search else "vector_plus_links",
             }
-            for rank, state in enumerate(selected_states, start=1)
-        ]
-        hop_counts: dict[int, int] = {}
-        for state in selected_states:
-            hop_counts[state["hop"]] = hop_counts.get(state["hop"], 0) + 1
-
+            for item in reranked
+            if item["id"] in record_by_id
+        ][: self.top_k]
         retrieved = RetrievedSet(
             items=items,
             scores=scores,
             trace={
                 "module": self.spec.name,
-                "target_layer": self.target_layer,
-                "candidate_count": len(records),
-                "seed_record_ids": [record.record_id for _, _, record, _ in selected_seeds],
-                "visited_count": len(best_states),
-                "hop_counts": hop_counts,
-                "max_hops": self.max_hops,
-                "seed_k": self.seed_k,
-                "query_profile": {
-                    "entities": query_profile["entities"],
-                    "keywords": query_profile["keywords"],
-                    "tags": query_profile["tags"],
-                },
+                "retrieval_mode": "search_agentic" if self.agentic_search else "vector_plus_links",
+                "candidate_count": len(merged_records),
+                "selected_count": len(items),
+                "candidate_record_ids": [record.record_id for record in merged_records],
             },
         )
         trace = copy_trace(packet)
         trace["retrieval"] = retrieved.trace
-        return replace(packet, retrieved=retrieved, trace=trace), store
+        return replace(packet, query=query, retrieved=retrieved, trace=trace), store
 
 
-class AMEMGraphReadout(ReadoutModule):
-    """Render graph retrieval results grouped by hop distance."""
+class AMEMAgenticReadout(ReadoutModule):
+    """Render retrieved memories in A-MEM search output style."""
 
     spec = ModuleSpec(
-        name="amem_graph_readout",
+        name="amem_agentic_readout",
         slot="readout",
         input_requirements=("query.text", "retrieved.items"),
         output_guarantees=("readout.text", "readout.source_ids"),
     )
 
-    def __init__(self, *, target_layer: str = AMEM_GRAPH_LAYER) -> None:
-        self.target_layer = target_layer
-
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None or packet.retrieved is None:
-            raise ValueError("AMEMGraphReadout requires packet.query and packet.retrieved.")
-
-        score_map = {score["record_id"]: score for score in packet.retrieved.scores}
-        grouped: dict[int, list[MemoryRecord]] = {}
-        for record in packet.retrieved.items:
-            hop = int(score_map.get(record.record_id, {}).get("hop", 0))
-            grouped.setdefault(hop, []).append(record)
+            raise ValueError("AMEMAgenticReadout requires packet.query and packet.retrieved.")
 
         lines = [f"Query: {packet.query.text}", ""]
         source_ids: list[str] = []
-        hop_counts: dict[int, int] = {}
-        for hop in sorted(grouped):
-            records = grouped[hop]
-            hop_counts[hop] = len(records)
-            heading = "direct matches" if hop == 0 else f"{hop}-hop neighbors"
-            lines.append(f"[hop {hop}] {heading}")
-            for record in records:
-                graph = record.metadata.get("graph", {}) if isinstance(record.metadata.get("graph"), dict) else {}
-                links = [str(value) for value in graph.get("links", [])] if isinstance(graph.get("links"), list) else []
-                lines.append(f"- {record.text} (links={len(links)})")
-                source_ids.append(record.record_id)
-            lines.append("")
-
-        if len(lines) == 2:
-            lines.append("No graph memories retrieved.")
+        for record in packet.retrieved.items:
+            payload = _amem_payload_from_record(record)
+            source_ids.append(record.record_id)
+            lines.append(f"- {payload['content']}")
+            lines.append(f"  context: {payload['context']}")
+            lines.append(f"  tags: {', '.join(payload['tags'])}")
+        if not packet.retrieved.items:
+            lines.append("No agentic memories retrieved.")
 
         readout = Readout(
             text="\n".join(lines).strip(),
             source_ids=source_ids,
-            metadata={"item_count": len(packet.retrieved.items), "hop_counts": hop_counts, "format": "graph_hop"},
+            metadata={
+                "item_count": len(packet.retrieved.items),
+                "format": "agentic_memory",
+                "retrieval_mode": packet.retrieved.trace.get("retrieval_mode", "vector_plus_links"),
+                "candidate_count": packet.retrieved.trace.get("candidate_count", 0),
+                "selected_count": packet.retrieved.trace.get("selected_count", len(packet.retrieved.items)),
+            },
         )
         trace = copy_trace(packet)
-        trace["readout"] = {"module": self.spec.name, "source_ids": source_ids, "hop_counts": hop_counts}
+        trace["readout"] = {
+            "module": self.spec.name,
+            "source_ids": source_ids,
+            "format": "agentic_memory",
+        }
         return replace(packet, readout=readout, trace=trace), store
 
 
-def build_amem_pipeline(
-    *,
-    config: AMEMConfig | None = None,
-    store: MemoryStore | None = None,
-    graph_layer: str = AMEM_GRAPH_LAYER,
-    top_k: int = 5,
-    max_hops: int = 2,
-    seed_k: int = 2,
-    max_links_per_record: int = 4,
-    link_threshold: float = 1.0,
-    hop_decay: float = 0.72,
-    fallback_recent_if_isolated: bool = True,
-) -> MemoryPipeline:
-    if config is None:
-        config = AMEMConfig(
-            graph_layer=graph_layer,
-            top_k=top_k,
-            max_hops=max_hops,
-            seed_k=seed_k,
-            max_links_per_record=max_links_per_record,
-            link_threshold=link_threshold,
-            hop_decay=hop_decay,
-            fallback_recent_if_isolated=fallback_recent_if_isolated,
-        )
-    memory_store = store if store is not None else build_amem_store(graph_layer=config.graph_layer)
-    return MemoryPipeline(
-        store=memory_store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "keywords", "tags", "triple")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=AMEMGraphOrganization(
-            target_layer=config.graph_layer,
-            max_links_per_record=config.max_links_per_record,
-            link_threshold=config.link_threshold,
-        ),
-        evolution_trigger=AMEMGraphEvolutionTrigger(target_layer=config.graph_layer),
-        memory_evolution=AMEMGraphLinkEvolution(target_layer=config.graph_layer),
-        retrieval=AMEMGraphHopRetrieval(
-            target_layer=config.graph_layer,
-            top_k=config.top_k,
-            max_hops=config.max_hops,
-            seed_k=config.seed_k,
-            hop_decay=config.hop_decay,
-            fallback_recent_if_isolated=config.fallback_recent_if_isolated,
-        ),
-        readout=AMEMGraphReadout(target_layer=config.graph_layer),
-    )
-
-
-class AMEMWorkstream:
-    """Convenience wrapper around the A-MEM pipeline."""
-
-    def __init__(self, *, config: AMEMConfig | None = None, store: MemoryStore | None = None) -> None:
-        self.pipeline = build_amem_pipeline(config=config, store=store)
-
-    @property
-    def store(self) -> MemoryStore:
-        return self.pipeline.store
-
-    def add_memory(self, content: str, *, source: str = "dialogue", metadata: dict[str, Any] | None = None) -> Packet:
-        observation = Observation(text=content, source=source, metadata={} if metadata is None else dict(metadata))
-        return self.pipeline.ingest(observation)
-
-    def retrieve_memory(self, query: str) -> Readout:
-        return self.pipeline.recall(Query(text=query))
+AMEMGraphOrganization = AMEMAgenticOrganization
+AMEMGraphEvolutionTrigger = AMEMAgenticEvolutionTrigger
+AMEMGraphLinkEvolution = AMEMAgenticEvolution
+AMEMGraphHopRetrieval = AMEMEnhancedRetrieval
+AMEMGraphReadout = AMEMAgenticReadout
 
 
 __all__ = [
+    "AMEMAgenticEvolution",
+    "AMEMAgenticEvolutionTrigger",
+    "AMEMAgenticOrganization",
+    "AMEMAgenticReadout",
+    "AMEMAgenticRepresentation",
+    "AMEMAgenticWriteTrigger",
     "AMEMConfig",
+    "AMEMEnhancedRetrieval",
     "AMEMGraphEvolutionTrigger",
     "AMEMGraphHopRetrieval",
     "AMEMGraphLinkEvolution",
     "AMEMGraphOrganization",
     "AMEMGraphReadout",
     "AMEM_GRAPH_LAYER",
-    "AMEMWorkstream",
-    "build_amem_pipeline",
     "build_amem_store",
 ]

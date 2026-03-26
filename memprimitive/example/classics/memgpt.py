@@ -20,7 +20,7 @@ from typing import Any
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import MemoryPipeline, Query
+from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation
 from memprimitive.classic_modules._runtime import get_classic_runtime
 from memprimitive.classic_modules.memgpt import (
@@ -39,7 +39,6 @@ from memprimitive.classic_modules.memgpt import (
     build_memgpt_store,
     get_core_block,
     get_working_summary,
-    memgpt_observation,
 )
 
 DEFAULT_PERSONA = "You are a helpful assistant that manages memory deliberately."
@@ -138,6 +137,54 @@ TOOL_SCHEMAS = [
 
 def _clean_text(value: Any) -> str:
     return " ".join(str(value).split()).strip()
+
+
+def memgpt_observation(
+    text: str,
+    *,
+    source: str = "dialogue",
+    event_type: str = "note",
+    visible: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> Observation:
+    payload = {} if metadata is None else dict(metadata)
+    nested = payload.get("memgpt")
+    memgpt_meta = dict(nested) if isinstance(nested, dict) else {}
+    memgpt_meta.setdefault("event_type", event_type)
+    memgpt_meta.setdefault("visible", bool(visible))
+    payload["memgpt"] = memgpt_meta
+    payload.setdefault(
+        "keywords",
+        [token for token in _clean_text(text).casefold().replace("\n", " ").split() if token],
+    )
+    return Observation(text=text, source=source, metadata=payload)
+
+
+def build_memgpt_pipeline(
+    *,
+    top_k: int = 4,
+    main_context_budget: int = 3,
+    recall_budget: int = 2,
+    readout_item_budget: int = 4,
+) -> MemoryPipeline:
+    del main_context_budget, recall_budget, readout_item_budget
+    store = build_memgpt_store()
+    return MemoryPipeline(
+        store=store,
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(elements=("text", "keywords", "tags", "embedding")),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=AppendOrganization(target_layer=MEMGPT_QUEUE_LAYER),
+        retrieval=MemGPTPagedRetrieval(
+            target_layer=MEMGPT_RECALL_LAYER,
+            page_size=max(1, top_k),
+            tool_name="conversation_search",
+        ),
+        readout=MemGPTSearchReadout(
+            tool_name="conversation_search",
+            target_layer=MEMGPT_RECALL_LAYER,
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -546,3 +593,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = [
+    "DEFAULT_WORKING_SUMMARY",
+    "MemGPTAgent",
+    "build_memgpt_pipeline",
+    "memgpt_observation",
+    "main",
+]

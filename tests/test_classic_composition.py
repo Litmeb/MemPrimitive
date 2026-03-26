@@ -4,18 +4,12 @@ import pytest
 
 from memprimitive import IncompatibleCompositionError, MemoryPipeline
 from memprimitive.classic_modules.amem import AMEMGraphHopRetrieval, AMEMGraphOrganization
-from memprimitive.classic_modules.generative_agents import GenerativeAgentsMemoryEvolution, GenerativeAgentsRetrieval
 from memprimitive.classic_modules.memgpt import MEMGPT_CORE_LAYER, MEMGPT_RECALL_LAYER, MemGPTKeyedUpsertOrganization, MemGPTPagedRetrieval
 from memprimitive.classic_modules.memorybank import MemoryBankEvolution, MemoryBankEvolutionTrigger
 from memprimitive.classic_modules.reflexion import ReflectionMemoryEvolution, ReflexionPrependedReadout
 from memprimitive.classic_modules.scm import SCMControlledRetrieval, SCMEntityProfileUpsert
 from memprimitive.classic_modules.tim import TimBudgetEvolutionTrigger, TimThoughtMemoryEvolution, TimThoughtMemoryOrganization, TimThoughtMemoryRetrieval
-from memprimitive.classic_modules.voyager import MixedSkillRetrieval, UpsertByKeySkillLibrary
 from memprimitive.core import MemoryStore, StoreLayerSpec, StoreTopology
-
-
-pytestmark = pytest.mark.usefixtures("require_real_classic_runtime")
-
 
 def test_reflexion_requires_declared_reflection_layer() -> None:
     store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="episodes")]))
@@ -85,28 +79,6 @@ def test_memgpt_requires_declared_budget_layers() -> None:
         MemoryPipeline(store=store, retrieval=MemGPTPagedRetrieval(target_layer=MEMGPT_RECALL_LAYER, tool_name="conversation_search"))
 
 
-def test_generative_agents_requires_declared_reflection_layer() -> None:
-    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="observation_stream", indices=("keyword",))]))
-
-    with pytest.raises(IncompatibleCompositionError, match="reflections"):
-        MemoryPipeline(store=store, memory_evolution=GenerativeAgentsMemoryEvolution())
-
-    with pytest.raises(IncompatibleCompositionError, match="reflections"):
-        MemoryPipeline(store=store, retrieval=GenerativeAgentsRetrieval(layer="reflections"))
-
-
-def test_voyager_requires_skill_indices_when_layer_is_declared() -> None:
-    store = MemoryStore(
-        topology=StoreTopology.from_layers([StoreLayerSpec(name="skill_library", indices=("keyword",))])
-    )
-
-    with pytest.raises(IncompatibleCompositionError, match="tag"):
-        MemoryPipeline(store=store, organization=UpsertByKeySkillLibrary(allow_create_layer=False))
-
-    with pytest.raises(IncompatibleCompositionError, match="tag"):
-        MemoryPipeline(store=store, retrieval=MixedSkillRetrieval())
-
-
 def test_tim_requires_declared_thought_layer() -> None:
     store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="other")]))
 
@@ -127,7 +99,7 @@ def test_tim_requires_declared_thought_layer() -> None:
 def test_amem_requires_graph_shape_and_index() -> None:
     bad_shape_store = MemoryStore(
         topology=StoreTopology.from_layers(
-            [StoreLayerSpec(name="memory_graph", shape="Flat", indices=("graph", "entity", "keyword"))]
+            [StoreLayerSpec(name="memory_graph", shape="Flat", indices=("graph", "vector", "keyword", "tag"))]
         )
     )
     with pytest.raises(IncompatibleCompositionError, match="Graph"):
@@ -135,7 +107,7 @@ def test_amem_requires_graph_shape_and_index() -> None:
 
     bad_index_store = MemoryStore(
         topology=StoreTopology.from_layers(
-            [StoreLayerSpec(name="memory_graph", shape="Graph", indices=("entity", "keyword"))]
+            [StoreLayerSpec(name="memory_graph", shape="Graph", indices=("vector", "keyword", "tag"))]
         )
     )
     with pytest.raises(IncompatibleCompositionError, match="graph"):

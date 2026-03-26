@@ -8,8 +8,8 @@ from memprimitive.classic_modules.scm import (
     SCMEntityProfileUpsert,
     SCMJudgeGateWrite,
     SCMStructuredExtraction,
-    build_scm_pipeline,
 )
+from memprimitive.example.classics.scm_self_controlled_memory import build_scm_pipeline
 
 
 pytestmark = pytest.mark.usefixtures("require_real_classic_runtime")

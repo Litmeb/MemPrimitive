@@ -17,14 +17,9 @@ from math import sqrt
 from typing import Any, Final
 
 from ..baselines._trace import copy_trace
-from ..baselines.organization import AppendOrganization
-from ..baselines.representation import BasicRepresentation
-from ..baselines.unit_formation import PassThroughUnitFormation
-from ..baselines.write_trigger import AlwaysWriteTrigger
-from ..core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Packet, Placement, Query, Readout, RetrievedSet, StoreLayerSpec, StoreTopology
+from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement, Query, Readout, RetrievedSet, StoreLayerSpec, StoreTopology
 from ..exceptions import IncompatibleCompositionError
 from ..interfaces import OrganizationModule, ReadoutModule, RetrievalModule
-from ..pipeline import MemoryPipeline
 from ._runtime import get_classic_runtime
 
 MEMGPT_CORE_LAYER: Final[str] = "core_memory"
@@ -89,20 +84,6 @@ def _tokenize(text: str) -> list[str]:
     ]
 
 
-def _keyword_list(text: str, *, limit: int = 8) -> list[str]:
-    seen: set[str] = set()
-    keywords: list[str] = []
-    for token in _tokenize(text):
-        token = token.strip(".,;:!?()[]{}<>\"'")
-        if len(token) < 3 or token in seen:
-            continue
-        seen.add(token)
-        keywords.append(token)
-        if len(keywords) >= limit:
-            break
-    return keywords
-
-
 def _record_keywords(record: MemoryRecord) -> set[str]:
     tokens = set(_tokenize(record.text))
     representation = record.metadata.get("representation", {})
@@ -118,25 +99,6 @@ def _memgpt_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     nested = metadata.get("memgpt")
     return dict(nested) if isinstance(nested, dict) else {}
-
-
-def memgpt_observation(
-    text: str,
-    *,
-    source: str = "dialogue",
-    event_type: str = "note",
-    visible: bool = True,
-    metadata: dict[str, Any] | None = None,
-) -> Observation:
-    """Create an observation carrying MemGPT event metadata."""
-
-    payload = {} if metadata is None else dict(metadata)
-    memgpt_meta = _memgpt_metadata(payload)
-    memgpt_meta.setdefault("event_type", event_type)
-    memgpt_meta.setdefault("visible", bool(visible))
-    payload["memgpt"] = memgpt_meta
-    payload.setdefault("keywords", _keyword_list(text))
-    return Observation(text=text, source=source, metadata=payload)
 
 
 def build_memgpt_store() -> MemoryStore:
@@ -417,40 +379,6 @@ class MemGPTSearchReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
-def build_memgpt_pipeline(
-    *,
-    top_k: int = 4,
-    main_context_budget: int = 3,
-    recall_budget: int = 2,
-    readout_item_budget: int = 4,
-) -> MemoryPipeline:
-    """Compatibility helper returning a queue-ingest + recall-search pipeline.
-
-    The example ``MemGPTAgent`` is the primary paper-aligned entrypoint. This
-    helper remains import-compatible for callers that still expect a single
-    ``MemoryPipeline`` object.
-    """
-
-    del main_context_budget, recall_budget, readout_item_budget
-    store = build_memgpt_store()
-    return MemoryPipeline(
-        store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "keywords", "tags", "embedding")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=AppendOrganization(target_layer=MEMGPT_QUEUE_LAYER),
-        retrieval=MemGPTPagedRetrieval(
-            target_layer=MEMGPT_RECALL_LAYER,
-            page_size=max(1, top_k),
-            tool_name="conversation_search",
-        ),
-        readout=MemGPTSearchReadout(
-            tool_name="conversation_search",
-            target_layer=MEMGPT_RECALL_LAYER,
-        ),
-    )
-
-
 __all__ = [
     "MEMGPT_ARCHIVAL_LAYER",
     "MEMGPT_CORE_BLOCK_HUMAN",
@@ -466,9 +394,7 @@ __all__ = [
     "MemGPTKeyedUpsertOrganization",
     "MemGPTPagedRetrieval",
     "MemGPTSearchReadout",
-    "build_memgpt_pipeline",
     "build_memgpt_store",
     "get_core_block",
     "get_working_summary",
-    "memgpt_observation",
 ]

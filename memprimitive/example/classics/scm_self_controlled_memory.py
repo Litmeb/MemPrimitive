@@ -17,8 +17,45 @@ from pathlib import Path
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import Observation, Query
-from memprimitive.classic_modules.scm import build_scm_pipeline
+from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
+from memprimitive.baselines import AppendOnlyEvolution, BasicRepresentation, ConcatenateReadout, NeverEvolutionTrigger
+from memprimitive.classic_modules.scm import (
+    SCMControlledRetrieval,
+    SCMEntityProfileUpsert,
+    SCMJudgeGateWrite,
+    SCMStructuredExtraction,
+)
+
+
+def build_scm_pipeline(
+    *,
+    top_k: int = 3,
+    threshold: float = 0.55,
+    semantic_layer: str = "semantic",
+    profile_layer: str = "profile",
+    store: MemoryStore | None = None,
+) -> MemoryPipeline:
+    if store is None:
+        store = MemoryStore(
+            topology=StoreTopology.from_layers(
+                [
+                    StoreLayerSpec(name=semantic_layer, theme="semantic", indices=("entity", "keyword", "vector")),
+                    StoreLayerSpec(name=profile_layer, theme="profile", indices=("entity", "keyword")),
+                ]
+            )
+        )
+
+    return MemoryPipeline(
+        store=store,
+        unit_formation=SCMStructuredExtraction(),
+        representation=BasicRepresentation(elements=("text",)),
+        write_trigger=SCMJudgeGateWrite(threshold=threshold),
+        organization=SCMEntityProfileUpsert(semantic_layer=semantic_layer, profile_layer=profile_layer),
+        evolution_trigger=NeverEvolutionTrigger(),
+        memory_evolution=AppendOnlyEvolution(),
+        retrieval=SCMControlledRetrieval(top_k=top_k, semantic_layer=semantic_layer, profile_layer=profile_layer),
+        readout=ConcatenateReadout(separator="\n\n"),
+    )
 
 
 def main() -> None:
@@ -34,3 +71,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = ["build_scm_pipeline"]

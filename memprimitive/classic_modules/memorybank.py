@@ -5,16 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
-from ..baselines import (
-    AlwaysWriteTrigger,
-    BasicRepresentation,
-    ConditionalLayerOrganization,
-    EmbeddingSimilarityRetrieval,
-    GroupedByLayerReadout,
-    LayerAwareRetrieval,
-    PassThroughUnitFormation,
-    RecencyRetrieval,
-)
 from ..baselines._trace import copy_trace
 from ..core import (
     MemoryRecord,
@@ -27,7 +17,6 @@ from ..core import (
 )
 from ..exceptions import IncompatibleCompositionError
 from ..interfaces import EvolutionTriggerModule, MemoryEvolutionModule
-from ..pipeline import MemoryPipeline
 from ._runtime import get_classic_runtime
 
 _SHORT_TERM_DEFAULT_WINDOW: Final[int] = 3
@@ -323,64 +312,6 @@ class MemoryBankEvolution(MemoryEvolutionModule):
         return MemoryRecord.from_unit(unit=unit, layer=layer, sequence_id=store.next_sequence_id())
 
 
-def build_memorybank_pipeline(
-    *,
-    config: MemoryBankConfig | None = None,
-    store: MemoryStore | None = None,
-) -> MemoryPipeline:
-    """Build a compact MemoryBank pipeline with routing, consolidation, and layered recall."""
-
-    config = config or MemoryBankConfig()
-    topology = build_memorybank_topology(config)
-    memory_store = store if store is not None else MemoryStore(topology=topology)
-    return MemoryPipeline(
-        store=memory_store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "tags", "keywords")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=ConditionalLayerOrganization(
-            default_layer=config.short_term_layer,
-            rules=(
-                {"has_entity": True, "target_layer": config.long_term_layer},
-                {"unit_type": "summary", "target_layer": config.long_term_layer},
-            ),
-        ),
-        evolution_trigger=MemoryBankEvolutionTrigger(
-            short_term_layer=config.short_term_layer,
-            long_term_layer=config.long_term_layer,
-            short_term_window=config.short_term_window,
-        ),
-        memory_evolution=MemoryBankEvolution(
-            short_term_layer=config.short_term_layer,
-            long_term_layer=config.long_term_layer,
-            short_term_window=config.short_term_window,
-            merge_prefix=config.merge_prefix,
-            summary_prefix=config.summary_prefix,
-        ),
-        retrieval=LayerAwareRetrieval(
-            default_retriever=RecencyRetrieval(top_k=config.short_term_retrieval_k, layer=config.short_term_layer),
-            retriever_by_layer={
-                config.short_term_layer: RecencyRetrieval(top_k=config.short_term_retrieval_k, layer=config.short_term_layer),
-                config.long_term_layer: EmbeddingSimilarityRetrieval(
-                    top_k=config.long_term_retrieval_k,
-                    layer=config.long_term_layer,
-                ),
-            },
-            active_layers=(config.short_term_layer, config.long_term_layer),
-            top_k=config.combined_retrieval_k,
-            top_k_by_layer={
-                config.short_term_layer: config.short_term_retrieval_k,
-                config.long_term_layer: config.long_term_retrieval_k,
-            },
-            merge_weight_by_layer={
-                config.short_term_layer: 1.1,
-                config.long_term_layer: 1.0,
-            },
-        ),
-        readout=GroupedByLayerReadout(),
-    )
-
-
 def _record_entity_signature(record: MemoryRecord) -> tuple[str, ...]:
     representation = record.metadata.get("representation", {})
     if not isinstance(representation, dict):
@@ -466,6 +397,5 @@ __all__ = [
     "MemoryBankConfig",
     "MemoryBankEvolution",
     "MemoryBankEvolutionTrigger",
-    "build_memorybank_pipeline",
     "build_memorybank_topology",
 ]
