@@ -1,566 +1,418 @@
-"""MemGPT-style classic support modules.
+"""Paper-aligned MemGPT support primitives.
 
-This module keeps the motif sketch deterministic and self-contained:
+This module no longer exposes a single end-to-end "MemGPT pipeline". Instead it
+provides the lower-level building blocks used by the example agent loop:
 
-- ``main_context`` stores the live working buffer.
-- ``archival`` stores explicit saves and compaction summaries.
-- ``recall`` stores short compacted snapshots that can be re-read on later turns.
-
-The custom primitives below stay within the repo's ``Packet`` / ``MemoryStore``
-model and can be composed into a normal :class:`~memprimitive.pipeline.MemoryPipeline`.
+- five-layer store topology
+- keyed upsert organization for core/working memory blocks
+- paged retrieval for conversation and archival search tools
+- JSON readout for tool-facing payloads
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+from math import sqrt
 from typing import Any, Final
 
 from ..baselines._trace import copy_trace
-from ..baselines.retrieval import EmbeddingSimilarityRetrieval, LayerAwareRetrieval, RecencyRetrieval
+from ..baselines.organization import AppendOrganization
 from ..baselines.representation import BasicRepresentation
 from ..baselines.unit_formation import PassThroughUnitFormation
-from ..core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Observation, Packet, Placement, Readout, StoreLayerSpec, StoreTopology
+from ..baselines.write_trigger import AlwaysWriteTrigger
+from ..core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Packet, Placement, Query, Readout, RetrievedSet, StoreLayerSpec, StoreTopology
 from ..exceptions import IncompatibleCompositionError
-from ..interfaces import EvolutionTriggerModule, MemoryEvolutionModule, OrganizationModule, ReadoutModule, WriteTriggerModule
+from ..interfaces import OrganizationModule, ReadoutModule, RetrievalModule
 from ..pipeline import MemoryPipeline
 from ._runtime import get_classic_runtime
 
-MEMGPT_MAIN_LAYER: Final[str] = "main_context"
-MEMGPT_ARCHIVAL_LAYER: Final[str] = "archival"
-MEMGPT_RECALL_LAYER: Final[str] = "recall"
+MEMGPT_CORE_LAYER: Final[str] = "core_memory"
+MEMGPT_WORKING_LAYER: Final[str] = "working_memory"
+MEMGPT_QUEUE_LAYER: Final[str] = "conversation_queue"
+MEMGPT_RECALL_LAYER: Final[str] = "recall_storage"
+MEMGPT_ARCHIVAL_LAYER: Final[str] = "archival_memory"
+MEMGPT_MAIN_LAYER: Final[str] = MEMGPT_QUEUE_LAYER
+
+MEMGPT_CORE_BLOCK_PERSONA: Final[str] = "persona"
+MEMGPT_CORE_BLOCK_HUMAN: Final[str] = "human"
+MEMGPT_WORKING_SUMMARY_KEY: Final[str] = "working_summary"
+
+MEMGPT_REQUIRED_CORE_BLOCKS: Final[tuple[str, ...]] = (
+    MEMGPT_CORE_BLOCK_PERSONA,
+    MEMGPT_CORE_BLOCK_HUMAN,
+)
 MEMGPT_LAYER_ORDER: Final[tuple[str, ...]] = (
+    MEMGPT_CORE_LAYER,
+    MEMGPT_WORKING_LAYER,
+    MEMGPT_QUEUE_LAYER,
     MEMGPT_RECALL_LAYER,
-    MEMGPT_MAIN_LAYER,
     MEMGPT_ARCHIVAL_LAYER,
 )
 
-_DEFAULT_TOOL_LAYER_MAP: Final[dict[str, str]] = {
-    "memory_save": MEMGPT_ARCHIVAL_LAYER,
-    "memory_archive": MEMGPT_RECALL_LAYER,
-}
+_STOPWORDS: Final[frozenset[str]] = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "in",
+        "on",
+        "to",
+        "for",
+        "with",
+        "is",
+        "are",
+        "be",
+        "this",
+        "that",
+        "it",
+        "as",
+        "at",
+        "by",
+        "from",
+    }
+)
 
 
-def _memgpt_hints(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    hints: dict[str, Any] = {}
-    if not isinstance(metadata, dict):
-        return hints
-    nested = metadata.get("memgpt")
-    if isinstance(nested, dict):
-        hints.update(nested)
-    for key in ("tool", "target_layer", "write", "compact", "budget", "readout_budget"):
-        if key in metadata and key not in hints:
-            hints[key] = metadata[key]
-    return hints
+def _clean_text(value: Any) -> str:
+    return " ".join(str(value).split()).strip()
 
 
-def _unit_hints(unit: MemoryUnit) -> dict[str, Any]:
-    return _memgpt_hints(unit.metadata)
+def _tokenize(text: str) -> list[str]:
+    return [
+        token
+        for token in _clean_text(text).casefold().replace("\n", " ").split()
+        if token and token not in _STOPWORDS
+    ]
 
 
-def _normalize_target_layer(raw: Any, fallback: str) -> str:
-    value = str(raw).strip() if raw is not None else ""
-    return value or fallback
-
-
-def _compact_text(text: str, *, limit: int = 72) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[: max(0, limit - 3)].rstrip() + "..."
-
-
-def _keywords_from_records(records: list[MemoryRecord]) -> list[str]:
-    keywords: list[str] = []
+def _keyword_list(text: str, *, limit: int = 8) -> list[str]:
     seen: set[str] = set()
-    for record in records:
-        for token in record.text.casefold().split():
-            token = token.strip(".,;:!?()[]{}<>\"'")
-            if len(token) < 3 or token in seen:
-                continue
-            seen.add(token)
-            keywords.append(token)
-            if len(keywords) >= 8:
-                return keywords
+    keywords: list[str] = []
+    for token in _tokenize(text):
+        token = token.strip(".,;:!?()[]{}<>\"'")
+        if len(token) < 3 or token in seen:
+            continue
+        seen.add(token)
+        keywords.append(token)
+        if len(keywords) >= limit:
+            break
     return keywords
 
 
-def _summarize_records(records: list[MemoryRecord], *, kind: str, limit: int = 3) -> str:
-    if not records:
-        return f"{kind} summary: no records"
-    runtime = get_classic_runtime()
-    summary = runtime.summarize_records(
-        records=[
-            {
-                "record_id": record.record_id,
-                "layer": record.layer,
-                "text": record.text,
-            }
-            for record in records[: max(limit, len(records))]
-        ],
-        instruction=(
-            f"Write a compact MemGPT {kind} summary. "
-            "Preserve actionable details and source-record references when useful."
-        ),
-    ).strip()
-    if not summary:
-        return f"{kind} summary: no records"
-    return summary if summary.casefold().startswith(f"{kind} summary".casefold()) else f"{kind} summary: {summary}"
+def _record_keywords(record: MemoryRecord) -> set[str]:
+    tokens = set(_tokenize(record.text))
+    representation = record.metadata.get("representation", {})
+    if isinstance(representation, dict):
+        keywords = representation.get("keywords", [])
+        if isinstance(keywords, list):
+            tokens.update(str(item).casefold().strip() for item in keywords if str(item).strip())
+    return {token for token in tokens if token}
 
 
-def _summary_unit(records: list[MemoryRecord], *, kind: str, target_layer: str) -> MemoryUnit:
-    summary_text = _summarize_records(records, kind=kind)
-    source_record_ids = [record.record_id for record in records]
-    return MemoryUnit(
-        text=summary_text,
-        unit_type="summary",
-        metadata={
-            "memgpt": {
-                "summary_kind": kind,
-                "source_record_ids": source_record_ids,
-                "target_layer": target_layer,
-            },
-            "compaction": {
-                "kind": kind,
-                "source_record_ids": source_record_ids,
-                "target_layer": target_layer,
-            },
-            "representation": {
-                "summary": summary_text,
-                "keywords": _keywords_from_records(records),
-                "source_record_ids": source_record_ids,
-            },
-        },
-    )
-
-
-def build_memgpt_store() -> MemoryStore:
-    """Build a three-layer MemGPT-style store topology."""
-
-    topology = StoreTopology.from_layers(
-        [
-            StoreLayerSpec(
-                name=MEMGPT_MAIN_LAYER,
-                theme="working",
-                capacity="token_limited",
-                indices=("temporal", "keyword"),
-            ),
-            StoreLayerSpec(
-                name=MEMGPT_ARCHIVAL_LAYER,
-                theme="semantic",
-                capacity="unlimited",
-                indices=("vector", "keyword", "temporal"),
-            ),
-            StoreLayerSpec(
-                name=MEMGPT_RECALL_LAYER,
-                theme="working",
-                capacity="sliding_window",
-                indices=("temporal", "keyword"),
-            ),
-        ]
-    )
-    return MemoryStore(topology=topology)
+def _memgpt_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    nested = metadata.get("memgpt")
+    return dict(nested) if isinstance(nested, dict) else {}
 
 
 def memgpt_observation(
     text: str,
     *,
     source: str = "dialogue",
-    target_layer: str | None = None,
-    tool: str | None = None,
-    compact: bool = False,
+    event_type: str = "note",
+    visible: bool = True,
     metadata: dict[str, Any] | None = None,
 ) -> Observation:
-    """Create an observation with MemGPT routing hints in ``metadata``."""
+    """Create an observation carrying MemGPT event metadata."""
 
-    hints: dict[str, Any] = {}
-    if target_layer is not None:
-        hints["target_layer"] = target_layer
-    if tool is not None:
-        hints["tool"] = tool
-    if compact:
-        hints["compact"] = True
     payload = {} if metadata is None else dict(metadata)
-    if hints:
-        payload["memgpt"] = hints
+    memgpt_meta = _memgpt_metadata(payload)
+    memgpt_meta.setdefault("event_type", event_type)
+    memgpt_meta.setdefault("visible", bool(visible))
+    payload["memgpt"] = memgpt_meta
+    payload.setdefault("keywords", _keyword_list(text))
     return Observation(text=text, source=source, metadata=payload)
 
 
-class MemGPTWriteTrigger(WriteTriggerModule):
-    """Gate writes with explicit MemGPT routing hints.
+def build_memgpt_store() -> MemoryStore:
+    """Build the five-region MemGPT store topology."""
 
-    Plain dialogue defaults to ``True`` so observations still enter the live
-    ``main_context`` buffer. A unit can opt out by setting ``memgpt.write=False``
-    or by using a read-only tool hint. Any explicit target layer or write tool
-    keeps the decision open.
-    """
-
-    spec = ModuleSpec(
-        name="memgpt_write_trigger",
-        slot="write_trigger",
-        input_requirements=("units",),
-        output_guarantees=("decisions",),
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name=MEMGPT_CORE_LAYER, theme="profile", indices=("keyword",)),
+            StoreLayerSpec(name=MEMGPT_WORKING_LAYER, theme="working", indices=("keyword", "temporal")),
+            StoreLayerSpec(name=MEMGPT_QUEUE_LAYER, theme="working", indices=("keyword", "temporal")),
+            StoreLayerSpec(name=MEMGPT_RECALL_LAYER, theme="episodic", indices=("keyword", "temporal")),
+            StoreLayerSpec(name=MEMGPT_ARCHIVAL_LAYER, theme="semantic", indices=("keyword", "temporal", "vector")),
+        ]
     )
-
-    _read_only_tools: Final[frozenset[str]] = frozenset({"memory_recall", "memory_retrieval", "NO_EXECUTE"})
-
-    def __init__(self, *, default_write: bool = True) -> None:
-        self.default_write = default_write
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.units is None:
-            raise ValueError("MemGPTWriteTrigger requires packet.units.")
-
-        decisions: list[bool] = []
-        per_unit_trace: list[dict[str, Any]] = []
-        for unit in packet.units:
-            hints = _unit_hints(unit)
-            tool = _normalize_target_layer(hints.get("tool"), "")
-            target_layer = _normalize_target_layer(hints.get("target_layer"), "")
-            explicit_write = hints.get("write")
-            decision = self.default_write
-            if explicit_write is False:
-                decision = False
-            elif tool and tool in self._read_only_tools:
-                decision = False
-            elif target_layer or tool:
-                decision = True
-
-            decisions.append(decision)
-            per_unit_trace.append(
-                {
-                    "unit_id": unit.unit_id,
-                    "tool": tool or None,
-                    "target_layer": target_layer or None,
-                    "decision": decision,
-                }
-            )
-
-        trace = copy_trace(packet)
-        trace["write_trigger"] = {
-            "module": self.spec.name,
-            "policy": "explicit_target_or_tool",
-            "default_write": self.default_write,
-            "per_unit": per_unit_trace,
-        }
-        return replace(packet, decisions=decisions, trace=trace), store
+    return MemoryStore(topology=topology)
 
 
-class MemGPTOrganization(OrganizationModule):
-    """Route each write to ``main_context``, ``archival``, or ``recall``.
+def get_block_record(store: MemoryStore, *, layer: str, key_name: str, key_value: str) -> MemoryRecord | None:
+    matches = store.find_records_by_key(key_name, key_value, layer=layer)
+    return matches[-1] if matches else None
 
-    The default path writes into ``main_context``. Explicit hints on the unit or
-    its source metadata can redirect the write to archival or recall storage.
-    """
+
+def get_core_block(store: MemoryStore, block_key: str) -> str:
+    record = get_block_record(store, layer=MEMGPT_CORE_LAYER, key_name="memgpt_key", key_value=block_key)
+    return "" if record is None else record.text
+
+
+def get_working_summary(store: MemoryStore) -> str:
+    record = get_block_record(
+        store,
+        layer=MEMGPT_WORKING_LAYER,
+        key_name="memgpt_key",
+        key_value=MEMGPT_WORKING_SUMMARY_KEY,
+    )
+    return "" if record is None else record.text
+
+
+class MemGPTKeyedUpsertOrganization(OrganizationModule):
+    """Write units into one layer and upsert by a metadata key."""
 
     spec = ModuleSpec(
-        name="memgpt_organization",
+        name="memgpt_keyed_upsert_organization",
         slot="organization",
         input_requirements=("units", "decisions"),
         output_guarantees=("placements",),
-        side_effects=("modify_store", "append_records"),
+        side_effects=("modify_store", "append_records", "replace_records"),
     )
 
-    def __init__(
-        self,
-        *,
-        default_layer: str = MEMGPT_MAIN_LAYER,
-        tool_target_layers: dict[str, str] | None = None,
-    ) -> None:
-        self.default_layer = default_layer
-        self.tool_target_layers = dict(_DEFAULT_TOOL_LAYER_MAP if tool_target_layers is None else tool_target_layers)
+    def __init__(self, *, target_layer: str, key_name: str) -> None:
+        self.target_layer = target_layer
+        self.key_name = key_name
 
     def validate_store(self, store: MemoryStore) -> None:
-        required_layers = {self.default_layer, *self.tool_target_layers.values()}
-        missing = [layer for layer in required_layers if not store.has_layer(layer)]
-        if missing:
+        if not store.has_layer(self.target_layer):
             raise IncompatibleCompositionError(
-                f"MemGPTOrganization requires declared layer(s) {missing}."
+                f"MemGPTKeyedUpsertOrganization requires declared layer {self.target_layer!r}."
             )
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
-            raise ValueError("MemGPTOrganization requires packet.units.")
+            raise ValueError("MemGPTKeyedUpsertOrganization requires packet.units.")
         if packet.decisions is None:
-            raise ValueError("MemGPTOrganization requires packet.decisions.")
+            raise ValueError("MemGPTKeyedUpsertOrganization requires packet.decisions.")
         if len(packet.units) != len(packet.decisions):
-            raise ValueError("MemGPTOrganization requires decisions aligned with units.")
+            raise ValueError("MemGPTKeyedUpsertOrganization requires decisions aligned with units.")
 
-        placements: list[Placement] = []
-        written_record_ids: list[str] = []
-        written_unit_ids: list[str] = []
-        per_unit_trace: list[dict[str, Any]] = []
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        effects: list[dict[str, Any]] = []
 
         for unit, decision in zip(packet.units, packet.decisions, strict=True):
-            target_layer = self._target_layer_for_unit(unit)
-            placements.append(Placement(unit_id=unit.unit_id, target_layer=target_layer))
-            per_unit_trace.append(
-                {
-                    "unit_id": unit.unit_id,
-                    "target_layer": target_layer,
-                    "decision": decision,
-                }
-            )
             if not decision:
+                effects.append({"unit_id": unit.unit_id, "effect_type": "skipped"})
                 continue
 
-            store.ensure_layer(target_layer)
-            sequence_id = store.next_sequence_id()
-            record = MemoryRecord.from_unit(unit=unit, layer=target_layer, sequence_id=sequence_id)
-            store.append(record)
-            written_record_ids.append(record.record_id)
-            written_unit_ids.append(unit.unit_id)
+            key_value = str(unit.metadata.get(self.key_name, "")).strip()
+            if not key_value:
+                raise ValueError(
+                    f"MemGPTKeyedUpsertOrganization requires unit.metadata[{self.key_name!r}] for all written units."
+                )
+
+            existing = get_block_record(store, layer=self.target_layer, key_name=self.key_name, key_value=key_value)
+            if existing is None:
+                record = MemoryRecord.from_unit(unit=unit, layer=self.target_layer, sequence_id=store.next_sequence_id())
+                store.append(record)
+                effects.append(
+                    {
+                        "unit_id": unit.unit_id,
+                        "effect_type": "inserted",
+                        "record_id": record.record_id,
+                        "key": key_value,
+                    }
+                )
+                continue
+
+            replacement = MemoryRecord(
+                record_id=existing.record_id,
+                unit_id=unit.unit_id,
+                layer=existing.layer,
+                text=unit.text,
+                timestamp=unit.timestamp,
+                embedding=list(unit.embedding) if unit.embedding is not None else None,
+                metadata={
+                    **unit.metadata,
+                    "unit_type": unit.unit_type,
+                    "representation": unit.metadata.get("representation", {}),
+                },
+            )
+            store.replace_record(self.target_layer, existing.record_id, replacement)
+            effects.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "effect_type": "updated",
+                    "record_id": existing.record_id,
+                    "key": key_value,
+                }
+            )
 
         trace = copy_trace(packet)
         trace["organization"] = {
             "module": self.spec.name,
-            "default_layer": self.default_layer,
-            "placements": [
-                {"unit_id": placement.unit_id, "target_layer": placement.target_layer}
-                for placement in placements
-            ],
-            "written_record_ids": written_record_ids,
-            "written_unit_ids": written_unit_ids,
-            "per_unit": per_unit_trace,
+            "target_layer": self.target_layer,
+            "key_name": self.key_name,
+            "effects": effects,
         }
         return replace(packet, placements=placements, trace=trace), store
 
-    def _target_layer_for_unit(self, unit: MemoryUnit) -> str:
-        hints = _unit_hints(unit)
-        target_layer = hints.get("target_layer")
-        if target_layer:
-            return _normalize_target_layer(target_layer, self.default_layer)
 
-        tool = _normalize_target_layer(hints.get("tool"), "")
-        if tool in self.tool_target_layers:
-            return self.tool_target_layers[tool]
-
-        return self.default_layer
-
-
-class MemGPTEvolutionTrigger(EvolutionTriggerModule):
-    """Trigger compaction when the live ``main_context`` budget is exceeded."""
+class MemGPTPagedRetrieval(RetrievalModule):
+    """Retrieve paged results from one MemGPT layer using embedding similarity."""
 
     spec = ModuleSpec(
-        name="memgpt_evolution_trigger",
-        slot="evolution_trigger",
-        input_requirements=("units", "placements"),
-        output_guarantees=("evolution_decisions",),
+        name="memgpt_paged_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("record.embedding",),
     )
 
-    def __init__(
-        self,
-        *,
-        main_context_layer: str = MEMGPT_MAIN_LAYER,
-        main_context_budget: int = 3,
-    ) -> None:
-        if main_context_budget <= 0:
-            raise ValueError("MemGPTEvolutionTrigger requires main_context_budget > 0.")
-        self.main_context_layer = main_context_layer
-        self.main_context_budget = int(main_context_budget)
+    def __init__(self, *, target_layer: str, page_size: int = 3, tool_name: str) -> None:
+        if page_size <= 0:
+            raise ValueError("MemGPTPagedRetrieval requires page_size > 0.")
+        self.target_layer = target_layer
+        self.page_size = int(page_size)
+        self.tool_name = tool_name
 
     def validate_store(self, store: MemoryStore) -> None:
-        if not store.has_layer(self.main_context_layer):
+        if not store.has_layer(self.target_layer):
             raise IncompatibleCompositionError(
-                f"MemGPTEvolutionTrigger requires declared layer {self.main_context_layer!r}."
+                f"MemGPTPagedRetrieval requires declared layer {self.target_layer!r}."
             )
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.units is None:
-            raise ValueError("MemGPTEvolutionTrigger requires packet.units.")
-        if packet.placements is None:
-            raise ValueError("MemGPTEvolutionTrigger requires packet.placements.")
-        if len(packet.units) != len(packet.placements):
-            raise ValueError("MemGPTEvolutionTrigger requires aligned units and placements.")
+        if packet.query is None:
+            raise ValueError("MemGPTPagedRetrieval requires packet.query.")
 
-        hints = [_unit_hints(unit) for unit in packet.units]
-        force_compact = any(bool(hint.get("compact")) for hint in hints)
-        main_context_count = store.count(self.main_context_layer)
-        should_compact = force_compact or main_context_count > self.main_context_budget
-        decisions = [should_compact for _ in packet.units]
+        page = int(packet.query.metadata.get("page", 1) or 1)
+        page_size = int(packet.query.metadata.get("page_size", self.page_size) or self.page_size)
+        if page <= 0:
+            raise ValueError("MemGPTPagedRetrieval requires page >= 1.")
+        if page_size <= 0:
+            raise ValueError("MemGPTPagedRetrieval requires page_size >= 1.")
 
-        trace = copy_trace(packet)
-        trace["evolution_trigger"] = {
-            "module": self.spec.name,
-            "main_context_layer": self.main_context_layer,
-            "main_context_budget": self.main_context_budget,
-            "main_context_count": main_context_count,
-            "force_compact": force_compact,
-            "should_compact": should_compact,
-            "evolution_decisions": decisions,
-        }
-        return replace(packet, evolution_decisions=decisions, trace=trace), store
+        runtime = get_classic_runtime()
+        query = packet.query
+        query_embedding = (
+            [float(value) for value in query.embedding]
+            if query.embedding is not None
+            else runtime.embed(query.text)
+        )
+        if query.embedding is None:
+            query = replace(query, embedding=query_embedding)
 
+        ordered = list(reversed(store.iter_records(self.target_layer)))
+        scored: list[tuple[float, int, MemoryRecord]] = []
+        for order_index, record in enumerate(ordered):
+            if record.embedding is None or len(record.embedding) != len(query_embedding):
+                continue
+            score = self._cosine_similarity(query_embedding, record.embedding)
+            scored.append((score, order_index, record))
 
-class MemGPTCompactionEvolution(MemoryEvolutionModule):
-    """Compact overflow from ``main_context`` into archival and recall summaries."""
+        candidates = sorted(scored, key=lambda item: (-item[0], item[1]))
 
-    spec = ModuleSpec(
-        name="memgpt_compaction_evolution",
-        slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
-        output_guarantees=("trace.memory_evolution.effects",),
-        side_effects=("modify_store", "append_records"),
-    )
-
-    def __init__(
-        self,
-        *,
-        main_context_layer: str = MEMGPT_MAIN_LAYER,
-        archival_layer: str = MEMGPT_ARCHIVAL_LAYER,
-        recall_layer: str = MEMGPT_RECALL_LAYER,
-        main_context_budget: int = 3,
-        recall_budget: int = 2,
-    ) -> None:
-        if main_context_budget <= 0:
-            raise ValueError("MemGPTCompactionEvolution requires main_context_budget > 0.")
-        if recall_budget <= 0:
-            raise ValueError("MemGPTCompactionEvolution requires recall_budget > 0.")
-        self.main_context_layer = main_context_layer
-        self.archival_layer = archival_layer
-        self.recall_layer = recall_layer
-        self.main_context_budget = int(main_context_budget)
-        self.recall_budget = int(recall_budget)
-
-    def validate_store(self, store: MemoryStore) -> None:
-        for layer_name in (self.main_context_layer, self.archival_layer, self.recall_layer):
-            if not store.has_layer(layer_name):
-                raise IncompatibleCompositionError(
-                    f"MemGPTCompactionEvolution requires declared layer {layer_name!r}."
-                )
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.units is None:
-            raise ValueError("MemGPTCompactionEvolution requires packet.units.")
-        if packet.placements is None:
-            raise ValueError("MemGPTCompactionEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("MemGPTCompactionEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
-            raise ValueError("MemGPTCompactionEvolution requires aligned units, placements, and evolution decisions.")
-
-        active_unit_ids = [
-            unit.unit_id
-            for unit, decision in zip(packet.units, packet.evolution_decisions, strict=True)
-            if decision
+        total_matches = len(candidates)
+        start = (page - 1) * page_size
+        end = start + page_size
+        selected = candidates[start:end]
+        items = [record for _, _, record in selected]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": start + rank,
+                "score": float(score),
+                "layer": self.target_layer,
+                "strategy": f"{self.tool_name}_embedding_search",
+            }
+            for rank, (score, _, record) in enumerate(selected, start=1)
         ]
-        effects: list[dict[str, Any]] = []
-
-        if active_unit_ids:
-            main_records = store.iter_records(self.main_context_layer)
-            overflow_count = max(0, len(main_records) - self.main_context_budget)
-            if overflow_count > 0:
-                overflow_records = main_records[:overflow_count]
-                archival_summary = _summary_unit(
-                    overflow_records,
-                    kind="archival_compaction",
-                    target_layer=self.archival_layer,
-                )
-                archival_record = MemoryRecord.from_unit(
-                    archival_summary,
-                    layer=self.archival_layer,
-                    sequence_id=store.next_sequence_id(),
-                )
-                store.append(archival_record)
-                effects.append(
-                    {
-                        "effect_type": "archive_compaction",
-                        "source_record_ids": [record.record_id for record in overflow_records],
-                        "record_id": archival_record.record_id,
-                        "target_layer": self.archival_layer,
-                    }
-                )
-
-                recall_window = main_records[-self.recall_budget :]
-                recall_summary = _summary_unit(
-                    recall_window,
-                    kind="recall_window",
-                    target_layer=self.recall_layer,
-                )
-                recall_record = MemoryRecord.from_unit(
-                    recall_summary,
-                    layer=self.recall_layer,
-                    sequence_id=store.next_sequence_id(),
-                )
-                store.append(recall_record)
-                effects.append(
-                    {
-                        "effect_type": "recall_compaction",
-                        "source_record_ids": [record.record_id for record in recall_window],
-                        "record_id": recall_record.record_id,
-                        "target_layer": self.recall_layer,
-                    }
-                )
-
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "tool_name": self.tool_name,
+                "target_layer": self.target_layer,
+                "page": page,
+                "page_size": page_size,
+                "total_matches": total_matches,
+                "returned_count": len(items),
+                "strategy": "embedding_similarity",
+            },
+        )
         trace = copy_trace(packet)
-        trace["memory_evolution"] = {
-            "module": self.spec.name,
-            "decision_source": "evolution_decisions",
-            "active_unit_ids": active_unit_ids,
-            "effects": effects,
-            "main_context_layer": self.main_context_layer,
-            "archival_layer": self.archival_layer,
-            "recall_layer": self.recall_layer,
-            "main_context_budget": self.main_context_budget,
-            "recall_budget": self.recall_budget,
-        }
-        return replace(packet, trace=trace), store
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, query=query, retrieved=retrieved, trace=trace), store
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        numerator = sum(lv * rv for lv, rv in zip(left, right, strict=True))
+        left_norm = sqrt(sum(value * value for value in left))
+        right_norm = sqrt(sum(value * value for value in right))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        return numerator / (left_norm * right_norm)
 
 
-class MemGPTReadout(ReadoutModule):
-    """Render retrieval results as a budgeted, layer-grouped prompt chunk."""
+class MemGPTSearchReadout(ReadoutModule):
+    """Render search-tool results as JSON payloads for the agent loop."""
 
     spec = ModuleSpec(
-        name="memgpt_readout",
+        name="memgpt_search_readout",
         slot="readout",
         input_requirements=("retrieved.items",),
         output_guarantees=("readout.text", "readout.source_ids"),
     )
 
-    def __init__(self, *, item_budget: int = 4, layer_order: tuple[str, ...] = MEMGPT_LAYER_ORDER) -> None:
-        if item_budget <= 0:
-            raise ValueError("MemGPTReadout requires item_budget > 0.")
-        self.item_budget = int(item_budget)
-        self.layer_order = layer_order
+    def __init__(self, *, tool_name: str, target_layer: str) -> None:
+        self.tool_name = tool_name
+        self.target_layer = target_layer
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.retrieved is None:
-            raise ValueError("MemGPTReadout requires packet.retrieved.")
+            raise ValueError("MemGPTSearchReadout requires packet.retrieved.")
 
-        items = packet.retrieved.items[: self.item_budget]
-        omitted = max(0, len(packet.retrieved.items) - len(items))
-        source_ids = [record.record_id for record in items]
-
-        grouped: dict[str, list[str]] = {}
-        for record in items:
-            grouped.setdefault(record.layer, []).append(record.text)
-
-        chunks: list[str] = []
-        ordered_layers = list(self.layer_order) + [
-            layer for layer in grouped if layer not in self.layer_order
-        ]
-        for layer in ordered_layers:
-            texts = grouped.get(layer)
-            if not texts:
-                continue
-            chunks.append(f"[{layer}]\n" + "\n".join(f"- {text}" for text in texts))
-        if omitted:
-            chunks.append(f"... {omitted} more item(s) omitted by readout budget")
-
+        trace_data = packet.retrieved.trace if isinstance(packet.retrieved.trace, dict) else {}
+        source_ids = [record.record_id for record in packet.retrieved.items]
+        payload = {
+            "tool_name": self.tool_name,
+            "target_layer": self.target_layer,
+            "page": int(trace_data.get("page", 1)),
+            "page_size": int(trace_data.get("page_size", len(packet.retrieved.items))),
+            "total_matches": int(trace_data.get("total_matches", len(packet.retrieved.items))),
+            "has_more": int(trace_data.get("page", 1)) * int(trace_data.get("page_size", len(packet.retrieved.items)))
+            < int(trace_data.get("total_matches", len(packet.retrieved.items))),
+            "source_ids": source_ids,
+            "items": [
+                {
+                    "record_id": record.record_id,
+                    "layer": record.layer,
+                    "text": record.text,
+                    "timestamp": record.timestamp,
+                    "event_type": _memgpt_metadata(record.metadata).get("event_type"),
+                    "memgpt_key": record.metadata.get("memgpt_key"),
+                }
+                for record in packet.retrieved.items
+            ],
+        }
         readout = Readout(
-            text="\n\n".join(chunks),
+            text=json.dumps(payload, ensure_ascii=False),
             source_ids=source_ids,
-            metadata={
-                "item_count": len(items),
-                "omitted_item_count": omitted,
-                "item_budget": self.item_budget,
-                "layer_counts": {layer: len(texts) for layer, texts in grouped.items()},
-            },
+            metadata=payload,
         )
         trace = copy_trace(packet)
         trace["readout"] = {
             "module": self.spec.name,
+            "tool_name": self.tool_name,
             "source_ids": source_ids,
-            "item_budget": self.item_budget,
         }
         return replace(packet, readout=readout, trace=trace), store
 
@@ -572,52 +424,51 @@ def build_memgpt_pipeline(
     recall_budget: int = 2,
     readout_item_budget: int = 4,
 ) -> MemoryPipeline:
-    """Assemble a deterministic MemGPT-style pipeline."""
+    """Compatibility helper returning a queue-ingest + recall-search pipeline.
 
+    The example ``MemGPTAgent`` is the primary paper-aligned entrypoint. This
+    helper remains import-compatible for callers that still expect a single
+    ``MemoryPipeline`` object.
+    """
+
+    del main_context_budget, recall_budget, readout_item_budget
     store = build_memgpt_store()
     return MemoryPipeline(
         store=store,
         unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "keywords", "tags")),
-        write_trigger=MemGPTWriteTrigger(),
-        organization=MemGPTOrganization(),
-        evolution_trigger=MemGPTEvolutionTrigger(
-            main_context_budget=main_context_budget,
+        representation=BasicRepresentation(elements=("text", "keywords", "tags", "embedding")),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=AppendOrganization(target_layer=MEMGPT_QUEUE_LAYER),
+        retrieval=MemGPTPagedRetrieval(
+            target_layer=MEMGPT_RECALL_LAYER,
+            page_size=max(1, top_k),
+            tool_name="conversation_search",
         ),
-        memory_evolution=MemGPTCompactionEvolution(
-            main_context_budget=main_context_budget,
-            recall_budget=recall_budget,
+        readout=MemGPTSearchReadout(
+            tool_name="conversation_search",
+            target_layer=MEMGPT_RECALL_LAYER,
         ),
-        retrieval=LayerAwareRetrieval(
-            default_retriever=RecencyRetrieval(top_k=top_k, layer=MEMGPT_MAIN_LAYER),
-            retriever_by_layer={
-                MEMGPT_MAIN_LAYER: RecencyRetrieval(top_k=top_k, layer=MEMGPT_MAIN_LAYER),
-                MEMGPT_RECALL_LAYER: RecencyRetrieval(top_k=top_k, layer=MEMGPT_RECALL_LAYER),
-                MEMGPT_ARCHIVAL_LAYER: EmbeddingSimilarityRetrieval(top_k=top_k, layer=MEMGPT_ARCHIVAL_LAYER),
-            },
-            active_layers=MEMGPT_LAYER_ORDER,
-            top_k=top_k,
-            merge_weight_by_layer={
-                MEMGPT_RECALL_LAYER: 1.5,
-                MEMGPT_MAIN_LAYER: 1.2,
-                MEMGPT_ARCHIVAL_LAYER: 1.0,
-            },
-        ),
-        readout=MemGPTReadout(item_budget=readout_item_budget),
     )
 
 
 __all__ = [
     "MEMGPT_ARCHIVAL_LAYER",
+    "MEMGPT_CORE_BLOCK_HUMAN",
+    "MEMGPT_CORE_BLOCK_PERSONA",
+    "MEMGPT_CORE_LAYER",
     "MEMGPT_LAYER_ORDER",
     "MEMGPT_MAIN_LAYER",
+    "MEMGPT_QUEUE_LAYER",
     "MEMGPT_RECALL_LAYER",
-    "MemGPTCompactionEvolution",
-    "MemGPTOrganization",
-    "MemGPTEvolutionTrigger",
-    "MemGPTReadout",
-    "MemGPTWriteTrigger",
+    "MEMGPT_REQUIRED_CORE_BLOCKS",
+    "MEMGPT_WORKING_LAYER",
+    "MEMGPT_WORKING_SUMMARY_KEY",
+    "MemGPTKeyedUpsertOrganization",
+    "MemGPTPagedRetrieval",
+    "MemGPTSearchReadout",
     "build_memgpt_pipeline",
     "build_memgpt_store",
+    "get_core_block",
+    "get_working_summary",
     "memgpt_observation",
 ]

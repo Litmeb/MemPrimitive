@@ -11,6 +11,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
+try:
+    import tiktoken
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    tiktoken = None
+
 _JSON_BLOCK_PATTERN = re.compile(r"\{.*\}|\[.*\]", re.S)
 _MEMPRIMITIVE_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
@@ -87,6 +92,60 @@ class ClassicRuntime:
             temperature=0.0,
         )
         return _coerce_json(content)
+
+    def chat_with_tools(
+        self,
+        *,
+        system: str,
+        user: str,
+        tools: list[dict[str, Any]],
+        temperature: float = 0.0,
+    ) -> dict[str, Any]:
+        response = self._client().chat.completions.create(
+            model=self.model,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            tools=tools,
+            tool_choice="auto",
+        )
+        message = response.choices[0].message
+        tool_calls = []
+        for tool_call in message.tool_calls or []:
+            if tool_call.type != "function":
+                continue
+            arguments = tool_call.function.arguments or "{}"
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_arguments = _coerce_json(arguments)
+            if not isinstance(parsed_arguments, dict):
+                parsed_arguments = {}
+            tool_calls.append(
+                {
+                    "id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "arguments": parsed_arguments,
+                }
+            )
+        return {
+            "assistant_message": (message.content or "").strip(),
+            "tool_calls": tool_calls,
+        }
+
+    def count_tokens(self, text: str) -> int:
+        cleaned = str(text)
+        if not cleaned:
+            return 0
+        if tiktoken is not None:
+            try:
+                encoding = tiktoken.encoding_for_model(self.model) if self.model else tiktoken.get_encoding("cl100k_base")
+            except KeyError:
+                encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(cleaned))
+        return max(1, math.ceil(len(cleaned) / 4))
 
     def summarize_records(
         self,

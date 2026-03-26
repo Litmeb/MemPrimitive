@@ -1,10 +1,8 @@
-"""Reflexion support for classic memory-workstream examples.
+"""HotPotQA-style Reflexion memory support modules.
 
-This file keeps the motif local to the forked workspace:
-- failure/event-triggered reflection generation
-- append-only reflection memory
-- sliding-window maintenance
-- reflection-prepended context readout
+This file intentionally contains only the memory-side primitives and the memory
+pipeline builder. The external trial loop / workflow wrapper lives in the
+example entrypoint.
 """
 
 from __future__ import annotations
@@ -12,27 +10,99 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Final
 
-from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation, RecencyRetrieval
+from memprimitive.baselines import (
+    AlwaysWriteTrigger,
+    BasicRepresentation,
+    PassThroughUnitFormation,
+)
 from memprimitive.baselines._trace import copy_trace
-from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Observation, Packet, Query, Readout, StoreLayerSpec, StoreTopology
+from memprimitive.core import (
+    MemoryRecord,
+    MemoryStore,
+    MemoryUnit,
+    ModuleSpec,
+    Observation,
+    Packet,
+    Placement,
+    Query,
+    Readout,
+    RetrievedSet,
+    StoreLayerSpec,
+    StoreTopology,
+)
 from memprimitive.exceptions import IncompatibleCompositionError
-from memprimitive.interfaces import EvolutionTriggerModule, MemoryEvolutionModule, ReadoutModule
+from memprimitive.interfaces import (
+    EvolutionTriggerModule,
+    MemoryEvolutionModule,
+    OrganizationModule,
+    ReadoutModule,
+    RetrievalModule,
+)
 from memprimitive.pipeline import MemoryPipeline
 from ._runtime import get_classic_runtime
 
-DEFAULT_EPISODE_LAYER: Final[str] = "episodes"
 DEFAULT_REFLECTION_LAYER: Final[str] = "reflections"
+DEFAULT_TRIAL_LAYER: Final[str] = "trial_buffer"
+DEFAULT_MEMORY_SIZE: Final[int] = 3
+
+_STRATEGY_NONE: Final[str] = "base"
+_STRATEGY_LAST_ATTEMPT: Final[str] = "last_trial"
+_STRATEGY_REFLEXION: Final[str] = "reflexion"
+_STRATEGY_LAST_ATTEMPT_AND_REFLEXION: Final[str] = "last_trial_and_reflexion"
+_VALID_STRATEGIES: Final[frozenset[str]] = frozenset(
+    {
+        _STRATEGY_NONE,
+        _STRATEGY_LAST_ATTEMPT,
+        _STRATEGY_REFLEXION,
+        _STRATEGY_LAST_ATTEMPT_AND_REFLEXION,
+    }
+)
+
+REFLECTION_HEADER: Final[str] = (
+    "You have attempted to answer following question before and failed. "
+    "The following reflection(s) give a plan to avoid failing to answer the "
+    "question in the same way you did previously. Use them to improve your "
+    "strategy of correctly answering the given question."
+)
+REFLECTION_AFTER_LAST_TRIAL_HEADER: Final[str] = (
+    "The following reflection(s) give a plan to avoid failing to answer the "
+    "question in the same way you did previously. Use them to improve your "
+    "strategy of correctly answering the given question."
+)
+LAST_TRIAL_HEADER: Final[str] = (
+    "You have attempted to answer the following question before and failed. "
+    "Below is the last trial you attempted to answer the question."
+)
 
 
-def _reflexion_controls(observation: Observation) -> dict[str, Any]:
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value).strip().split())
+
+
+def _reflexion_controls(payload: dict[str, Any] | None) -> dict[str, Any]:
     controls: dict[str, Any] = {}
-    raw_reflexion = observation.metadata.get("reflexion")
-    if isinstance(raw_reflexion, dict):
-        controls.update(raw_reflexion)
+    if not isinstance(payload, dict):
+        return controls
 
-    for key in ("event", "success", "should_reflect", "task", "feedback", "failure_reason", "lesson"):
-        if key in observation.metadata and key not in controls:
-            controls[key] = observation.metadata[key]
+    nested = payload.get("reflexion")
+    if isinstance(nested, dict):
+        controls.update(nested)
+
+    for key in (
+        "question",
+        "task",
+        "scratchpad",
+        "last_attempt",
+        "is_correct",
+        "success",
+        "feedback",
+        "evaluator_feedback",
+        "answer",
+        "trial_index",
+        "strategy",
+    ):
+        if key in payload and key not in controls:
+            controls[key] = payload[key]
     return controls
 
 
@@ -43,91 +113,105 @@ def _coerce_bool(value: Any) -> bool | None:
         return bool(value)
     if isinstance(value, str):
         normalized = value.strip().casefold()
-        if normalized in {"true", "yes", "1", "failure", "failed", "error", "exception"}:
+        if normalized in {"true", "yes", "1", "success", "passed", "correct"}:
             return True
-        if normalized in {"false", "no", "0", "success", "passed", "ok"}:
+        if normalized in {"false", "no", "0", "failure", "failed", "incorrect"}:
             return False
     return None
 
 
-def _heuristic_failure_reason(observation: Observation, *, failure_markers: tuple[str, ...], failure_sources: tuple[str, ...]) -> str | None:
-    event = str(_reflexion_controls(observation).get("event", "")).strip().casefold()
-    if event in {"failure", "failed", "error", "exception"}:
-        return event
-
-    if observation.source.casefold() in {source.casefold() for source in failure_sources}:
-        return f"source:{observation.source}"
-
-    lowered = observation.text.casefold()
-    for marker in failure_markers:
-        if marker.casefold() in lowered:
-            return f"text:{marker}"
-    return None
+def _format_reflections(reflections: list[str], *, header: str = REFLECTION_HEADER) -> str:
+    if not reflections:
+        return ""
+    parts = [header]
+    for index, reflection in enumerate(reflections, start=1):
+        parts.append(f"Reflection {index}:")
+        parts.append(_normalize_text(reflection))
+    return "\n".join(parts).strip()
 
 
-def _is_failure_event(
-    observation: Observation,
-    *,
-    failure_markers: tuple[str, ...],
-    failure_sources: tuple[str, ...],
-) -> tuple[bool, str]:
-    runtime = get_classic_runtime()
-    controls = _reflexion_controls(observation)
-
-    explicit = _coerce_bool(controls.get("should_reflect"))
-    if explicit is not None:
-        return explicit, "explicit should_reflect"
-
-    success = _coerce_bool(controls.get("success"))
-    if success is not None:
-        return (not success), "success" if success else "failure"
-
-    event = str(controls.get("event", "")).strip().casefold()
-    if event in {"failure", "failed", "error", "exception"}:
-        return True, event
-    if event in {"success", "passed", "ok"}:
-        return False, event
-
-    verdict = runtime.json(
-        system=(
-            "You decide whether an observation should trigger Reflexion-style self-reflection. "
-            "Return JSON with keys: should_reflect, reason."
-        ),
-        user=(
-            f"text: {observation.text}\n"
-            f"source: {observation.source}\n"
-            f"controls: {controls}\n"
-            f"failure_markers: {list(failure_markers)}\n"
-            f"failure_sources: {list(failure_sources)}"
-        ),
-    )
-    if isinstance(verdict, dict):
-        should_reflect = bool(verdict.get("should_reflect", False))
-        reason = str(verdict.get("reason", "")).strip() or "llm_judge"
-        return should_reflect, reason
-
-    return False, "no failure event"
-
-
-def _reflection_text(observation: Observation, unit: MemoryUnit, *, reason: str) -> str:
-    runtime = get_classic_runtime()
-    controls = _reflexion_controls(observation)
-    task = str(controls.get("task") or observation.text).strip()
-    feedback = str(
-        controls.get("feedback")
-        or controls.get("failure_reason")
-        or controls.get("lesson")
-        or unit.metadata.get("failure_reason")
-        or ""
+def _format_last_attempt(question: str, scratchpad: str) -> str:
+    return "\n".join(
+        [
+            LAST_TRIAL_HEADER,
+            f"Question: {question}",
+            _normalize_text(scratchpad),
+        ]
     ).strip()
 
-    return runtime.text(
-        system="You write terse Reflexion memory entries after failed attempts.",
-        user=(
-            f"task: {task}\nfeedback: {feedback}\nreason: {reason}\n"
-            "Write one short reflection beginning with 'Reflection on'."
-        ),
+
+def _strategy_from_query(query: Query, fallback: str) -> str:
+    controls = _reflexion_controls(query.metadata)
+    raw = controls.get("strategy")
+    if isinstance(raw, str):
+        normalized = raw.strip()
+        if normalized in _VALID_STRATEGIES:
+            return normalized
+    return fallback
+
+
+def _last_attempt_from_query(query: Query) -> str:
+    controls = _reflexion_controls(query.metadata)
+    return _normalize_text(controls.get("last_attempt", ""))
+
+
+def _question_from_payload(payload: dict[str, Any]) -> str:
+    controls = _reflexion_controls(payload)
+    return _normalize_text(controls.get("question") or controls.get("task") or payload.get("text") or "")
+
+
+def _scratchpad_from_payload(payload: dict[str, Any]) -> str:
+    controls = _reflexion_controls(payload)
+    return _normalize_text(
+        controls.get("scratchpad")
+        or controls.get("last_attempt")
+        or payload.get("text")
+        or ""
     )
+
+
+def _feedback_from_payload(payload: dict[str, Any]) -> str:
+    controls = _reflexion_controls(payload)
+    return _normalize_text(controls.get("evaluator_feedback") or controls.get("feedback") or "")
+
+
+def _is_correct_payload(payload: dict[str, Any]) -> bool:
+    controls = _reflexion_controls(payload)
+    explicit = _coerce_bool(controls.get("is_correct"))
+    if explicit is not None:
+        return explicit
+    success = _coerce_bool(controls.get("success"))
+    if success is not None:
+        return success
+    event = str(controls.get("event", "")).strip().casefold()
+    if event in {"success", "passed", "ok"}:
+        return True
+    if event in {"failure", "failed", "error", "incorrect"}:
+        return False
+    return False
+
+
+def _reflection_text(
+    *,
+    question: str,
+    scratchpad: str,
+    evaluator_feedback: str,
+    prior_reflections: list[str],
+) -> str:
+    runtime = get_classic_runtime()
+    return runtime.text(
+        system=(
+            "You are an advanced reasoning agent that can improve based on self reflection. "
+            "Given a previous reasoning trial, diagnose the likely failure and propose a concise, "
+            "high-level plan for the next attempt. Return a short reflection beginning with 'Reflection'."
+        ),
+        user=(
+            f"question: {question}\n"
+            f"previous_trial: {scratchpad}\n"
+            f"evaluator_feedback: {evaluator_feedback}\n"
+            f"prior_reflections: {prior_reflections}"
+        ),
+    ).strip()
 
 
 def _ensure_reflection_layer(store: MemoryStore, layer: str, *, theme: str = "semantic") -> None:
@@ -136,65 +220,81 @@ def _ensure_reflection_layer(store: MemoryStore, layer: str, *, theme: str = "se
     store.ensure_layer(layer, allow_create=True, theme=theme)
 
 
-def _trim_layer_to_window(store: MemoryStore, layer: str, *, window_size: int) -> list[str]:
+def _trim_layer_to_window(store: MemoryStore, layer: str, *, memory_size: int) -> list[str]:
     records = store.layers.get(layer, [])
-    if len(records) <= window_size:
+    if len(records) <= memory_size:
         return []
-
-    removed = records[:-window_size]
-    store.layers[layer] = records[-window_size:]
+    removed = records[:-memory_size]
+    store.layers[layer] = records[-memory_size:]
     return [record.record_id for record in removed]
 
 
-class FailureEventEvolutionTrigger(EvolutionTriggerModule):
-    """Convert failed episodes into per-unit evolution decisions.
-
-    The trigger uses a small heuristic with explicit metadata overrides:
-    - ``packet.observation.metadata["reflexion"]["should_reflect"]``
-    - ``packet.observation.metadata["reflexion"]["event"]``
-    - fallback failure markers in the observation text/source
-    """
+class ReflexionTrialOrganization(OrganizationModule):
+    """Emit placements for trial packets without appending trial records to the store."""
 
     spec = ModuleSpec(
-        name="failure_event_evolution_trigger",
+        name="reflexion_trial_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+    )
+
+    def __init__(self, target_layer: str = DEFAULT_TRIAL_LAYER) -> None:
+        self.target_layer = target_layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("ReflexionTrialOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("ReflexionTrialOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("ReflexionTrialOrganization requires decisions aligned with units.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "placement_count": len(placements),
+            "append_trials": False,
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+
+class TrialFailureEvolutionTrigger(EvolutionTriggerModule):
+    """Trigger reflection generation only for failed trials."""
+
+    spec = ModuleSpec(
+        name="trial_failure_evolution_trigger",
         slot="evolution_trigger",
-        input_requirements=("units", "observation.text"),
+        input_requirements=("units", "observation.metadata"),
         output_guarantees=("evolution_decisions",),
     )
 
-    def __init__(
-        self,
-        *,
-        failure_markers: tuple[str, ...] = ("failed", "failure", "error", "exception", "wrong"),
-        failure_sources: tuple[str, ...] = ("failure_log", "error_log"),
-    ) -> None:
-        self.failure_markers = failure_markers
-        self.failure_sources = failure_sources
-
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.observation is None:
-            raise ValueError("FailureEventEvolutionTrigger requires packet.observation.")
+            raise ValueError("TrialFailureEvolutionTrigger requires packet.observation.")
         if packet.units is None:
-            raise ValueError("FailureEventEvolutionTrigger requires packet.units.")
+            raise ValueError("TrialFailureEvolutionTrigger requires packet.units.")
 
-        should_reflect, reason = _is_failure_event(
-            packet.observation,
-            failure_markers=self.failure_markers,
-            failure_sources=self.failure_sources,
-        )
+        is_correct = _is_correct_payload(packet.observation.metadata)
+        should_reflect = not is_correct
+        controls = _reflexion_controls(packet.observation.metadata)
         decisions = [should_reflect for _ in packet.units]
         trace = copy_trace(packet)
         trace["evolution_trigger"] = {
             "module": self.spec.name,
-            "policy": "failure_event",
+            "policy": "trial_result",
             "triggered": should_reflect,
-            "reason": reason,
-            "decision_source": "packet.observation.metadata.reflexion",
+            "trial_is_correct": is_correct,
+            "question": _question_from_payload(packet.observation.metadata),
+            "decision_source": "packet.observation.metadata.reflexion.is_correct",
             "per_unit": [
                 {
                     "unit_id": unit.unit_id,
                     "decision": should_reflect,
-                    "reason": reason,
+                    "question": _question_from_payload(packet.observation.metadata),
+                    "trial_index": controls.get("trial_index", 0),
                 }
                 for unit in packet.units
             ],
@@ -203,21 +303,22 @@ class FailureEventEvolutionTrigger(EvolutionTriggerModule):
 
 
 class ReflectionMemoryEvolution(MemoryEvolutionModule):
-    """Append reflection records into a dedicated reflection memory layer."""
+    """Append trial-level reflections into the bounded long-term memory layer."""
 
     spec = ModuleSpec(
         name="reflection_memory_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "evolution_decisions", "observation.metadata"),
         output_guarantees=("trace.memory_evolution.effects",),
         side_effects=("modify_store", "append_records"),
     )
 
-    def __init__(self, *, target_layer: str = DEFAULT_REFLECTION_LAYER, window_size: int = 4) -> None:
-        if window_size <= 0:
-            raise ValueError("ReflectionMemoryEvolution requires window_size > 0.")
+    def __init__(self, *, target_layer: str = DEFAULT_REFLECTION_LAYER, memory_size: int = DEFAULT_MEMORY_SIZE, window_size: int | None = None) -> None:
+        effective_size = memory_size if window_size is None else window_size
+        if effective_size <= 0:
+            raise ValueError("ReflectionMemoryEvolution requires memory_size > 0.")
         self.target_layer = target_layer
-        self.window_size = window_size
+        self.memory_size = effective_size
 
     def validate_store(self, store: MemoryStore) -> None:
         if not store.has_layer(self.target_layer):
@@ -239,64 +340,220 @@ class ReflectionMemoryEvolution(MemoryEvolutionModule):
 
         _ensure_reflection_layer(store, self.target_layer)
 
+        question = _question_from_payload(packet.observation.metadata)
+        scratchpad = _scratchpad_from_payload(packet.observation.metadata)
+        evaluator_feedback = _feedback_from_payload(packet.observation.metadata)
+        prior_reflections = [record.text for record in store.iter_records(self.target_layer)]
+
         active_unit_ids: list[str] = []
         record_ids: list[str] = []
         effects: list[dict[str, Any]] = []
         for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True):
             if not decision:
                 continue
-
-            controls = _reflexion_controls(packet.observation)
-            reason = str(controls.get("event") or controls.get("feedback") or "failure").strip()
             active_unit_ids.append(unit.unit_id)
+            reflection_text = _reflection_text(
+                question=question,
+                scratchpad=scratchpad,
+                evaluator_feedback=evaluator_feedback,
+                prior_reflections=prior_reflections,
+            )
             reflection_unit = MemoryUnit(
-                text=_reflection_text(packet.observation, unit, reason=reason),
+                text=reflection_text,
                 unit_type="reflection",
                 metadata={
                     **unit.metadata,
                     "reflexion": {
                         "triggered": True,
-                        "event": str(controls.get("event") or "failure").strip() or "failure",
-                        "reason": reason,
-                        "source_observation_id": packet.observation.observation_id,
+                        "question": question,
+                        "trial_index": _reflexion_controls(packet.observation.metadata).get("trial_index", 0),
+                        "evaluator_feedback": evaluator_feedback,
                         "source_unit_id": unit.unit_id,
                         "source_layer": placement.target_layer,
                         "target_layer": self.target_layer,
-                        "window_size": self.window_size,
+                        "memory_size": self.memory_size,
+                        "last_attempt": scratchpad,
                     },
                 },
             )
             sequence_id = store.next_sequence_id()
             record = MemoryRecord.from_unit(reflection_unit, layer=self.target_layer, sequence_id=sequence_id)
             store.append(record)
+            prior_reflections.append(record.text)
             record_ids.append(record.record_id)
             effects.append(
                 {
                     "effect_type": "reflection_append",
                     "unit_id": unit.unit_id,
                     "record_id": record.record_id,
+                    "question": question,
                     "target_layer": self.target_layer,
                 }
             )
 
-        removed_record_ids = _trim_layer_to_window(store, self.target_layer, window_size=self.window_size)
+        removed_record_ids = _trim_layer_to_window(store, self.target_layer, memory_size=self.memory_size)
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
             "decision_source": "evolution_decisions",
+            "question": question,
             "active_unit_ids": active_unit_ids,
             "record_ids": record_ids,
             "effects": effects,
-            "window_size": self.window_size,
+            "memory_size": self.memory_size,
             "target_layer": self.target_layer,
             "pruned_record_ids": removed_record_ids,
             "retained_record_ids": [record.record_id for record in store.layers[self.target_layer]],
+            "trial_trace": scratchpad,
         }
         return replace(packet, trace=trace), store
 
 
-class ReflexionPrependedReadout(ReadoutModule):
-    """Render reflection memory before the next task context."""
+class ReflexionMemoryRetrieval(RetrievalModule):
+    """Read the bounded reflection buffer directly, without query search by default."""
+
+    spec = ModuleSpec(
+        name="reflexion_memory_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(self, *, reflection_layer: str = DEFAULT_REFLECTION_LAYER, memory_size: int = DEFAULT_MEMORY_SIZE) -> None:
+        if memory_size <= 0:
+            raise ValueError("ReflexionMemoryRetrieval requires memory_size > 0.")
+        self.reflection_layer = reflection_layer
+        self.memory_size = memory_size
+
+    def validate_store(self, store: MemoryStore) -> None:
+        if not store.has_layer(self.reflection_layer):
+            raise IncompatibleCompositionError(
+                f"ReflexionMemoryRetrieval requires declared layer {self.reflection_layer!r}."
+            )
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("ReflexionMemoryRetrieval requires packet.query.")
+
+        reflections = list(reversed(store.iter_records(self.reflection_layer)))[: self.memory_size]
+        items = list(reversed(reflections))
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "strategy": "memory_buffer",
+            }
+            for rank, record in enumerate(items, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "reflection_layer": self.reflection_layer,
+                "memory_size": self.memory_size,
+                "candidate_count": len(store.iter_records(self.reflection_layer)),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
+class ReflexionContextReadout(ReadoutModule):
+    """Construct the next-trial memory context according to Reflexion strategy."""
+
+    spec = ModuleSpec(
+        name="reflexion_context_readout",
+        slot="readout",
+        input_requirements=("query.text", "retrieved.items"),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(
+        self,
+        *,
+        reflection_layer: str = DEFAULT_REFLECTION_LAYER,
+        default_strategy: str = _STRATEGY_REFLEXION,
+        memory_size: int = DEFAULT_MEMORY_SIZE,
+    ) -> None:
+        if memory_size <= 0:
+            raise ValueError("ReflexionContextReadout requires memory_size > 0.")
+        if default_strategy not in _VALID_STRATEGIES:
+            raise ValueError(f"ReflexionContextReadout requires strategy in {sorted(_VALID_STRATEGIES)}.")
+        self.reflection_layer = reflection_layer
+        self.default_strategy = default_strategy
+        self.memory_size = memory_size
+
+    def validate_store(self, store: MemoryStore) -> None:
+        if not store.has_layer(self.reflection_layer):
+            raise IncompatibleCompositionError(
+                f"ReflexionContextReadout requires declared layer {self.reflection_layer!r}."
+            )
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("ReflexionContextReadout requires packet.query.")
+
+        strategy = _strategy_from_query(packet.query, self.default_strategy)
+        last_attempt = _last_attempt_from_query(packet.query)
+        reflections = []
+        source_ids: list[str] = []
+        if packet.retrieved is not None:
+            reflections = [
+                record for record in packet.retrieved.items if record.layer == self.reflection_layer
+            ][: self.memory_size]
+            if strategy in {_STRATEGY_REFLEXION, _STRATEGY_LAST_ATTEMPT_AND_REFLEXION}:
+                source_ids = [record.record_id for record in reflections]
+
+        text = self._build_context(
+            strategy=strategy,
+            question=packet.query.text,
+            last_attempt=last_attempt,
+            reflections=[record.text for record in reflections],
+        )
+        readout = Readout(
+            text=text,
+            source_ids=source_ids,
+            metadata={
+                "strategy": strategy,
+                "reflection_count": len(reflections),
+                "last_attempt_present": bool(last_attempt),
+                "reflection_layer": self.reflection_layer,
+            },
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "strategy": strategy,
+            "source_ids": source_ids,
+        }
+        return replace(packet, readout=readout, trace=trace), store
+
+    def _build_context(
+        self,
+        *,
+        strategy: str,
+        question: str,
+        last_attempt: str,
+        reflections: list[str],
+    ) -> str:
+        sections: list[str] = []
+        if strategy == _STRATEGY_NONE:
+            return ""
+
+        if strategy in {_STRATEGY_LAST_ATTEMPT, _STRATEGY_LAST_ATTEMPT_AND_REFLEXION} and last_attempt:
+            sections.append(_format_last_attempt(question, last_attempt))
+
+        if strategy in {_STRATEGY_REFLEXION, _STRATEGY_LAST_ATTEMPT_AND_REFLEXION} and reflections:
+            header = REFLECTION_AFTER_LAST_TRIAL_HEADER if sections else REFLECTION_HEADER
+            sections.append(_format_reflections(reflections, header=header))
+
+        return "\n\n".join(section for section in sections if section).strip()
+
+
+class ReflexionPrependedReadout(ReflexionContextReadout):
+    """Backward-compatible alias for the older readout class name."""
 
     spec = ModuleSpec(
         name="reflexion_prepended_readout",
@@ -309,97 +566,46 @@ class ReflexionPrependedReadout(ReadoutModule):
         self,
         *,
         reflection_layer: str = DEFAULT_REFLECTION_LAYER,
-        top_k: int = 4,
-        header: str = "Reflection memory",
-        task_label: str = "Task",
+        top_k: int = DEFAULT_MEMORY_SIZE,
+        default_strategy: str = _STRATEGY_REFLEXION,
     ) -> None:
-        if top_k <= 0:
-            raise ValueError("ReflexionPrependedReadout requires top_k > 0.")
-        self.reflection_layer = reflection_layer
-        self.top_k = top_k
-        self.header = header
-        self.task_label = task_label
-
-    def validate_store(self, store: MemoryStore) -> None:
-        if not store.has_layer(self.reflection_layer):
-            raise IncompatibleCompositionError(
-                f"ReflexionPrependedReadout requires declared layer {self.reflection_layer!r}."
-            )
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.query is None:
-            raise ValueError("ReflexionPrependedReadout requires packet.query.")
-
-        reflections = self._select_reflections(packet, store)
-        source_ids = [record.record_id for record in reflections]
-
-        if reflections:
-            lines = [self.header, *[f"- {record.text}" for record in reflections], "", f"{self.task_label}: {packet.query.text}"]
-            text = "\n".join(lines)
-        else:
-            text = f"{self.task_label}: {packet.query.text}"
-
-        readout = Readout(
-            text=text,
-            source_ids=source_ids,
-            metadata={
-                "reflection_count": len(reflections),
-                "reflection_layer": self.reflection_layer,
-                "prepend_order": source_ids,
-            },
+        super().__init__(
+            reflection_layer=reflection_layer,
+            default_strategy=default_strategy,
+            memory_size=top_k,
         )
-        trace = copy_trace(packet)
-        trace["readout"] = {
-            "module": self.spec.name,
-            "source_ids": source_ids,
-            "prepended_reflection_count": len(reflections),
-        }
-        return replace(packet, readout=readout, trace=trace), store
-
-    def _select_reflections(self, packet: Packet, store: MemoryStore) -> list[MemoryRecord]:
-        if packet.retrieved is not None:
-            retrieved = [record for record in packet.retrieved.items if record.layer == self.reflection_layer]
-            if retrieved:
-                return retrieved[: self.top_k]
-
-        records = store.iter_records(self.reflection_layer)
-        if not records:
-            return []
-
-        reranked = get_classic_runtime().rerank(
-            query=packet.query.text,
-            candidates=[
-                {
-                    "id": record.record_id,
-                    "text": record.text,
-                    "layer": record.layer,
-                }
-                for record in reversed(records)
-            ],
-            task="Select the most relevant Reflexion memories for the next attempt",
-            top_k=self.top_k,
-        )
-        if not reranked:
-            return list(reversed(records))[: self.top_k]
-        by_id = {record.record_id: record for record in records}
-        return [by_id[item["id"]] for item in reranked if item["id"] in by_id]
 
 
 def build_reflexion_pipeline(
     *,
     store: MemoryStore | None = None,
-    episode_layer: str = DEFAULT_EPISODE_LAYER,
     reflection_layer: str = DEFAULT_REFLECTION_LAYER,
-    reflection_window: int = 4,
-    reflection_top_k: int = 4,
+    trial_layer: str = DEFAULT_TRIAL_LAYER,
+    strategy: str = _STRATEGY_REFLEXION,
+    memory_size: int = DEFAULT_MEMORY_SIZE,
+    reflection_window: int | None = None,
+    reflection_top_k: int | None = None,
 ) -> MemoryPipeline:
-    """Build a small Reflexion-style pipeline around the existing stage-1 DSL."""
+    """Build the Reflexion memory subsystem.
+
+    Compatibility kwargs ``reflection_window`` and ``reflection_top_k`` map to
+    ``memory_size`` when provided.
+    """
+
+    effective_size = memory_size
+    if reflection_window is not None:
+        effective_size = reflection_window
+    if reflection_top_k is not None:
+        effective_size = reflection_top_k
+    if effective_size <= 0:
+        raise ValueError("build_reflexion_pipeline requires memory_size > 0.")
+    if strategy not in _VALID_STRATEGIES:
+        raise ValueError(f"build_reflexion_pipeline requires strategy in {sorted(_VALID_STRATEGIES)}.")
 
     if store is None:
         store = MemoryStore(
             topology=StoreTopology.from_layers(
                 [
-                    StoreLayerSpec(name=episode_layer, theme="working", indices=("temporal", "keyword")),
                     StoreLayerSpec(
                         name=reflection_layer,
                         theme="semantic",
@@ -410,59 +616,34 @@ def build_reflexion_pipeline(
             )
         )
     else:
-        _ensure_reflection_layer(store, episode_layer, theme="working")
         _ensure_reflection_layer(store, reflection_layer, theme="semantic")
 
     return MemoryPipeline(
         store=store,
         unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "tags", "keywords")),
+        representation=BasicRepresentation(elements=("text", "keywords", "tags")),
         write_trigger=AlwaysWriteTrigger(),
-        organization=AppendOrganization(target_layer=episode_layer),
-        evolution_trigger=FailureEventEvolutionTrigger(),
-        memory_evolution=ReflectionMemoryEvolution(target_layer=reflection_layer, window_size=reflection_window),
-        retrieval=RecencyRetrieval(top_k=reflection_top_k, layer=reflection_layer),
-        readout=ReflexionPrependedReadout(reflection_layer=reflection_layer, top_k=reflection_top_k),
+        organization=ReflexionTrialOrganization(target_layer=trial_layer),
+        evolution_trigger=TrialFailureEvolutionTrigger(),
+        memory_evolution=ReflectionMemoryEvolution(target_layer=reflection_layer, memory_size=effective_size),
+        retrieval=ReflexionMemoryRetrieval(reflection_layer=reflection_layer, memory_size=effective_size),
+        readout=ReflexionContextReadout(
+            reflection_layer=reflection_layer,
+            default_strategy=strategy,
+            memory_size=effective_size,
+        ),
     )
 
 
-class ReflexionWorkstream:
-    """Convenience wrapper for the Reflexion example workflow."""
-
-    def __init__(
-        self,
-        *,
-        store: MemoryStore | None = None,
-        episode_layer: str = DEFAULT_EPISODE_LAYER,
-        reflection_layer: str = DEFAULT_REFLECTION_LAYER,
-        reflection_window: int = 4,
-        reflection_top_k: int = 4,
-    ) -> None:
-        self.pipeline = build_reflexion_pipeline(
-            store=store,
-            episode_layer=episode_layer,
-            reflection_layer=reflection_layer,
-            reflection_window=reflection_window,
-            reflection_top_k=reflection_top_k,
-        )
-
-    @property
-    def store(self) -> MemoryStore:
-        return self.pipeline.store
-
-    def ingest(self, observation: Observation) -> Packet:
-        return self.pipeline.ingest(observation)
-
-    def recall(self, query: Query) -> Readout:
-        return self.pipeline.recall(query)
-
-
 __all__ = (
-    "DEFAULT_EPISODE_LAYER",
+    "DEFAULT_MEMORY_SIZE",
     "DEFAULT_REFLECTION_LAYER",
-    "FailureEventEvolutionTrigger",
+    "DEFAULT_TRIAL_LAYER",
     "ReflectionMemoryEvolution",
+    "ReflexionContextReadout",
+    "ReflexionMemoryRetrieval",
     "ReflexionPrependedReadout",
-    "ReflexionWorkstream",
+    "ReflexionTrialOrganization",
+    "TrialFailureEvolutionTrigger",
     "build_reflexion_pipeline",
 )

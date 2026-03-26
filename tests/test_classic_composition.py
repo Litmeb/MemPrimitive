@@ -5,7 +5,7 @@ import pytest
 from memprimitive import IncompatibleCompositionError, MemoryPipeline
 from memprimitive.classic_modules.amem import AMEMGraphHopRetrieval, AMEMGraphOrganization
 from memprimitive.classic_modules.generative_agents import GenerativeAgentsMemoryEvolution, GenerativeAgentsRetrieval
-from memprimitive.classic_modules.memgpt import MemGPTCompactionEvolution, MemGPTEvolutionTrigger, MemGPTOrganization
+from memprimitive.classic_modules.memgpt import MEMGPT_CORE_LAYER, MEMGPT_RECALL_LAYER, MemGPTKeyedUpsertOrganization, MemGPTPagedRetrieval
 from memprimitive.classic_modules.memorybank import MemoryBankEvolution, MemoryBankEvolutionTrigger
 from memprimitive.classic_modules.reflexion import ReflectionMemoryEvolution, ReflexionPrependedReadout
 from memprimitive.classic_modules.scm import SCMControlledRetrieval, SCMEntityProfileUpsert
@@ -66,21 +66,23 @@ def test_memgpt_requires_declared_budget_layers() -> None:
     store = MemoryStore(
         topology=StoreTopology.from_layers(
             [
-                StoreLayerSpec(name="main_context", indices=("temporal", "keyword")),
-                StoreLayerSpec(name="archival", indices=("keyword",)),
+                StoreLayerSpec(name="working_memory", indices=("temporal", "keyword")),
+                StoreLayerSpec(name="conversation_queue", indices=("temporal", "keyword")),
             ]
         )
     )
 
-    with pytest.raises(IncompatibleCompositionError, match="recall"):
-        MemoryPipeline(store=store, organization=MemGPTOrganization())
-
-    with pytest.raises(IncompatibleCompositionError, match="recall"):
+    with pytest.raises(IncompatibleCompositionError, match=MEMGPT_CORE_LAYER):
         MemoryPipeline(
             store=store,
-            evolution_trigger=MemGPTEvolutionTrigger(main_context_layer="main_context"),
-            memory_evolution=MemGPTCompactionEvolution(),
+            organization=MemGPTKeyedUpsertOrganization(
+                target_layer=MEMGPT_CORE_LAYER,
+                key_name="memgpt_key",
+            ),
         )
+
+    with pytest.raises(IncompatibleCompositionError, match=MEMGPT_RECALL_LAYER):
+        MemoryPipeline(store=store, retrieval=MemGPTPagedRetrieval(target_layer=MEMGPT_RECALL_LAYER, tool_name="conversation_search"))
 
 
 def test_generative_agents_requires_declared_reflection_layer() -> None:
