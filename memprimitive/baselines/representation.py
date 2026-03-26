@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
+from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
@@ -71,21 +73,7 @@ _STOPWORDS: Final[frozenset[str]] = frozenset(
         "your",
     }
 )
-
-
-def _load_local_env() -> dict[str, str]:
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    values: dict[str, str] = {}
-    if not env_path.exists():
-        return values
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
-
+_MEMPRIMITIVE_ENV_PATH: Final[Path] = Path(__file__).resolve().parents[1] / ".env"
 
 class BasicRepresentation(RepresentationModule):
     """Build a configurable representation-element set for each unit.
@@ -118,7 +106,8 @@ class BasicRepresentation(RepresentationModule):
         base_url: str | None = None,
         model: str | None = None,
     ) -> None:
-        env = _load_local_env()
+        load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
+        env = os.environ
         normalized = tuple(dict.fromkeys(elements))
         unsupported = [element for element in normalized if element not in _VALID_ELEMENTS]
         if unsupported:

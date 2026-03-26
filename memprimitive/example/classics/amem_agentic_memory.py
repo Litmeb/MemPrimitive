@@ -1,4 +1,4 @@
-"""A-MEM — Agentic Memory (Xu et al., 2025) — motif sketch.
+"""A-MEM - Agentic Memory (Xu et al., 2025) - graph-memory sketch.
 
 From the repo root (recommended)::
 
@@ -17,42 +17,16 @@ from pathlib import Path
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
-from memprimitive.baselines import (
-    AlwaysWriteTrigger,
-    BasicRepresentation,
-    ConcatenateReadout,
-    EmbeddingSimilarityRetrieval,
-    GraphAppendOrganization,
-    PassThroughUnitFormation,
-)
+from memprimitive import Observation, Query
+from memprimitive.classic_modules.amem import AMEMConfig, build_amem_pipeline
 
 
 def main() -> None:
-    topology = StoreTopology.from_layers(
-        [
-            StoreLayerSpec(
-                name="memory_graph",
-                theme="knowledge_graph",
-                shape="Graph",
-                indices=("graph", "entity", "vector", "tag"),
-            ),
-        ]
-    )
-    store = MemoryStore(topology=topology)
-
-    pipeline = MemoryPipeline(
-        store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "tags", "entities", "triple")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=GraphAppendOrganization(target_layer="memory_graph"),
-        retrieval=EmbeddingSimilarityRetrieval(top_k=10, layer="memory_graph"),
-        readout=ConcatenateReadout(separator="\n"),
-    )
-
-    pipeline.ingest(Observation(text="The agent prefers graph-structured episodic notes.", source="dialogue"))
-    readout = pipeline.recall(Query(text="What structure does the agent prefer?"))
+    pipeline = build_amem_pipeline(config=AMEMConfig(top_k=5, max_hops=2))
+    pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+    pipeline.ingest(Observation(text="Tea routines improve focus.", source="dialogue"))
+    pipeline.ingest(Observation(text="Focus helps graph memory systems.", source="dialogue"))
+    readout = pipeline.recall(Query(text="Alice"))
 
     print(readout.text)
     print("source record ids:", readout.source_ids)

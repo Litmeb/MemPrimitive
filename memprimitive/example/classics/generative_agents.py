@@ -1,4 +1,4 @@
-"""Generative Agents (Park et al., 2023) — motif sketch.
+"""Generative Agents (Park et al., 2023) motif sketch.
 
 From the repo root (recommended)::
 
@@ -17,40 +17,22 @@ from pathlib import Path
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
-from memprimitive.baselines import (
-    AlwaysWriteTrigger,
-    AppendOrganization,
-    BasicRepresentation,
-    ConcatenateReadout,
-    EmbeddingSimilarityRetrieval,
-    PassThroughUnitFormation,
-)
+from memprimitive import Observation, Query
+from memprimitive.classic_modules.generative_agents import build_generative_agents_pipeline
 
 
 def main() -> None:
-    topology = StoreTopology.from_layers(
-        [
-            StoreLayerSpec(name="observation_stream", theme="working", indices=("temporal", "keyword")),
-            StoreLayerSpec(name="reflections", theme="semantic", indices=("temporal", "keyword", "vector")),
-        ]
-    )
-    store = MemoryStore(topology=topology)
-
-    pipeline = MemoryPipeline(
-        store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(
-            elements=("text", "embedding", "tags", "keywords", "summary", "entities", "triple"),
-        ),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=AppendOrganization(target_layer="observation_stream"),
-        retrieval=EmbeddingSimilarityRetrieval(top_k=50, layer="observation_stream"),
-        readout=ConcatenateReadout(separator="\n"),
+    pipeline = build_generative_agents_pipeline(
+        top_k=5,
+        reflection_threshold=0.75,
+        reflection_batch_size=2,
     )
 
-    pipeline.ingest(Observation(text="The user prefers concise technical writing.", source="dialogue"))
-    readout = pipeline.recall(Query(text="What does the user prefer?"))
+    pipeline.ingest(Observation(text="Alice prefers tea when writing code.", source="dialogue"))
+    pipeline.ingest(Observation(text="Alice wants concise notes for review meetings.", source="dialogue"))
+    pipeline.ingest(Observation(text="The desk lamp is blue.", source="notes"))
+
+    readout = pipeline.recall(Query(text="What does Alice care about?"))
 
     print(readout.text)
     print("source record ids:", readout.source_ids)

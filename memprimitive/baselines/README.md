@@ -97,7 +97,7 @@ For each enabled element, the module updates `MemoryUnit` fields and/or `unit.me
 | `source_type` | `metadata["representation"]["source_type"]` | From `MemoryUnit.metadata["source"]` when set. |
 | `description` | `MemoryUnit.description` | If `unit.description` already set, kept. Else requires `api_key`, `base_url`, and `model` (constructor or `MEMPRIMITIVE_*`); calls OpenAI chat completions for a short description. |
 
-Constructor env fallbacks (via `.env` next to the package): `MEMPRIMITIVE_EMBEDDING_MODEL`, `MEMPRIMITIVE_API_KEY`, `MEMPRIMITIVE_BASE_URL`, `MEMPRIMITIVE_MODEL`.
+Constructor env fallbacks (via `memprimitive/.env`): `MEMPRIMITIVE_EMBEDDING_MODEL`, `MEMPRIMITIVE_API_KEY`, `MEMPRIMITIVE_BASE_URL`, `MEMPRIMITIVE_MODEL`.
 
 `KeywordRepresentation` is a thin subclass: default `elements=("text", "keywords", "tags")` (no `embedding` unless you pass a custom `elements` tuple). Its `ModuleSpec.output_guarantees` omit explicit embedding fields because the default path does not require them.
 

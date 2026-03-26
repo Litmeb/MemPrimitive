@@ -1,4 +1,4 @@
-"""Reflexion (Shinn et al., 2023) — motif sketch.
+"""Reflexion (Shinn et al., 2023) - motif sketch.
 
 From the repo root (recommended)::
 
@@ -17,45 +17,38 @@ from pathlib import Path
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
-from memprimitive.baselines import (
-    AlwaysWriteTrigger,
-    AppendOrganization,
-    BasicRepresentation,
-    ConcatenateReadout,
-    PassThroughUnitFormation,
-    RecencyRetrieval,
-)
+from memprimitive import Observation, Query
+from memprimitive.classic_modules.reflexion import ReflexionWorkstream
 
 
 def main() -> None:
-    topology = StoreTopology.from_layers(
-        [
-            StoreLayerSpec(
-                name="reflections",
-                theme="working",
-                capacity="sliding_window",
-                indices=("temporal",),
-            ),
-        ]
-    )
-    store = MemoryStore(topology=topology)
+    workflow = ReflexionWorkstream(reflection_window=2, reflection_top_k=2)
 
-    pipeline = MemoryPipeline(
-        store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "summary")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=AppendOrganization(target_layer="reflections"),
-        retrieval=RecencyRetrieval(top_k=100, layer="reflections"),
-        readout=ConcatenateReadout(separator="\n"),
+    workflow.ingest(
+        Observation(
+            text="Task failed: missing edge case in parser.",
+            source="failure_log",
+            metadata={
+                "reflexion": {
+                    "event": "failure",
+                    "task": "Parse the input stream",
+                    "feedback": "missing edge case in parser",
+                }
+            },
+        )
     )
-
-    pipeline.ingest(Observation(text="Task failed: missing edge case in parser.", source="failure_log"))
-    readout = pipeline.recall(Query(text="Recent reflections"))
+    workflow.ingest(
+        Observation(
+            text="Task solved cleanly on the second attempt.",
+            source="dialogue",
+            metadata={"reflexion": {"event": "success", "task": "Parse the input stream"}},
+        )
+    )
+    readout = workflow.recall(Query(text="Parse the input stream"))
 
     print(readout.text)
     print("source record ids:", readout.source_ids)
+    print("reflection count:", workflow.store.count("reflections"))
 
 
 if __name__ == "__main__":

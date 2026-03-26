@@ -1,4 +1,4 @@
-"""MemGPT (Packer et al., 2023) — motif sketch.
+"""MemGPT (Packer et al., 2023) - motif sketch.
 
 From the repo root (recommended)::
 
@@ -17,61 +17,42 @@ from pathlib import Path
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import (
-    DispatchOrganization,
-    MemoryPipeline,
-    MemoryStore,
-    Observation,
-    Query,
-    StoreLayerSpec,
-    StoreTopology,
-)
-from memprimitive.baselines import (
-    AlwaysWriteTrigger,
-    AppendOrganization,
-    BasicRepresentation,
-    ConcatenateReadout,
-    LayerAwareRetrieval,
-    PassThroughUnitFormation,
-    RecencyRetrieval,
+from memprimitive import Query
+from memprimitive.classic_modules.memgpt import (
+    MEMGPT_ARCHIVAL_LAYER,
+    MEMGPT_MAIN_LAYER,
+    MEMGPT_RECALL_LAYER,
+    build_memgpt_pipeline,
+    memgpt_observation,
 )
 
 
 def main() -> None:
-    topology = StoreTopology.from_layers(
-        [
-            StoreLayerSpec(name="main_context", theme="working", indices=("temporal", "keyword")),
-            StoreLayerSpec(name="archival", theme="semantic", indices=("vector", "keyword", "temporal")),
-            StoreLayerSpec(name="recall", theme="semantic", indices=("temporal",)),
-        ]
-    )
-    store = MemoryStore(topology=topology)
+    pipeline = build_memgpt_pipeline(top_k=3, main_context_budget=1, recall_budget=1, readout_item_budget=3)
 
-    pipeline = MemoryPipeline(
-        store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "summary", "keywords")),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=DispatchOrganization(
-            (
-                AppendOrganization(target_layer="main_context"),
-                AppendOrganization(target_layer="archival"),
-            ),
-            primary_index=0,
-        ),
-        retrieval=LayerAwareRetrieval(
-            default_retriever=RecencyRetrieval(top_k=10, layer="archival"),
-            retriever_by_layer={"archival": RecencyRetrieval(top_k=10, layer="archival")},
-            top_k=10,
-        ),
-        readout=ConcatenateReadout(separator="\n\n"),
+    pipeline.ingest(memgpt_observation("Pinned note: review memory architecture docs.", source="dialogue"))
+    pipeline.ingest(
+        memgpt_observation(
+            "Archive this note about the release checklist.",
+            source="dialogue",
+            target_layer=MEMGPT_ARCHIVAL_LAYER,
+            tool="memory_save",
+        )
     )
+    pipeline.ingest(memgpt_observation("The user prefers concise status updates.", source="dialogue"))
 
-    pipeline.ingest(Observation(text="Pinned note: review memory architecture docs.", source="dialogue"))
-    readout = pipeline.recall(Query(text="What should we review?"))
+    readout = pipeline.recall(Query(text="What should we remember?"))
 
     print(readout.text)
     print("source record ids:", readout.source_ids)
+    print(
+        "store counts:",
+        {
+            MEMGPT_MAIN_LAYER: pipeline.store.count(MEMGPT_MAIN_LAYER),
+            MEMGPT_ARCHIVAL_LAYER: pipeline.store.count(MEMGPT_ARCHIVAL_LAYER),
+            MEMGPT_RECALL_LAYER: pipeline.store.count(MEMGPT_RECALL_LAYER),
+        },
+    )
 
 
 if __name__ == "__main__":

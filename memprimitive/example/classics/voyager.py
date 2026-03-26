@@ -1,4 +1,4 @@
-"""Voyager (Wang et al., 2023) — motif sketch.
+"""Voyager (Wang et al., 2023) - motif sketch.
 
 From the repo root (recommended)::
 
@@ -18,13 +18,12 @@ if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
-from memprimitive.baselines import (
-    AlwaysWriteTrigger,
-    BasicRepresentation,
-    ConcatenateReadout,
-    GraphAppendOrganization,
-    PassThroughUnitFormation,
-    TagRetrieval,
+from memprimitive.baselines import AlwaysWriteTrigger, ConcatenateReadout
+from memprimitive.classic_modules.voyager import (
+    CodeWithDescriptionRepresentation,
+    MixedSkillRetrieval,
+    SkillExtractor,
+    UpsertByKeySkillLibrary,
 )
 
 
@@ -33,9 +32,8 @@ def main() -> None:
         [
             StoreLayerSpec(
                 name="skill_library",
-                theme="knowledge_graph",
-                shape="Graph",
-                indices=("graph", "entity", "tag", "vector"),
+                theme="skill",
+                indices=("keyword", "tag", "vector"),
             ),
         ]
     )
@@ -43,19 +41,45 @@ def main() -> None:
 
     pipeline = MemoryPipeline(
         store=store,
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "tags", "keywords", "description")),
+        unit_formation=SkillExtractor(),
+        representation=CodeWithDescriptionRepresentation(),
         write_trigger=AlwaysWriteTrigger(),
-        organization=GraphAppendOrganization(target_layer="skill_library"),
-        retrieval=TagRetrieval(top_k=5, layer="skill_library"),
-        readout=ConcatenateReadout(separator="\n\n"),
+        organization=UpsertByKeySkillLibrary(target_layer="skill_library"),
+        retrieval=MixedSkillRetrieval(top_k=3, layer="skill_library"),
+        readout=ConcatenateReadout(separator="\n\n---\n\n"),
     )
 
-    pipeline.ingest(Observation(text="Skill: craft_planks — turns logs into planks at a bench.", source="skill"))
-    readout = pipeline.recall(Query(text="craft"))
+    pipeline.ingest(
+        Observation(
+            text=(
+                "Skill: craft_planks\n"
+                "Description: Turns logs into planks at a bench.\n\n"
+                "```python\n"
+                "def craft_planks(logs):\n"
+                "    return [log[:4] for log in logs]\n"
+                "```"
+            ),
+            source="skill",
+        )
+    )
+    pipeline.ingest(
+        Observation(
+            text=(
+                "Skill: craft_planks\n"
+                "Description: Turns logs into planks faster at a bench.\n\n"
+                "```python\n"
+                "def craft_planks(logs):\n"
+                "    return [log.strip()[:4] for log in logs]\n"
+                "```"
+            ),
+            source="skill_update",
+        )
+    )
+    readout = pipeline.recall(Query(text="craft planks"))
 
     print(readout.text)
     print("source record ids:", readout.source_ids)
+    print("stored skill count:", store.count("skill_library"))
 
 
 if __name__ == "__main__":
