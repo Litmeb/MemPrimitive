@@ -1235,6 +1235,121 @@ def test_trigger_family_new_components_compute_scores_and_gates() -> None:
     assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] >= 1.0
 
 
+def test_reflexion_style_trigger_family_signals_fire_for_failed_trial_feedback() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation
+    from memprimitive.baselines._trigger_family import (
+        FeedbackPresenceSignal,
+        FeedbackSchemaGate,
+        OutcomeCorrectnessSignal,
+        ThresholdPolicy,
+        WeightedSumScorer,
+    )
+    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="trial trace",
+                source="dialogue",
+                metadata={"reflexion": {"is_correct": False, "evaluator_feedback": "missing edge case"}},
+            )
+        ),
+        MemoryStore(),
+    )
+    trigger = compose_evolution_trigger(
+        name="reflexion_failed_trial_trigger",
+        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
+        scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
+        gate=FeedbackSchemaGate(),
+        policy=ThresholdPolicy(threshold=1.0),
+        input_requirements=("units", "observation"),
+    )
+
+    packet_out, _ = trigger.run(packet, store)
+
+    assert packet_out.evolution_decisions == [True]
+    per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
+    assert per_unit["signals"] == {"trial_failed": 1.0, "feedback_present": 1.0}
+    assert per_unit["gate"] is True
+    assert per_unit["score"] == pytest.approx(1.1)
+
+
+def test_reflexion_style_trigger_family_signals_do_not_fire_for_successful_trial() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation
+    from memprimitive.baselines._trigger_family import (
+        FeedbackPresenceSignal,
+        FeedbackSchemaGate,
+        OutcomeCorrectnessSignal,
+        ThresholdPolicy,
+        WeightedSumScorer,
+    )
+    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="trial trace",
+                source="dialogue",
+                metadata={"is_correct": True, "feedback": "answer matches expected output"},
+            )
+        ),
+        MemoryStore(),
+    )
+    trigger = compose_evolution_trigger(
+        name="reflexion_success_trial_trigger",
+        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
+        scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
+        gate=FeedbackSchemaGate(),
+        policy=ThresholdPolicy(threshold=1.0),
+        input_requirements=("units", "observation"),
+    )
+
+    packet_out, _ = trigger.run(packet, store)
+
+    assert packet_out.evolution_decisions == [False]
+    per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
+    assert per_unit["signals"] == {"trial_failed": 0.0, "feedback_present": 1.0}
+    assert per_unit["gate"] is True
+
+
+def test_feedback_schema_gate_blocks_when_outcome_and_feedback_schema_are_missing() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation
+    from memprimitive.baselines._trigger_family import (
+        FeedbackPresenceSignal,
+        FeedbackSchemaGate,
+        OutcomeCorrectnessSignal,
+        ThresholdPolicy,
+        WeightedSumScorer,
+    )
+    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="trial trace",
+                source="dialogue",
+                metadata={"note": "no outcome schema here"},
+            )
+        ),
+        MemoryStore(),
+    )
+    trigger = compose_evolution_trigger(
+        name="reflexion_schema_guarded_trigger",
+        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
+        scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
+        gate=FeedbackSchemaGate(),
+        policy=ThresholdPolicy(threshold=0.0),
+        input_requirements=("units", "observation"),
+    )
+
+    packet_out, _ = trigger.run(packet, store)
+
+    assert packet_out.evolution_decisions == [False]
+    per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
+    assert per_unit["signals"] == {"trial_failed": 0.0, "feedback_present": 0.0}
+    assert per_unit["gate"] is False
+
+
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
     from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
 

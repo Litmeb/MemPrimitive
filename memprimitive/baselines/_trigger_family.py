@@ -80,6 +80,65 @@ class DecisionPolicy(ABC):
         """Return the final decision for the unit."""
 
 
+def _trigger_controls(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Collect trigger-relevant control fields from top-level and nested metadata."""
+
+    controls: dict[str, Any] = {}
+    if not isinstance(payload, dict):
+        return controls
+
+    nested = payload.get("reflexion")
+    if isinstance(nested, dict):
+        controls.update(nested)
+
+    for key in ("is_correct", "success", "event", "feedback", "evaluator_feedback", "trial_index"):
+        if key in payload and key not in controls:
+            controls[key] = payload[key]
+    return controls
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    """Parse common bool-ish outcome values used by classic feedback payloads."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1", "success", "passed", "correct"}:
+            return True
+        if normalized in {"false", "no", "0", "failure", "failed", "incorrect"}:
+            return False
+    return None
+
+
+def _outcome_correctness_from_metadata(payload: dict[str, Any] | None) -> bool | None:
+    """Return parsed correctness when present; otherwise ``None``."""
+
+    controls = _trigger_controls(payload)
+    explicit = _coerce_bool(controls.get("is_correct"))
+    if explicit is not None:
+        return explicit
+    success = _coerce_bool(controls.get("success"))
+    if success is not None:
+        return success
+    event = str(controls.get("event", "")).strip().casefold()
+    if event in {"success", "passed", "ok"}:
+        return True
+    if event in {"failure", "failed", "error", "incorrect"}:
+        return False
+    return None
+
+
+def _feedback_present_in_metadata(payload: dict[str, Any] | None) -> bool:
+    """Return whether feedback text is present in supported trigger metadata."""
+
+    controls = _trigger_controls(payload)
+    value = controls.get("evaluator_feedback") or controls.get("feedback") or ""
+    return bool(str(value).strip())
+
+
 @dataclass(slots=True, frozen=True)
 class ConstantSignal(SignalProvider):
     """Emit a constant numeric signal under a fixed name."""
@@ -239,6 +298,43 @@ class QueryOverlapSignal(SignalProvider):
         query_tokens = {token for token in query.text.casefold().split() if token}
         unit_tokens = {token for token in unit.text.casefold().split() if token}
         return {self.signal_name: float(len(query_tokens & unit_tokens))}
+
+
+@dataclass(slots=True, frozen=True)
+class OutcomeCorrectnessSignal(SignalProvider):
+    """Emit ``1.0`` when the trial failed according to observation metadata."""
+
+    signal_name: str = "trial_failed"
+
+    @property
+    def name(self) -> str:
+        return f"outcome_correctness:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        observation = context.packet.observation
+        if observation is None:
+            raise ValueError("observation is required for OutcomeCorrectnessSignal.")
+        is_correct = _outcome_correctness_from_metadata(observation.metadata)
+        if is_correct is None:
+            return {self.signal_name: 0.0}
+        return {self.signal_name: 0.0 if is_correct else 1.0}
+
+
+@dataclass(slots=True, frozen=True)
+class FeedbackPresenceSignal(SignalProvider):
+    """Emit ``1.0`` when supported feedback text is present on the observation."""
+
+    signal_name: str = "feedback_present"
+
+    @property
+    def name(self) -> str:
+        return f"feedback_presence:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        observation = context.packet.observation
+        if observation is None:
+            raise ValueError("observation is required for FeedbackPresenceSignal.")
+        return {self.signal_name: 1.0 if _feedback_present_in_metadata(observation.metadata) else 0.0}
 
 
 @dataclass(slots=True, frozen=True)
@@ -434,6 +530,24 @@ class QueryPresentGate(Gate):
 
     def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
         return context.packet.query is not None
+
+
+@dataclass(slots=True, frozen=True)
+class FeedbackSchemaGate(Gate):
+    """Allow only when the observation exposes parseable outcome or feedback fields."""
+
+    @property
+    def name(self) -> str:
+        return "feedback_schema"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        observation = context.packet.observation
+        if observation is None:
+            return False
+        return (
+            _outcome_correctness_from_metadata(observation.metadata) is not None
+            or _feedback_present_in_metadata(observation.metadata)
+        )
 
 
 @dataclass(slots=True, frozen=True)

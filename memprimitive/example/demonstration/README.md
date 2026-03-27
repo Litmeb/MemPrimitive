@@ -1,6 +1,6 @@
 # `memprimitive.example.demonstration`
 
-可运行脚本，演示 `MemoryPipeline`、`MemoryStore` 与各类基元组合。建议在仓库根目录执行：
+可运行脚本，演示 `MemoryPipeline`、`MemoryStore` 与各类基础原语的组合方式。建议在仓库根目录执行：
 
 ```text
 python -m memprimitive.example.demonstration.<模块名>
@@ -8,9 +8,28 @@ python -m memprimitive.example.demonstration.<模块名>
 
 例如：`python -m memprimitive.example.demonstration.minimal_pipeline`
 
+## Trigger-family / Reflexion 风格演示
+
+这次新增了 3 个围绕 `OutcomeCorrectnessSignal`、`FeedbackPresenceSignal`、`FeedbackSchemaGate` 的完整 pipeline 示例：
+
 | 模块文件 | 说明 |
 |----------|------|
-| `minimal_pipeline.py` | 最小闭环：手工接线基元，`AlwaysWriteTrigger` + 按时间检索 + 拼接读出。 |
+| `reflexion_trigger_failed_trial.py` | 失败 trial：`trial_failed=1.0`，schema gate 放行，`evolution_decisions` 变成 `True`。 |
+| `reflexion_trigger_success_trial.py` | 成功 trial：有 feedback schema，但 `trial_failed=0.0`，因此不触发 evolution。 |
+| `reflexion_trigger_schema_gate.py` | 缺少可解析的 outcome / feedback schema：即使 policy threshold 很低，也会被 `FeedbackSchemaGate` 拦住。 |
+
+这些脚本都使用同一类组合方式：
+
+- `signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal())`
+- `scorer=WeightedSumScorer({"trial_failed": 1.0, "feedback_present": 0.1})`
+- `gate=FeedbackSchemaGate()`
+- `policy=ThresholdPolicy(...)`
+
+## 其他演示
+
+| 模块文件 | 说明 |
+|----------|------|
+| `minimal_pipeline.py` | 最小闭环：手工接线基础元，`AlwaysWriteTrigger` + 按时间检索 + 拼接读出。 |
 | `composed_triggers.py` | 用 `compose_write_trigger` / `compose_evolution_trigger` 组合信号、门控与策略，并打印 trace。 |
 | `topology_store.py` | 定义 `StoreTopology` / `MemoryStore` 多层拓扑，写入指定层并查询。 |
 | `embedding_similarity_retrieval.py` | 表示层含 `embedding`，检索使用 `EmbeddingSimilarityRetrieval`。 |
@@ -18,5 +37,5 @@ python -m memprimitive.example.demonstration.<模块名>
 | `graph_append_entity_retrieval.py` | 图层的 `GraphAppendOrganization`，`EntityRetrieval` 在图数据上召回。 |
 | `layer_aware_working_graph.py` | 分离的 working / 图写入管道，再经 `LayerAwareRetrieval` 合并检索与读出。 |
 | `conditional_layer_routing.py` | `ConditionalLayerOrganization` 按规则（实体、结构化三元组等）自动路由到不同存储层。 |
-| `dispatch_organization_recall.py` | `DispatchOrganization` 同时挂 `AppendOrganization` 与 `GraphAppendOrganization`，单管道内 ingest + 分层召回。 |
-| `dispatch_organization_trace.py` | 同上 dispatch 结构，并打印 `dispatch` 的 organization trace，便于调试扇出行为。 |
+| `dispatch_organization_recall.py` | `DispatchOrganization` 同时挂 `AppendOrganization` 与 `GraphAppendOrganization`，单管道做 ingest + 分层召回。 |
+| `dispatch_organization_trace.py` | 同上 dispatch 结构，并打印 `dispatch` 的 organization trace，便于调试分派行为。 |
