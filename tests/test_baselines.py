@@ -54,6 +54,18 @@ def _graph_vector_store() -> MemoryStore:
     )
 
 
+def _mixed_graph_vector_store() -> MemoryStore:
+    return MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "entity", "vector")),
+                StoreLayerSpec(name="other_graph", shape="Graph", indices=("graph", "entity", "vector")),
+            ]
+        )
+    )
+
+
 def test_unit_formation_returns_one_unit_with_provenance() -> None:
     from memprimitive.baselines import PassThroughUnitFormation
 
@@ -1821,6 +1833,45 @@ def test_neighbor_signals_return_zero_without_target_layer_context() -> None:
     assert TopNeighborSimilaritySignal().provide(context, 0) == {"top_neighbor_similarity": 0.0}
 
 
+def test_neighbor_signals_prefer_explicit_layer_over_packet_placement() -> None:
+    from memprimitive.baselines._trigger_family import NeighborCountSignal, TopNeighborSimilaritySignal, TriggerContext
+
+    store = _mixed_graph_vector_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-knowledge",
+            unit_id="unit-knowledge",
+            layer="knowledge_graph",
+            text="Alice knowledge graph note",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-other",
+            unit_id="unit-other",
+            layer="other_graph",
+            text="Alice other graph note",
+            timestamp="2026-03-27T00:01:00+00:00",
+            embedding=[0.0, 1.0],
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Alice mixed-layer graph note", unit_id="unit-new", embedding=[0.9, 0.1])],
+        placements=[Placement(unit_id="unit-new", target_layer="other_graph")],
+    )
+    context = TriggerContext(packet=packet, store=store, output_field="evolution_decisions", trace_key="evolution_trigger")
+
+    count_signals = NeighborCountSignal(top_k=3, layer="knowledge_graph").provide(context, 0)
+    similarity_signals = TopNeighborSimilaritySignal(top_k=3, layer="knowledge_graph").provide(context, 0)
+
+    assert count_signals == {"neighbor_count": 1.0}
+    assert similarity_signals["top_neighbor_similarity"] > 0.9
+    assert NeighborCountSignal(top_k=3).provide(context, 0) == {"neighbor_count": 1.0}
+    assert TopNeighborSimilaritySignal(top_k=3).provide(context, 0)["top_neighbor_similarity"] < 0.2
+
+
 def test_schema_present_gate_validates_required_unit_schema() -> None:
     from memprimitive.baselines._trigger_family import SchemaPresentGate, TriggerContext
 
@@ -1926,6 +1977,21 @@ def test_graph_layer_gate_checks_target_layer_shape() -> None:
         )
         is False
     )
+
+
+def test_vector_and_graph_readiness_gates_prefer_explicit_layer_over_packet_placement() -> None:
+    from memprimitive.baselines._trigger_family import GraphLayerGate, TriggerContext, VectorIndexReadyGate
+
+    packet = Packet(
+        units=[MemoryUnit(text="graph note", unit_id="unit-1", embedding=[1.0, 0.0])],
+        placements=[Placement(unit_id="unit-1", target_layer="default")],
+    )
+    context = TriggerContext(packet=packet, store=_graph_vector_store(), output_field="evolution_decisions", trace_key="evolution_trigger")
+
+    assert VectorIndexReadyGate().evaluate(context, 0, signals={}, score=0.0) is False
+    assert GraphLayerGate().evaluate(context, 0, signals={}, score=0.0) is False
+    assert VectorIndexReadyGate(layer="knowledge_graph").evaluate(context, 0, signals={}, score=0.0) is True
+    assert GraphLayerGate(layer="knowledge_graph").evaluate(context, 0, signals={}, score=0.0) is True
 
 
 def test_amem_style_trigger_family_components_gate_neighbor_trigger_on_vector_graph_readiness() -> None:
@@ -2038,6 +2104,47 @@ def test_neighbor_exists_evolution_trigger_blocks_without_neighbor_candidates() 
 
     assert packet_out.evolution_decisions == [False]
     assert packet_out.trace["evolution_trigger"]["gate"] == "all"
+
+
+def test_neighbor_exists_evolution_trigger_prefers_configured_target_layer_over_packet_placement() -> None:
+    from memprimitive.baselines import NeighborExistsEvolutionTrigger
+
+    store = _mixed_graph_vector_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-other",
+            unit_id="unit-other",
+            layer="other_graph",
+            text="Alice other graph note",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=[0.99, 0.01],
+            metadata={"graph": {"entities": ["Alice"], "links": []}},
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Alice mixed-layer note", unit_id="unit-new", embedding=[1.0, 0.0])],
+        placements=[Placement(unit_id="unit-new", target_layer="other_graph")],
+    )
+
+    packet_out, _ = NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(packet, store)
+    assert packet_out.evolution_decisions == [False]
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 0.0
+
+    store.append(
+        MemoryRecord(
+            record_id="rec-knowledge",
+            unit_id="unit-knowledge",
+            layer="knowledge_graph",
+            text="Alice knowledge graph note",
+            timestamp="2026-03-27T00:01:00+00:00",
+            embedding=[0.98, 0.02],
+            metadata={"graph": {"entities": ["Alice"], "links": []}},
+        )
+    )
+
+    packet_out, _ = NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(packet, store)
+    assert packet_out.evolution_decisions == [True]
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 1.0
 
 
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
