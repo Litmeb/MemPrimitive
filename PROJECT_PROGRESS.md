@@ -1,7 +1,5 @@
 # MemPrimitive Project Progress
 
-Last updated: 2026-03-27
-
 ## Purpose of this document
 
 This file is the durable project-memory document for agents working in this repository.
@@ -241,7 +239,6 @@ Validation status:
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:
 
-- TiM modules exist under [memprimitive/classic_modules/tim.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/classic_modules/tim.py).
 - Reflexion modules exist under [memprimitive/classic_modules/reflexion.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/classic_modules/reflexion.py).
 - MemGPT modules exist under [memprimitive/classic_modules/memgpt.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/classic_modules/memgpt.py).
 - A-MEM modules exist under [memprimitive/classic_modules/amem.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/classic_modules/amem.py).

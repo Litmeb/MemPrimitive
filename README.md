@@ -71,7 +71,7 @@ The baseline-first runnable demonstration for this stage is `python -m memprimit
 - 它如何检索与使用记忆
 - 它是否进行额外的压缩、反思或维护记忆
 
-这样，像 MemGPT、Reflexion、A-MEM、TiM 等经典系统，就可以被看作同一语言中的不同配置，而不是彼此孤立的方法名。
+这样，像 MemGPT、Reflexion、A-MEM 等经典系统，就可以被看作同一语言中的不同配置，而不是彼此孤立的方法名。
 
 ### 2. 可比较问题
 

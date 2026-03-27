@@ -1,8 +1,7 @@
 # Classic Module Search Compatibility
 
-This note summarizes the current search-time compatibility of the four classic module families that are actually present under `memprimitive/classic_modules/`:
+This note summarizes the current search-time compatibility of the classic module families that are actually present under `memprimitive/classic_modules/`:
 
-- `tim.py`
 - `reflexion.py`
 - `memgpt.py`
 - `amem.py`
@@ -27,31 +26,11 @@ So the right search regime is:
 
 | Family | Current slot coverage | Coupling level | Recommended search unit |
 | --- | --- | --- | --- |
-| `tim` | full 8-slot family | medium-high | mostly as a bundled family, or split into early-stage vs late-stage bundles |
 | `reflexion` | `organization`, `evolution_trigger`, `memory_evolution`, `retrieval`, `readout` | medium | as a back-half family that can hang off generic front-half pipelines |
 | `memgpt` | `organization`, `retrieval`, `readout` | high | only inside a MemGPT-shaped topology family |
 | `amem` | `representation`, `write_trigger`, `organization`, `evolution_trigger`, `memory_evolution`, `retrieval`, `readout` | very high | as a tightly bundled graph-memory family |
 
 ## Search Matrix
-
-### TiM
-
-| Slot | Module | Requires | Produces | Hidden semantic coupling | Search advice |
-| --- | --- | --- | --- | --- | --- |
-| `unit_formation` | `TimThoughtUnitFormation` | `observation.text` | `units`, `units.metadata.tim` | emits TiM-specific thought schema | safe to search, but strongest when paired with TiM downstream |
-| `representation` | `TimThoughtRepresentation` | `units` | `units.embedding`, `units.metadata.representation` | writes `tim.hash_index`, `tim.group_id`, `tim.summary` | should usually stay paired with TiM organization/evolution/retrieval |
-| `write_trigger` | `TimThoughtWriteTrigger` | `units` | `decisions` | expects `unit_type == "tim_thought"` and `metadata.tim.write` semantics | low risk if TiM unit formation stays upstream |
-| `organization` | `TimThoughtMemoryOrganization` | declared `thought_memory` layer | `placements` | rebuilds and depends on TiM bucket index | not a good free-mix module |
-| `evolution_trigger` | `TimBudgetEvolutionTrigger` | declared `thought_memory` layer, `units`, `placements` | `evolution_decisions` | assumes written units are TiM thoughts | keep with TiM organization/evolution |
-| `memory_evolution` | `TimThoughtMemoryEvolution` | declared `thought_memory` layer, aligned `units/placements/evolution_decisions` | evolution effects in trace | depends on TiM bucket/group structure inside store records | strongly bundled |
-| `retrieval` | `TimThoughtMemoryRetrieval` | declared `thought_memory` layer, `query.text` | `retrieved` | assumes records were bucketed by TiM representation/evolution | strongly bundled |
-| `readout` | `TimThoughtReadout` | `retrieved.items` | `readout` | weak coupling, mainly formats TiM retrieval trace | can be swapped more freely than TiM retrieval |
-
-TiM bundle recommendation:
-
-- safe bundle: `TimThoughtRepresentation + TimThoughtMemoryOrganization + TimBudgetEvolutionTrigger + TimThoughtMemoryEvolution + TimThoughtMemoryRetrieval`
-- semi-free front-half search: `TimThoughtUnitFormation + TimThoughtWriteTrigger`
-- do not search `TimThoughtMemoryRetrieval` as an isolated retriever over generic stores
 
 ### Reflexion
 
@@ -131,16 +110,15 @@ Examples already covered by tests:
 
 - Reflexion requires a declared reflection layer
 - MemGPT modules require the declared budget/search layers
-- TiM modules require the declared `thought_memory` layer
 - A-MEM modules require graph shape and graph index
 
 ## What the Current Runtime Cannot Validate Yet
 
 These are the main hidden couplings you still need to surface for robust search:
 
-- unit metadata namespaces such as `metadata.tim`, `metadata.amem`, `metadata.reflexion`
+- unit metadata namespaces such as `metadata.amem`, `metadata.reflexion`
 - required per-unit keys such as `memgpt_key`
-- record metadata shapes such as graph links, TiM bucket ids, A-MEM note payloads
+- record metadata shapes such as graph links and A-MEM note payloads
 - query metadata contracts such as MemGPT paging
 - family-specific trace contracts consumed downstream
 - whether a module is conceptually generic, family-specific, or "paper-faithful only"
@@ -158,7 +136,6 @@ Mostly baseline modules and a few weakly coupled readouts.
 Use this for:
 
 - Reflexion back-half family
-- TiM front-half or TiM readout-only variants
 
 ### 3. Strong family bundles
 
@@ -166,7 +143,6 @@ Use this for:
 
 - MemGPT family
 - A-MEM family
-- TiM retrieval/evolution family
 
 ## Suggested Explicit Constraints To Add
 
