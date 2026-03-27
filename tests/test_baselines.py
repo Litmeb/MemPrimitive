@@ -2147,6 +2147,21 @@ def test_neighbor_exists_evolution_trigger_prefers_configured_target_layer_over_
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 1.0
 
 
+def test_neighbor_exists_evolution_trigger_validates_placements_even_with_explicit_target_layer() -> None:
+    from memprimitive.baselines import NeighborExistsEvolutionTrigger
+
+    packet = Packet(
+        units=[MemoryUnit(text="Alice mixed-layer note", unit_id="unit-new", embedding=[1.0, 0.0])],
+        placements=[Placement(unit_id="unit-wrong", target_layer="other_graph")],
+    )
+
+    with pytest.raises(ValueError, match="placements must align"):
+        NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(
+            packet,
+            _mixed_graph_vector_store(),
+        )
+
+
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
     from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
 

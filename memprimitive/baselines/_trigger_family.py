@@ -246,15 +246,19 @@ def _resolve_target_layer(context: TriggerContext, unit_index: int, *, fallback_
 
     Explicitly configured trigger-family layers take precedence over placement
     targeting so composed triggers can intentionally inspect a different layer
-    than the unit's current placement when needed.
+    than the unit's current placement when needed. When placements are present,
+    they are still validated for alignment with ``packet.units`` even if the
+    explicit layer wins for routing.
     """
 
+    if context.packet.placements is not None:
+        _resolve_placement(context, unit_index)
     if fallback_layer is not None:
         normalized = str(fallback_layer).strip()
         if normalized:
             return normalized
     if context.packet.placements is not None:
-        return _resolve_placement(context, unit_index).target_layer
+        return context.packet.placements[unit_index].target_layer
     return None
 
 
