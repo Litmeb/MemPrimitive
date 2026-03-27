@@ -312,6 +312,7 @@ memory primitive 之间并非完全自由组合。
 
 - `memprimitive/example/demonstration/README.md`
   汇总可运行 demonstration，包括失败 / 成功 trial 的 Reflexion 风格触发、完整的 failed-trial -> reflection -> next-recall context Reflexion-like 闭环，以及 partition-ready local maintenance 的 TiM 风格触发演示。
+  这些 demonstration 默认应以最简洁的 `MemoryPipeline + module composition` 形式展示 DSL 用法，而不是依赖更高层的 workflow 封装。
 
 - `DSLIO.md`
   讨论 memory system 各模块的标准输入输出接口，明确系统中的共享对象、模块签名、副作用与能力约束。
