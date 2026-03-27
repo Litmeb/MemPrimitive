@@ -242,12 +242,19 @@ def _has_present_value(value: Any) -> bool:
 
 
 def _resolve_target_layer(context: TriggerContext, unit_index: int, *, fallback_layer: str | None = None) -> str | None:
-    """Resolve the target layer for a unit from placement or a configured fallback."""
+    """Resolve the target layer for a unit from explicit config or placement.
 
+    Explicitly configured trigger-family layers take precedence over placement
+    targeting so composed triggers can intentionally inspect a different layer
+    than the unit's current placement when needed.
+    """
+
+    if fallback_layer is not None:
+        normalized = str(fallback_layer).strip()
+        if normalized:
+            return normalized
     if context.packet.placements is not None:
         return _resolve_placement(context, unit_index).target_layer
-    if fallback_layer is not None:
-        return str(fallback_layer).strip() or None
     return None
 
 
