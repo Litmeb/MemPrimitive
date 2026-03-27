@@ -131,6 +131,14 @@ Factory entry points: **`compose_write_trigger`** (`write_trigger.py`) and **`co
 | `TagMatchSignal` | **Requires** `packet.query`. Counts overlap between query tokens and `unit.tags`. |
 | `LayerTargetSignal` | **Requires** `packet.placements`. `1.0` if `placements[unit_index].target_layer` is in `allowed_layers`. |
 | `QueryOverlapSignal` | **Requires** `packet.query`. Token overlap between query and unit text. |
+| `MetadataFlagSignal` | Reads a bool-ish metadata flag from a dotted path on `unit.metadata`, `observation.metadata`, or `query.metadata`; missing paths may raise or use a configured default. |
+| `UnitTypeSignal` | `1.0` iff `unit.unit_type == expected_unit_type`. |
+| `PlacementExistsSignal` | **Requires** aligned `packet.placements`. Emits `1.0` when the current unit already has a placement entry. |
+| `PartitionKeyPresentSignal` | Checks one or more dotted metadata paths (for example TiM-like group/hash keys) and emits `1.0` iff any configured key is present. |
+| `NeighborCountSignal` | Counts comparable vector neighbors already present in the target layer, using current unit embedding plus placement-derived layer targeting. |
+| `TopNeighborSimilaritySignal` | Returns the best cosine similarity among comparable vector neighbors in the target layer, or `0.0` when none are available. |
+| `OutcomeCorrectnessSignal` | `1.0` if observation metadata implies the trial failed; else `0.0`. |
+| `FeedbackPresenceSignal` | `1.0` if supported feedback text exists in observation metadata; else `0.0`. |
 
 ### Scorer role — `ScoreAggregator` (`score`)
 
@@ -155,6 +163,11 @@ Hard predicate per unit after scoring; receives full `signals` and `score` for c
 | `RequireTagGate` | `True` iff unit tags intersect `required_tags` (case-insensitive). |
 | `LayerAllowedGate` | **Requires** `packet.placements`; `True` iff placement target layer ∈ `allowed_layers`. |
 | `QueryPresentGate` | `True` iff `packet.query` is not `None`. |
+| `SchemaPresentGate` | Checks dotted schema paths on a selected source object (`unit`, `unit.metadata`, `observation`, `query`, etc.) and opens only when the required fields are present. |
+| `FeedbackSchemaGate` | Opens only when observation metadata exposes a parseable outcome or feedback schema. |
+| `HasEmbeddingGate` | Opens only when the configured source exposes a non-empty embedding vector. |
+| `VectorIndexReadyGate` | Opens only when the target layer exists and supports the `vector` index. |
+| `GraphLayerGate` | Opens only when the target layer exists and has `shape="Graph"`. |
 
 ### Policy role — `DecisionPolicy` (`decide`)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
+from math import sqrt
 from typing import Any
 
 from ..core import MemoryStore, Packet
@@ -17,6 +18,7 @@ from ._trace import copy_trace
 
 
 SignalMap = dict[str, float | bool]
+_MISSING = object()
 
 
 @dataclass(slots=True, frozen=True)
@@ -137,6 +139,160 @@ def _feedback_present_in_metadata(payload: dict[str, Any] | None) -> bool:
     controls = _trigger_controls(payload)
     value = controls.get("evaluator_feedback") or controls.get("feedback") or ""
     return bool(str(value).strip())
+
+
+def _resolve_unit(context: TriggerContext, unit_index: int):
+    """Return the current unit with consistent index validation."""
+
+    units = context.packet.units
+    if units is None:
+        raise ValueError("packet.units is required for trigger execution.")
+    if unit_index < 0 or unit_index >= len(units):
+        raise IndexError(f"unit_index {unit_index} is out of range for packet.units.")
+    return units[unit_index]
+
+
+def _resolve_placement(context: TriggerContext, unit_index: int):
+    """Return the current placement and validate unit/placement alignment."""
+
+    placements = context.packet.placements
+    if placements is None:
+        raise ValueError("placements is required for trigger execution.")
+    if unit_index < 0 or unit_index >= len(placements):
+        raise ValueError("placements must align with packet.units for trigger execution.")
+    unit = _resolve_unit(context, unit_index)
+    placement = placements[unit_index]
+    if placement.unit_id != unit.unit_id:
+        raise ValueError("placements must align with packet.units for trigger execution.")
+    return placement
+
+
+def _resolve_source_object(context: TriggerContext, unit_index: int, source: str) -> Any:
+    """Return the configured signal/gate source object."""
+
+    normalized = str(source).strip()
+    if normalized == "unit":
+        return _resolve_unit(context, unit_index)
+    if normalized == "unit.metadata":
+        return _resolve_unit(context, unit_index).metadata
+    if normalized == "observation":
+        if context.packet.observation is None:
+            raise ValueError("observation is required for trigger execution.")
+        return context.packet.observation
+    if normalized == "observation.metadata":
+        if context.packet.observation is None:
+            raise ValueError("observation is required for trigger execution.")
+        return context.packet.observation.metadata
+    if normalized == "query":
+        if context.packet.query is None:
+            raise ValueError("query is required for trigger execution.")
+        return context.packet.query
+    if normalized == "query.metadata":
+        if context.packet.query is None:
+            raise ValueError("query is required for trigger execution.")
+        return context.packet.query.metadata
+    if normalized == "placement":
+        return _resolve_placement(context, unit_index)
+    raise ValueError(f"Unsupported trigger source {source!r}.")
+
+
+def _lookup_dotted_path(payload: Any, path: str) -> Any:
+    """Read a dotted path from a mapping/object, returning ``_MISSING`` when absent."""
+
+    normalized = str(path).strip()
+    if not normalized:
+        raise ValueError("path must be a non-empty dotted field path.")
+    current = payload
+    for segment in normalized.split("."):
+        if isinstance(current, dict):
+            if segment not in current:
+                return _MISSING
+            current = current[segment]
+            continue
+        if hasattr(current, segment):
+            current = getattr(current, segment)
+            continue
+        return _MISSING
+    return current
+
+
+def _coerce_signal_float(value: Any, *, label: str) -> float:
+    """Convert a bool-ish or numeric value into a trace-friendly float."""
+
+    boolean = _coerce_bool(value)
+    if boolean is not None:
+        return 1.0 if boolean else 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    raise ValueError(f"{label} must resolve to a bool-ish or numeric value.")
+
+
+def _has_present_value(value: Any) -> bool:
+    """Return whether a field value should count as present."""
+
+    if value is _MISSING:
+        return False
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _resolve_target_layer(context: TriggerContext, unit_index: int, *, fallback_layer: str | None = None) -> str | None:
+    """Resolve the target layer for a unit from placement or a configured fallback."""
+
+    if context.packet.placements is not None:
+        return _resolve_placement(context, unit_index).target_layer
+    if fallback_layer is not None:
+        return str(fallback_layer).strip() or None
+    return None
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    """Return cosine similarity, falling back to ``0.0`` on degenerate vectors."""
+
+    if len(left) != len(right) or not left:
+        return 0.0
+    left_norm = sqrt(sum(value * value for value in left))
+    right_norm = sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    dot = sum(lhs * rhs for lhs, rhs in zip(left, right))
+    return dot / (left_norm * right_norm)
+
+
+def _neighbor_scores_for_unit(
+    context: TriggerContext,
+    unit_index: int,
+    *,
+    layer: str | None = None,
+    candidate_top_k: int = 3,
+    similarity_threshold: float | None = None,
+) -> list[float]:
+    """Return comparable neighbor similarities for the current unit."""
+
+    unit = _resolve_unit(context, unit_index)
+    if unit.embedding is None:
+        return []
+    target_layer = _resolve_target_layer(context, unit_index, fallback_layer=layer)
+    if target_layer is None or not context.store.has_layer(target_layer):
+        return []
+    if not context.store.layer_supports_index(target_layer, "vector"):
+        return []
+
+    scores: list[float] = []
+    for record in context.store.iter_records(target_layer):
+        if record.unit_id == unit.unit_id or record.embedding is None:
+            continue
+        similarity = _cosine_similarity(unit.embedding, record.embedding)
+        if similarity_threshold is not None and similarity < float(similarity_threshold):
+            continue
+        scores.append(float(similarity))
+    scores.sort(reverse=True)
+    return scores[: max(0, int(candidate_top_k))]
 
 
 @dataclass(slots=True, frozen=True)
@@ -338,6 +494,150 @@ class FeedbackPresenceSignal(SignalProvider):
 
 
 @dataclass(slots=True, frozen=True)
+class MetadataFlagSignal(SignalProvider):
+    """Read a bool-ish metadata flag from a dotted path and emit it as ``0.0``/``1.0``.
+
+    Constructor: ``path`` must be non-empty. ``source`` selects the metadata root
+    (`unit.metadata`, `observation.metadata`, or `query.metadata`). When
+    ``default`` is ``None``, missing paths raise ``ValueError``; otherwise the
+    default is used.
+    """
+
+    path: str
+    signal_name: str = "metadata_flag"
+    source: str = "unit.metadata"
+    default: Any = None
+
+    @property
+    def name(self) -> str:
+        return f"metadata_flag:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        payload = _resolve_source_object(context, unit_index, self.source)
+        value = _lookup_dotted_path(payload, self.path)
+        if value is _MISSING:
+            if self.default is None:
+                raise ValueError(f"MetadataFlagSignal could not find required path {self.path!r}.")
+            value = self.default
+        return {self.signal_name: _coerce_signal_float(value, label=f"MetadataFlagSignal({self.path})")}
+
+
+@dataclass(slots=True, frozen=True)
+class UnitTypeSignal(SignalProvider):
+    """Emit ``1.0`` when the unit type matches ``expected_unit_type``."""
+
+    expected_unit_type: str
+    signal_name: str = "unit_type_match"
+
+    @property
+    def name(self) -> str:
+        return f"unit_type:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        unit = _resolve_unit(context, unit_index)
+        return {self.signal_name: 1.0 if unit.unit_type == self.expected_unit_type else 0.0}
+
+
+@dataclass(slots=True, frozen=True)
+class PlacementExistsSignal(SignalProvider):
+    """Emit ``1.0`` when the current unit has an aligned placement."""
+
+    signal_name: str = "has_placement"
+
+    @property
+    def name(self) -> str:
+        return f"placement_exists:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        _resolve_placement(context, unit_index)
+        return {self.signal_name: 1.0}
+
+
+@dataclass(slots=True, frozen=True)
+class PartitionKeyPresentSignal(SignalProvider):
+    """Emit ``1.0`` when at least one configured partition-key path is present.
+
+    Constructor: ``paths`` must contain at least one dotted path. When
+    ``strict_missing`` is true, missing paths raise ``ValueError`` instead of
+    behaving like absent-but-false readiness checks.
+    """
+
+    paths: tuple[str, ...]
+    signal_name: str = "has_partition_key"
+    source: str = "unit.metadata"
+    strict_missing: bool = False
+
+    @property
+    def name(self) -> str:
+        return f"partition_key_present:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        if not self.paths:
+            raise ValueError("PartitionKeyPresentSignal requires at least one dotted path.")
+        payload = _resolve_source_object(context, unit_index, self.source)
+        missing_paths: list[str] = []
+        for path in self.paths:
+            value = _lookup_dotted_path(payload, path)
+            if value is _MISSING:
+                missing_paths.append(path)
+                continue
+            if _has_present_value(value):
+                return {self.signal_name: 1.0}
+        if self.strict_missing and len(missing_paths) == len(self.paths):
+            joined = ", ".join(repr(path) for path in self.paths)
+            raise ValueError(f"PartitionKeyPresentSignal could not find any configured paths: {joined}.")
+        return {self.signal_name: 0.0}
+
+
+@dataclass(slots=True, frozen=True)
+class NeighborCountSignal(SignalProvider):
+    """Emit how many comparable vector neighbors are available for the unit."""
+
+    top_k: int = 3
+    signal_name: str = "neighbor_count"
+    layer: str | None = None
+    similarity_threshold: float | None = None
+
+    @property
+    def name(self) -> str:
+        return f"neighbor_count:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        scores = _neighbor_scores_for_unit(
+            context,
+            unit_index,
+            layer=self.layer,
+            candidate_top_k=self.top_k,
+            similarity_threshold=self.similarity_threshold,
+        )
+        return {self.signal_name: float(len(scores))}
+
+
+@dataclass(slots=True, frozen=True)
+class TopNeighborSimilaritySignal(SignalProvider):
+    """Emit the cosine similarity of the best available vector neighbor."""
+
+    top_k: int = 3
+    signal_name: str = "top_neighbor_similarity"
+    layer: str | None = None
+    similarity_threshold: float | None = None
+
+    @property
+    def name(self) -> str:
+        return f"top_neighbor_similarity:{self.signal_name}"
+
+    def provide(self, context: TriggerContext, unit_index: int) -> SignalMap:
+        scores = _neighbor_scores_for_unit(
+            context,
+            unit_index,
+            layer=self.layer,
+            candidate_top_k=self.top_k,
+            similarity_threshold=self.similarity_threshold,
+        )
+        return {self.signal_name: float(scores[0]) if scores else 0.0}
+
+
+@dataclass(slots=True, frozen=True)
 class IdentityScorer(ScoreAggregator):
     """Read a single signal as the score."""
 
@@ -533,6 +833,32 @@ class QueryPresentGate(Gate):
 
 
 @dataclass(slots=True, frozen=True)
+class SchemaPresentGate(Gate):
+    """Allow only when the configured schema paths are present on the source object.
+
+    Constructor: ``paths`` must contain at least one dotted path. ``source``
+    may target `unit`, `unit.metadata`, `observation`, `observation.metadata`,
+    `query`, or `query.metadata`. ``require_all`` controls whether all paths or
+    any path must be present.
+    """
+
+    paths: tuple[str, ...]
+    source: str = "unit.metadata"
+    require_all: bool = True
+
+    @property
+    def name(self) -> str:
+        return "schema_present"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        if not self.paths:
+            raise ValueError("SchemaPresentGate requires at least one dotted path.")
+        payload = _resolve_source_object(context, unit_index, self.source)
+        checks = [_has_present_value(_lookup_dotted_path(payload, path)) for path in self.paths]
+        return all(checks) if self.require_all else any(checks)
+
+
+@dataclass(slots=True, frozen=True)
 class FeedbackSchemaGate(Gate):
     """Allow only when the observation exposes parseable outcome or feedback fields."""
 
@@ -548,6 +874,56 @@ class FeedbackSchemaGate(Gate):
             _outcome_correctness_from_metadata(observation.metadata) is not None
             or _feedback_present_in_metadata(observation.metadata)
         )
+
+
+@dataclass(slots=True, frozen=True)
+class HasEmbeddingGate(Gate):
+    """Allow only when the configured source exposes a non-empty embedding vector."""
+
+    source: str = "unit"
+
+    @property
+    def name(self) -> str:
+        return "has_embedding"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        payload = _resolve_source_object(context, unit_index, self.source)
+        embedding = getattr(payload, "embedding", None)
+        return isinstance(embedding, list) and len(embedding) > 0
+
+
+@dataclass(slots=True, frozen=True)
+class VectorIndexReadyGate(Gate):
+    """Allow only when the target layer exists and exposes a vector index."""
+
+    layer: str | None = None
+
+    @property
+    def name(self) -> str:
+        return "vector_index_ready"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        target_layer = _resolve_target_layer(context, unit_index, fallback_layer=self.layer)
+        if target_layer is None or not context.store.has_layer(target_layer):
+            return False
+        return context.store.layer_supports_index(target_layer, "vector")
+
+
+@dataclass(slots=True, frozen=True)
+class GraphLayerGate(Gate):
+    """Allow only when the target layer exists and is graph-shaped."""
+
+    layer: str | None = None
+
+    @property
+    def name(self) -> str:
+        return "graph_layer"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        target_layer = _resolve_target_layer(context, unit_index, fallback_layer=self.layer)
+        if target_layer is None or not context.store.has_layer(target_layer):
+            return False
+        return context.store.layer_shape(target_layer) == "Graph"
 
 
 @dataclass(slots=True, frozen=True)

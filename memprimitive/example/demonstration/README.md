@@ -1,58 +1,79 @@
 # `memprimitive.example.demonstration`
 
-可运行脚本，演示 `MemoryPipeline`、`MemoryStore` 与各类基础原语的组合方式。建议在仓库根目录执行：
+这个目录放的是可直接运行的 demonstration 脚本，用来展示 `MemoryPipeline`、`MemoryStore`、baseline primitives，以及最近补齐的 trigger-family shared infrastructure 是怎样拼起来工作的。
+
+建议在仓库根目录运行：
 
 ```text
 python -m memprimitive.example.demonstration.<模块名>
 ```
 
-例如：`python -m memprimitive.example.demonstration.minimal_pipeline`
+例如：
 
-## Trigger-family / Reflexion 风格演示
+```text
+python -m memprimitive.example.demonstration.minimal_pipeline
+```
 
-这次新增了 3 个围绕 `OutcomeCorrectnessSignal`、`FeedbackPresenceSignal`、`FeedbackSchemaGate` 的完整 pipeline 示例：
+## Trigger-family 演示
+
+这一组脚本主要服务于 trigger family 的共享基础设施，以及 Reflexion 风格 trigger 的可运行示例。
 
 | 模块文件 | 说明 |
-|----------|------|
-| `reflexion_trigger_failed_trial.py` | 失败 trial：`trial_failed=1.0`，schema gate 放行，`evolution_decisions` 变成 `True`。 |
-| `reflexion_trigger_success_trial.py` | 成功 trial：有 feedback schema，但 `trial_failed=0.0`，因此不触发 evolution。 |
-| `reflexion_trigger_schema_gate.py` | 缺少可解析的 outcome / feedback schema：即使 policy threshold 很低，也会被 `FeedbackSchemaGate` 拦住。 |
+| --- | --- |
+| `composed_triggers.py` | 最简单的 trigger-family 组合方式示例：直接用 `compose_write_trigger` / `compose_evolution_trigger` 装配 signal、scorer、gate、policy，并打印 trace。 |
+| `trigger_family_infrastructure.py` | 阶段 2 新增的 shared trigger-family infrastructure 演示。分别展示 TiM-like 的 metadata / unit / placement / partition readiness 信号，以及 A-MEM-like 的 neighbor-count / top-similarity 信号和 schema / embedding / vector / graph gates。 |
+| `reflexion_trigger_failed_trial.py` | Reflexion 风格失败 trial：`trial_failed=1.0`，`FeedbackSchemaGate` 放行，最终触发 `evolution_decisions=True`。 |
+| `reflexion_trigger_success_trial.py` | Reflexion 风格成功 trial：虽然 feedback schema 存在，但 `trial_failed=0.0`，因此不触发 evolution。 |
+| `reflexion_trigger_schema_gate.py` | 缺少可解析 outcome / feedback schema 时，`FeedbackSchemaGate` 会直接阻断 trigger。 |
 
-这些脚本都使用同一类组合方式：
+上面三个 Reflexion 风格脚本复用了同一套 shared trigger-family 组合：
 
 - `signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal())`
 - `scorer=WeightedSumScorer({"trial_failed": 1.0, "feedback_present": 0.1})`
 - `gate=FeedbackSchemaGate()`
 - `policy=ThresholdPolicy(...)`
 
-## 其他演示
+## 基础 pipeline 与 store 演示
 
 | 模块文件 | 说明 |
-|----------|------|
-| `minimal_pipeline.py` | 最小闭环：手工接线基础元，`AlwaysWriteTrigger` + 按时间检索 + 拼接读出。 |
-| `composed_triggers.py` | 用 `compose_write_trigger` / `compose_evolution_trigger` 组合信号、门控与策略，并打印 trace。 |
-| `topology_store.py` | 定义 `StoreTopology` / `MemoryStore` 多层拓扑，写入指定层并查询。 |
-| `embedding_similarity_retrieval.py` | 表示层含 `embedding`，检索使用 `EmbeddingSimilarityRetrieval`。 |
-| `layer_aware_semantic_working.py` | 多写入管道写入 `working` / `semantic`，`LayerAwareRetrieval` 按层选不同检索器并合并。 |
-| `graph_append_entity_retrieval.py` | 图层的 `GraphAppendOrganization`，`EntityRetrieval` 在图数据上召回。 |
-| `layer_aware_working_graph.py` | 分离的 working / 图写入管道，再经 `LayerAwareRetrieval` 合并检索与读出。 |
+| --- | --- |
+| `minimal_pipeline.py` | 最小 ingest -> recall 闭环。适合快速确认 baseline pipeline 的基本数据流。 |
+| `topology_store.py` | 演示 `StoreTopology` / `MemoryStore` 的多层拓扑声明、按层写入和按层查询。 |
+| `embedding_similarity_retrieval.py` | 演示带 `embedding` 的表示层，以及 `EmbeddingSimilarityRetrieval` 的检索行为。 |
+
+## Layered / routing / dispatch 演示
+
+| 模块文件 | 说明 |
+| --- | --- |
+| `layer_aware_semantic_working.py` | 把内容写入 `working` / `semantic` 两层，并用 `LayerAwareRetrieval` 按层选择不同检索器后合并结果。 |
+| `layer_aware_working_graph.py` | 将 working layer 与 graph layer 分离，再通过 layer-aware 检索统一召回。 |
+| `conditional_layer_routing.py` | `ConditionalLayerOrganization` 按规则把不同 unit 路由到不同 layer。 |
+| `dispatch_organization_recall.py` | `DispatchOrganization` 同时驱动多个 organization child，让一次 ingest 同时写入多条组织路径。 |
+| `dispatch_organization_trace.py` | 与上一个例子类似，但更强调 trace 输出，方便观察 dispatch 行为。 |
+
+## Graph baseline 演示
+
+| 模块文件 | 说明 |
+| --- | --- |
+| `graph_append_entity_retrieval.py` | `GraphAppendOrganization` + `EntityRetrieval` 的轻量 graph 示例。 |
 | `graph_baseline_pipeline.py` | graph baseline family 的完整闭环：`GraphAppendOrganization` -> `GraphNeighborAppendEvolution` -> `GraphSeedAndExpandRetrieval` -> `GraphReadout`。 |
-| `conditional_layer_routing.py` | `ConditionalLayerOrganization` 按规则（实体、结构化三元组等）自动路由到不同存储层。 |
-| `dispatch_organization_recall.py` | `DispatchOrganization` 同时挂 `AppendOrganization` 与 `GraphAppendOrganization`，单管道做 ingest + 分层召回。 |
-| `dispatch_organization_trace.py` | 同上 dispatch 结构，并打印 `dispatch` 的 organization trace，便于调试分派行为。 |
 
-## Graph baseline 推荐组合
-
-如果你想先验证 graph family 的最小可组合闭环，推荐优先使用下面这组 baseline：
-
-- ingest / graph 写入：`BasicRepresentation(elements=("text", "entities", "triple", "tags", "keywords"))` + `GraphAppendOrganization`
-- link evolution：`ThresholdEvolutionTrigger` + `GraphNeighborAppendEvolution`
-- graph recall：`GraphSeedAndExpandRetrieval`
-- readout：`GraphReadout`
-
-这套组合覆盖了阶段 1 需要的四个动作：
+如果你想先验证 graph family 的最小可组合闭环，推荐优先看 `graph_baseline_pipeline.py`。它覆盖了阶段 1 graph baseline 的四个核心动作：
 
 - ingest 到 `Graph` layer
-- 在 graph layer 内建立 links
-- 按 seed + neighbor expansion 召回
+- 在 graph layer 内追加 / 维护 links
+- 按 seed + neighbor expansion 做召回
 - 以 graph-readable 形式输出 readout
+
+## 推荐阅读顺序
+
+如果你第一次看这些 demonstration，比较顺手的顺序是：
+
+1. `minimal_pipeline.py`
+2. `composed_triggers.py`
+3. `trigger_family_infrastructure.py`
+4. `reflexion_trigger_failed_trial.py`
+5. `layer_aware_semantic_working.py`
+6. `graph_baseline_pipeline.py`
+
+这样会先建立 baseline pipeline 心智模型，再进入 trigger family、layered retrieval，最后看 graph baseline family。

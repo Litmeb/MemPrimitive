@@ -43,6 +43,17 @@ def _graph_store() -> MemoryStore:
     )
 
 
+def _graph_vector_store() -> MemoryStore:
+    return MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "entity", "vector")),
+            ]
+        )
+    )
+
+
 def test_unit_formation_returns_one_unit_with_provenance() -> None:
     from memprimitive.baselines import PassThroughUnitFormation
 
@@ -1370,6 +1381,299 @@ def test_feedback_schema_gate_blocks_when_outcome_and_feedback_schema_are_missin
     per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
     assert per_unit["signals"] == {"trial_failed": 0.0, "feedback_present": 0.0}
     assert per_unit["gate"] is False
+
+
+def test_metadata_flag_signal_reads_nested_unit_metadata_flag() -> None:
+    from memprimitive.baselines._trigger_family import MetadataFlagSignal, TriggerContext
+
+    packet = Packet(
+        units=[MemoryUnit(text="tim thought", unit_type="tim_thought", metadata={"tim": {"write": True}})]
+    )
+    signals = MetadataFlagSignal(path="tim.write", signal_name="write_flag").provide(
+        TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
+        0,
+    )
+
+    assert signals == {"write_flag": 1.0}
+
+
+def test_metadata_flag_signal_raises_for_missing_required_path() -> None:
+    from memprimitive.baselines._trigger_family import MetadataFlagSignal, TriggerContext
+
+    packet = Packet(units=[MemoryUnit(text="tim thought", unit_type="tim_thought", metadata={})])
+
+    with pytest.raises(ValueError, match="required path"):
+        MetadataFlagSignal(path="tim.write", signal_name="write_flag").provide(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
+            0,
+        )
+
+
+def test_unit_type_signal_matches_expected_type() -> None:
+    from memprimitive.baselines._trigger_family import TriggerContext, UnitTypeSignal
+
+    packet = Packet(units=[MemoryUnit(text="tim thought", unit_type="tim_thought")])
+    signals = UnitTypeSignal(expected_unit_type="tim_thought", signal_name="is_tim_thought").provide(
+        TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
+        0,
+    )
+
+    assert signals == {"is_tim_thought": 1.0}
+
+
+def test_placement_exists_signal_requires_aligned_placements() -> None:
+    from memprimitive.baselines._trigger_family import PlacementExistsSignal, TriggerContext
+
+    packet = Packet(units=[MemoryUnit(text="Alice note", unit_id="unit-1")])
+
+    with pytest.raises(ValueError, match="placements is required"):
+        PlacementExistsSignal().provide(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+            0,
+        )
+
+
+def test_partition_key_present_signal_detects_available_partition_key() -> None:
+    from memprimitive.baselines._trigger_family import PartitionKeyPresentSignal, TriggerContext
+
+    packet = Packet(
+        units=[MemoryUnit(text="tim thought", metadata={"tim": {"group_id": "bucket-1"}})]
+    )
+    signals = PartitionKeyPresentSignal(
+        paths=("tim.group_id", "tim.hash_index"),
+        signal_name="has_partition_key",
+    ).provide(
+        TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+        0,
+    )
+
+    assert signals == {"has_partition_key": 1.0}
+
+
+def test_partition_key_present_signal_can_raise_when_all_paths_are_missing() -> None:
+    from memprimitive.baselines._trigger_family import PartitionKeyPresentSignal, TriggerContext
+
+    packet = Packet(units=[MemoryUnit(text="tim thought", metadata={})])
+
+    with pytest.raises(ValueError, match="could not find any configured paths"):
+        PartitionKeyPresentSignal(
+            paths=("tim.group_id", "tim.hash_index"),
+            strict_missing=True,
+        ).provide(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+            0,
+        )
+
+
+def test_neighbor_count_and_top_similarity_signals_read_graph_vector_candidates() -> None:
+    from memprimitive.baselines._trigger_family import NeighborCountSignal, TopNeighborSimilaritySignal, TriggerContext
+
+    store = _graph_vector_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-existing",
+            layer="knowledge_graph",
+            text="Alice studies graph memory",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Alice graphs", unit_id="unit-new", embedding=[0.8, 0.2])],
+        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
+    )
+    context = TriggerContext(packet=packet, store=store, output_field="evolution_decisions", trace_key="evolution_trigger")
+
+    count_signals = NeighborCountSignal(top_k=3).provide(context, 0)
+    similarity_signals = TopNeighborSimilaritySignal(top_k=3).provide(context, 0)
+
+    assert count_signals == {"neighbor_count": 1.0}
+    assert similarity_signals["top_neighbor_similarity"] > 0.9
+
+
+def test_neighbor_signals_return_zero_without_target_layer_context() -> None:
+    from memprimitive.baselines._trigger_family import NeighborCountSignal, TopNeighborSimilaritySignal, TriggerContext
+
+    packet = Packet(units=[MemoryUnit(text="Alice graphs", embedding=[1.0, 0.0])])
+    context = TriggerContext(packet=packet, store=_graph_vector_store(), output_field="evolution_decisions", trace_key="evolution_trigger")
+
+    assert NeighborCountSignal().provide(context, 0) == {"neighbor_count": 0.0}
+    assert TopNeighborSimilaritySignal().provide(context, 0) == {"top_neighbor_similarity": 0.0}
+
+
+def test_schema_present_gate_validates_required_unit_schema() -> None:
+    from memprimitive.baselines._trigger_family import SchemaPresentGate, TriggerContext
+
+    packet = Packet(
+        units=[
+            MemoryUnit(
+                text="graph note",
+                metadata={"note": {"summary": "Alice studies graph memory", "keywords": ["alice", "graph"]}},
+            )
+        ]
+    )
+    gate = SchemaPresentGate(paths=("note.summary", "note.keywords"), source="unit.metadata")
+
+    assert (
+        gate.evaluate(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
+            0,
+            signals={},
+            score=0.0,
+        )
+        is True
+    )
+
+
+def test_schema_present_gate_blocks_when_required_schema_is_missing() -> None:
+    from memprimitive.baselines._trigger_family import SchemaPresentGate, TriggerContext
+
+    packet = Packet(units=[MemoryUnit(text="graph note", metadata={"note": {"summary": "only summary"}})])
+    gate = SchemaPresentGate(paths=("note.summary", "note.keywords"), source="unit.metadata")
+
+    assert (
+        gate.evaluate(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
+            0,
+            signals={},
+            score=0.0,
+        )
+        is False
+    )
+
+
+def test_has_embedding_gate_checks_current_unit_embedding() -> None:
+    from memprimitive.baselines._trigger_family import HasEmbeddingGate, TriggerContext
+
+    packet = Packet(units=[MemoryUnit(text="embedded", embedding=[1.0, 0.0])])
+    gate = HasEmbeddingGate()
+
+    assert (
+        gate.evaluate(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+            0,
+            signals={},
+            score=0.0,
+        )
+        is True
+    )
+
+
+def test_vector_index_ready_gate_blocks_when_target_layer_lacks_vector_index() -> None:
+    from memprimitive.baselines._trigger_family import TriggerContext, VectorIndexReadyGate
+
+    packet = Packet(
+        units=[MemoryUnit(text="graph note", unit_id="unit-1", embedding=[1.0, 0.0])],
+        placements=[Placement(unit_id="unit-1", target_layer="knowledge_graph")],
+    )
+    gate = VectorIndexReadyGate()
+
+    assert (
+        gate.evaluate(
+            TriggerContext(packet=packet, store=_graph_store(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+            0,
+            signals={},
+            score=0.0,
+        )
+        is False
+    )
+
+
+def test_graph_layer_gate_checks_target_layer_shape() -> None:
+    from memprimitive.baselines._trigger_family import GraphLayerGate, TriggerContext
+
+    packet = Packet(
+        units=[MemoryUnit(text="graph note", unit_id="unit-1", embedding=[1.0, 0.0])],
+        placements=[Placement(unit_id="unit-1", target_layer="knowledge_graph")],
+    )
+
+    assert (
+        GraphLayerGate().evaluate(
+            TriggerContext(packet=packet, store=_graph_vector_store(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+            0,
+            signals={},
+            score=0.0,
+        )
+        is True
+    )
+
+    assert (
+        GraphLayerGate().evaluate(
+            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
+            0,
+            signals={},
+            score=0.0,
+        )
+        is False
+    )
+
+
+def test_amem_style_trigger_family_components_gate_neighbor_trigger_on_vector_graph_readiness() -> None:
+    from memprimitive.baselines._trigger_family import (
+        BooleanGatePolicy,
+        GraphLayerGate,
+        HasEmbeddingGate,
+        MinScorer,
+        NeighborCountSignal,
+        TopNeighborSimilaritySignal,
+        TriggerContext,
+        VectorIndexReadyGate,
+    )
+    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
+
+    ready_store = _graph_vector_store()
+    ready_store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-existing",
+            layer="knowledge_graph",
+            text="Alice studies graph memory",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+    ready_packet = Packet(
+        units=[MemoryUnit(text="Alice graph note", unit_id="unit-new", embedding=[0.9, 0.1])],
+        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
+    )
+    trigger = compose_evolution_trigger(
+        name="amem_neighbor_trigger",
+        signal_providers=(NeighborCountSignal(top_k=2), TopNeighborSimilaritySignal(top_k=2)),
+        scorer=MinScorer(sources=("neighbor_count", "top_neighbor_similarity")),
+        gate=GraphLayerGate(),
+        policy=BooleanGatePolicy(),
+    )
+
+    packet_out, _ = trigger.run(ready_packet, ready_store)
+    assert packet_out.evolution_decisions == [True]
+
+    not_ready_packet = Packet(
+        units=[MemoryUnit(text="Alice flat note", unit_id="unit-flat", embedding=[0.9, 0.1])],
+        placements=[Placement(unit_id="unit-flat", target_layer="default")],
+    )
+    not_ready_trigger = compose_evolution_trigger(
+        name="amem_neighbor_trigger_with_full_gates",
+        signal_providers=(NeighborCountSignal(top_k=2), TopNeighborSimilaritySignal(top_k=2)),
+        scorer=MinScorer(sources=("neighbor_count", "top_neighbor_similarity")),
+        gate=GraphLayerGate(),
+        policy=BooleanGatePolicy(),
+    )
+    packet_out, _ = not_ready_trigger.run(not_ready_packet, ready_store)
+    assert packet_out.evolution_decisions == [False]
+
+    assert HasEmbeddingGate().evaluate(
+        TriggerContext(packet=ready_packet, store=ready_store, output_field="evolution_decisions", trace_key="evolution_trigger"),
+        0,
+        signals={},
+        score=0.0,
+    )
+    assert VectorIndexReadyGate().evaluate(
+        TriggerContext(packet=ready_packet, store=ready_store, output_field="evolution_decisions", trace_key="evolution_trigger"),
+        0,
+        signals={},
+        score=0.0,
+    )
 
 
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:

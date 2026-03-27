@@ -101,6 +101,35 @@ The repository now has a more complete graph-oriented baseline family, not just 
 
 This stage is important because it turns graph memory into a reusable test base for later graph-dependent motifs instead of leaving it as a one-off organization demo.
 
+### 4.2 Trigger-family shared infrastructure now covers classic motif prerequisites
+
+The shared trigger framework in [memprimitive/baselines/_trigger_family.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/_trigger_family.py) now goes beyond the initial constant/query-style examples and includes reusable classic-motif infrastructure:
+
+- Existing Reflexion-oriented pieces remain in place: `OutcomeCorrectnessSignal`, `FeedbackPresenceSignal`, `FeedbackSchemaGate`.
+- New common signals now cover metadata/unit/placement/partition readiness and neighbor-based graph evolution prerequisites:
+  - `MetadataFlagSignal`
+  - `UnitTypeSignal`
+  - `PlacementExistsSignal`
+  - `PartitionKeyPresentSignal`
+  - `NeighborCountSignal`
+  - `TopNeighborSimilaritySignal`
+- New common gates now cover generic schema readiness plus graph/vector capability checks:
+  - `SchemaPresentGate`
+  - `HasEmbeddingGate`
+  - `VectorIndexReadyGate`
+  - `GraphLayerGate`
+
+Practical impact:
+
+- TiM-like inferred trigger decompositions can now be expressed with shared `signal -> scorer -> gate -> policy` pieces instead of bespoke logic.
+- A-MEM-like neighbor-triggered evolution can now reuse shared neighbor-count / top-similarity signals plus graph/vector readiness gates.
+- Family-specific trigger modules for later phases can be assembled through `compose_write_trigger` / `compose_evolution_trigger` without changing the pipeline API.
+
+Validation status:
+
+- `tests/test_baselines.py` now includes dedicated coverage for each of the new trigger-family signals/gates, including normal paths, missing-field failures where applicable, and blocked graph/vector readiness paths.
+- `python -m memprimitive.example.demonstration.trigger_family_infrastructure` provides a runnable TiM-like plus A-MEM-like shared infrastructure demo.
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:
