@@ -32,8 +32,13 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 
 - `AlwaysWriteTrigger`
 - `ThresholdWriteTrigger`
+- `MetadataGatedWriteTrigger`
+- `KeyReadyWriteTrigger`
 
-(The same module also exposes `compose_write_trigger` for assembling trigger-family adapters; those are not extra `BASELINE_CLASSES` entries.)
+(The same module also exposes `compose_write_trigger` plus motif-oriented helpers
+`compose_metadata_gated_write_trigger` and `compose_key_ready_write_trigger` for
+assembling trigger-family adapters; those are not extra `BASELINE_CLASSES`
+entries.)
 
 ### Slot `organization` — `organization.py`
 
@@ -45,15 +50,24 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 
 - `NeverEvolutionTrigger`
 - `ThresholdEvolutionTrigger`
+- `OutcomeConditionedEvolutionTrigger`
+- `NewWriteEvolutionTrigger`
+- `NeighborExistsEvolutionTrigger`
 
-(The same module also exposes `compose_evolution_trigger` for assembling trigger-family adapters; those are not extra `BASELINE_CLASSES` entries.)
+(The same module also exposes `compose_evolution_trigger` plus the motif-oriented
+helpers `compose_outcome_conditioned_evolution_trigger`,
+`compose_new_write_evolution_trigger`, and the graph-oriented helper
+`compose_graph_neighbor_evolution_trigger` for assembling trigger-family
+adapters; those are not extra `BASELINE_CLASSES` entries.)
 
-### Slot `memory_evolution` — `memory_evolution.py`
+### Slot `memory_evolution` – `memory_evolution.py`
 
 - `AppendOnlyEvolution`
 - `TraceOnlyEvolution`
 - `SummaryRewriteEvolution`
 - `LayerMoveEvolution`
+- `GraphLinkEvolution`
+- `GraphNeighborContextTraceEvolution`
 - `GraphNeighborAppendEvolution`
 
 ### Slot `retrieval` — `retrieval.py`
@@ -168,6 +182,7 @@ Hard predicate per unit after scoring; receives full `signals` and `score` for c
 | `HasEmbeddingGate` | Opens only when the configured source exposes a non-empty embedding vector. |
 | `VectorIndexReadyGate` | Opens only when the target layer exists and supports the `vector` index. |
 | `GraphLayerGate` | Opens only when the target layer exists and has `shape="Graph"`. |
+| `AllGate` | Opens only when every child gate opens; useful for graph/vector readiness bundles. |
 
 ### Policy role — `DecisionPolicy` (`decide`)
 
@@ -186,8 +201,13 @@ Final boolean decision from `score` and `gate_open`.
 
 - **`AlwaysWriteTrigger`** — `ConstantSignal` + `IdentityScorer` + `AlwaysOpenGate` + `AlwaysPolicy`.
 - **`ThresholdWriteTrigger`** — `ConstantSignal` + `WeightedSumScorer({"constant": 1.0})` + `AlwaysOpenGate` + `ThresholdPolicy`.
+- **`MetadataGatedWriteTrigger`** — `UnitTypeSignal` + `MetadataFlagSignal` + `MinScorer` + `AlwaysOpenGate` + `ThresholdPolicy(1.0)`.
+- **`KeyReadyWriteTrigger`** — `PartitionKeyPresentSignal` (optionally plus `UnitTypeSignal`) + `IdentityScorer`/`MinScorer` + `AlwaysOpenGate` + `ThresholdPolicy(1.0)`.
 - **`NeverEvolutionTrigger`** — same signals/scorer/gate as always-write, but **`NeverPolicy`**.
 - **`ThresholdEvolutionTrigger`** — same as `ThresholdWriteTrigger` but writes **`evolution_decisions`** and uses evolution adapter `input_requirements` (`units`, `placements`).
+- **`OutcomeConditionedEvolutionTrigger`** — `OutcomeCorrectnessSignal` + `FeedbackPresenceSignal` + `WeightedSumScorer` + `FeedbackSchemaGate` + `ThresholdPolicy(1.0)`.
+- **`NewWriteEvolutionTrigger`** — `UnitTypeSignal` + `PlacementExistsSignal` + `PartitionKeyPresentSignal` + `MinScorer` + `LayerAllowedGate` + `ThresholdPolicy(1.0)`.
+- **`NeighborExistsEvolutionTrigger`** — `NeighborCountSignal` (+ optional `TopNeighborSimilaritySignal`) + `IdentityScorer` + graph/vector readiness gates + `ThresholdPolicy(1.0)`.
 
 ## `MemoryStore` and topology (pipeline integration)
 

@@ -436,6 +436,134 @@ def test_threshold_evolution_trigger_writes_only_evolution_decisions() -> None:
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
 
 
+def test_metadata_gated_write_trigger_reuses_unit_type_and_metadata_flag_signals() -> None:
+    from memprimitive.baselines import MetadataGatedWriteTrigger
+
+    packet = Packet(
+        units=[
+            MemoryUnit(
+                text="Remember Alice prefers jasmine tea.",
+                unit_id="unit-write",
+                unit_type="tim_thought",
+                metadata={"tim": {"write": True}},
+            ),
+            MemoryUnit(
+                text="Skip this disabled thought.",
+                unit_id="unit-skip",
+                unit_type="tim_thought",
+                metadata={"tim": {"write": False}},
+            ),
+        ]
+    )
+
+    packet_out, _ = MetadataGatedWriteTrigger().run(packet, MemoryStore())
+
+    assert packet_out.decisions == [True, False]
+    assert packet_out.trace["write_trigger"]["scorer"] == "min"
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"]["unit_type_ready"] == 1.0
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"]["metadata_write_flag"] == 1.0
+    assert packet_out.trace["write_trigger"]["per_unit"][1]["signals"]["metadata_write_flag"] == 0.0
+
+
+def test_key_ready_write_trigger_writes_only_units_with_required_key() -> None:
+    from memprimitive.baselines import KeyReadyWriteTrigger
+
+    packet = Packet(
+        units=[
+            MemoryUnit(
+                text="Working summary block",
+                unit_id="unit-key",
+                metadata={"memgpt_key": "working_summary"},
+            ),
+            MemoryUnit(
+                text="Unnamed block",
+                unit_id="unit-missing",
+                metadata={},
+            ),
+        ]
+    )
+
+    packet_out, _ = KeyReadyWriteTrigger().run(packet, MemoryStore())
+
+    assert packet_out.decisions == [True, False]
+    assert packet_out.trace["write_trigger"]["policy"] == "threshold"
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"]["key_ready"] == 1.0
+    assert packet_out.trace["write_trigger"]["per_unit"][1]["signals"]["key_ready"] == 0.0
+
+
+def test_outcome_conditioned_evolution_trigger_triggers_only_for_failed_trials() -> None:
+    from memprimitive.baselines import OutcomeConditionedEvolutionTrigger
+
+    failed_packet = Packet(
+        observation=Observation(
+            text="Trial scratchpad",
+            source="dialogue",
+            metadata={"is_correct": False, "feedback": "The answer missed the edge case."},
+        ),
+        units=[MemoryUnit(text="trial unit", unit_id="unit-failed")],
+        placements=[Placement(unit_id="unit-failed", target_layer="trial_buffer")],
+    )
+    success_packet = Packet(
+        observation=Observation(
+            text="Trial scratchpad",
+            source="dialogue",
+            metadata={"is_correct": True, "feedback": "The answer is correct."},
+        ),
+        units=[MemoryUnit(text="trial unit", unit_id="unit-success")],
+        placements=[Placement(unit_id="unit-success", target_layer="trial_buffer")],
+    )
+
+    failed_out, _ = OutcomeConditionedEvolutionTrigger().run(failed_packet, MemoryStore())
+    success_out, _ = OutcomeConditionedEvolutionTrigger().run(success_packet, MemoryStore())
+
+    assert failed_out.evolution_decisions == [True]
+    assert failed_out.trace["evolution_trigger"]["scorer"] == "weighted_sum"
+    assert failed_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["trial_failed"] == 1.0
+    assert failed_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["feedback_present"] == 1.0
+    assert success_out.evolution_decisions == [False]
+    assert success_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["trial_failed"] == 0.0
+
+
+def test_new_write_evolution_trigger_requires_partition_ready_local_write_context() -> None:
+    from memprimitive.baselines import NewWriteEvolutionTrigger
+
+    packet = Packet(
+        units=[
+            MemoryUnit(
+                text="Alice prefers jasmine tea.",
+                unit_id="unit-ready",
+                unit_type="tim_thought",
+                metadata={"tim": {"group_id": "alice-profile"}},
+            ),
+            MemoryUnit(
+                text="Thought without partition key.",
+                unit_id="unit-missing-key",
+                unit_type="tim_thought",
+                metadata={"tim": {}},
+            ),
+            MemoryUnit(
+                text="Thought routed to the wrong layer.",
+                unit_id="unit-wrong-layer",
+                unit_type="tim_thought",
+                metadata={"tim": {"group_id": "alice-profile"}},
+            ),
+        ],
+        placements=[
+            Placement(unit_id="unit-ready", target_layer="thought_memory"),
+            Placement(unit_id="unit-missing-key", target_layer="thought_memory"),
+            Placement(unit_id="unit-wrong-layer", target_layer="default"),
+        ],
+    )
+
+    packet_out, _ = NewWriteEvolutionTrigger().run(packet, MemoryStore())
+
+    assert packet_out.evolution_decisions == [True, False, False]
+    assert packet_out.trace["evolution_trigger"]["scorer"] == "min"
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["partition_key_ready"] == 1.0
+    assert packet_out.trace["evolution_trigger"]["per_unit"][1]["signals"]["partition_key_ready"] == 0.0
+    assert packet_out.trace["evolution_trigger"]["per_unit"][2]["gate"] is False
+
+
 def test_composed_write_trigger_validates_input_requirements_at_entry() -> None:
     from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
     from memprimitive.baselines._trigger_family import (
@@ -1676,6 +1804,51 @@ def test_amem_style_trigger_family_components_gate_neighbor_trigger_on_vector_gr
     )
 
 
+def test_compose_graph_neighbor_evolution_trigger_fires_when_neighbors_exist() -> None:
+    from memprimitive.baselines.evolution_trigger import compose_graph_neighbor_evolution_trigger
+
+    store = _graph_vector_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice studies graph memory",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"graph": {"entities": ["Alice"], "links": []}},
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Alice graph note", unit_id="unit-new", embedding=[0.95, 0.05])],
+        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
+    )
+
+    packet_out, _ = compose_graph_neighbor_evolution_trigger(
+        name="graph_neighbor_exists_trigger",
+        layer="knowledge_graph",
+        candidate_top_k=2,
+    ).run(packet, store)
+
+    assert packet_out.evolution_decisions == [True]
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 1.0
+
+
+def test_neighbor_exists_evolution_trigger_blocks_without_neighbor_candidates() -> None:
+    from memprimitive.baselines import NeighborExistsEvolutionTrigger
+
+    store = _graph_vector_store()
+    packet = Packet(
+        units=[MemoryUnit(text="Alice isolated note", unit_id="unit-new", embedding=[1.0, 0.0])],
+        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
+    )
+
+    packet_out, _ = NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(packet, store)
+
+    assert packet_out.evolution_decisions == [False]
+    assert packet_out.trace["evolution_trigger"]["gate"] == "all"
+
+
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
     from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
 
@@ -1869,6 +2042,91 @@ def test_graph_neighbor_append_evolution_only_modifies_graph_layer() -> None:
     assert packet_out.trace["memory_evolution"]["effects"][0]["target_layer"] == "knowledge_graph"
 
 
+def test_graph_link_evolution_rewrites_only_graph_metadata_namespace() -> None:
+    from memprimitive.baselines import GraphLinkEvolution
+
+    store = _graph_vector_store()
+    existing = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="knowledge_graph",
+        text="Alice likes jasmine tea",
+        timestamp="2026-03-27T00:00:00+00:00",
+        embedding=[1.0, 0.0],
+        metadata={"owner": "kept", "graph": {"entities": ["Alice"], "links": []}},
+    )
+    incoming = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:01:00+00:00",
+        embedding=[0.95, 0.05],
+        metadata={"owner": "kept", "graph": {"entities": ["Alice"], "links": []}},
+    )
+    store.append(existing)
+    store.append(incoming)
+
+    packet = Packet(
+        units=[MemoryUnit(text="Alice studies graph memory", unit_id="unit-2", embedding=[0.95, 0.05])],
+        placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
+        evolution_decisions=[True],
+    )
+
+    packet_out, store = GraphLinkEvolution(
+        target_layer="knowledge_graph",
+        neighbor_limit=1,
+        rewrite_neighbor_metadata=True,
+    ).run(packet, store)
+
+    updated = [record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-2"][0]
+    assert updated.metadata["owner"] == "kept"
+    assert updated.metadata["graph"]["links"] == ["rec-1"]
+    assert updated.metadata["graph"]["neighbor_context"]["neighbor_record_ids"] == ["rec-1"]
+    assert packet_out.trace["memory_evolution"]["effects"][0]["candidate_scores"][0]["record_id"] == "rec-1"
+
+
+def test_graph_neighbor_context_trace_evolution_can_run_trace_only_or_rewrite() -> None:
+    from memprimitive.baselines import GraphNeighborContextTraceEvolution
+
+    store = _graph_store()
+    seed = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="knowledge_graph",
+        text="Alice likes jasmine tea",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": []}},
+    )
+    current = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:01:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": ["rec-1"]}},
+    )
+    store.append(seed)
+    store.append(current)
+
+    packet = Packet(
+        units=[MemoryUnit(text="Alice studies graph memory", unit_id="unit-2")],
+        placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
+        evolution_decisions=[True],
+    )
+
+    trace_packet, store = GraphNeighborContextTraceEvolution(target_layer="knowledge_graph").run(packet, store)
+    assert trace_packet.trace["memory_evolution"]["effects"][0]["neighbor_record_ids"] == ["rec-1"]
+    assert "neighbor_context" not in store.iter_records("knowledge_graph")[1].metadata["graph"]
+
+    rewrite_packet, store = GraphNeighborContextTraceEvolution(
+        target_layer="knowledge_graph",
+        rewrite_metadata=True,
+    ).run(packet, store)
+    assert rewrite_packet.trace["memory_evolution"]["effects"][0]["rewrite_metadata"] is True
+    assert store.iter_records("knowledge_graph")[1].metadata["graph"]["neighbor_context"]["neighbor_record_ids"] == ["rec-1"]
+
+
 def test_graph_readout_renders_graph_metadata() -> None:
     from memprimitive.baselines import GraphReadout
 
@@ -1885,6 +2143,50 @@ def test_graph_readout_renders_graph_metadata() -> None:
     assert "entities=Alice" in packet_out.readout.text
     assert "links=rec-0" in packet_out.readout.text
     assert packet_out.readout.metadata["graph_item_count"] == 1
+
+
+def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieval_and_readout() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import (
+        BasicRepresentation,
+        GraphAppendOrganization,
+        GraphLinkEvolution,
+        GraphNeighborContextTraceEvolution,
+        GraphReadout,
+        GraphSeedAndExpandRetrieval,
+        NeighborExistsEvolutionTrigger,
+        PassThroughUnitFormation,
+    )
+
+    store = _graph_vector_store()
+    pipeline = MemoryPipeline(
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(elements=("text", "embedding", "entities", "triple", "tags", "keywords")),
+        organization=GraphAppendOrganization(target_layer="knowledge_graph"),
+        evolution_trigger=NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2),
+        memory_evolution=(
+            GraphLinkEvolution(target_layer="knowledge_graph", neighbor_limit=2, rewrite_neighbor_metadata=True),
+            GraphNeighborContextTraceEvolution(target_layer="knowledge_graph", rewrite_metadata=True),
+        ),
+        retrieval=GraphSeedAndExpandRetrieval(top_k=4, layer="knowledge_graph", seed_top_k=1),
+        readout=GraphReadout(),
+        store=store,
+    )
+
+    first_packet = pipeline.ingest(Observation(text="Alice likes jasmine tea.", source="notes"))
+    second_packet = pipeline.ingest(Observation(text="Alice studies graph memory systems.", source="notes"))
+    pipeline.ingest(Observation(text="Bob builds retrieval tools.", source="notes"))
+    readout = pipeline.recall(Query(text="Alice graph"))
+
+    graph_records = pipeline.store.iter_records("knowledge_graph")
+    linked_record = [record for record in graph_records if record.unit_id == second_packet.units[0].unit_id][0]
+
+    assert first_packet.evolution_decisions == [False]
+    assert second_packet.evolution_decisions == [True]
+    assert linked_record.metadata["graph"]["links"]
+    assert linked_record.metadata["graph"]["neighbor_context"]["neighbor_record_ids"]
+    assert "Alice studies graph memory systems." in readout.text or "Alice likes jasmine tea." in readout.text
+    assert readout.source_ids
 
 
 def test_summary_rewrite_evolution_appends_summary_record() -> None:

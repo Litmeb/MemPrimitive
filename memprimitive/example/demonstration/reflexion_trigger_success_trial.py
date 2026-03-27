@@ -26,16 +26,9 @@ from memprimitive.baselines import (
     AppendOnlyEvolution,
     AppendOrganization,
     BasicRepresentation,
+    OutcomeConditionedEvolutionTrigger,
     PassThroughUnitFormation,
 )
-from memprimitive.baselines._trigger_family import (
-    FeedbackPresenceSignal,
-    FeedbackSchemaGate,
-    OutcomeCorrectnessSignal,
-    ThresholdPolicy,
-    WeightedSumScorer,
-)
-from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
 
 
 def build_pipeline() -> MemoryPipeline:
@@ -44,14 +37,7 @@ def build_pipeline() -> MemoryPipeline:
         representation=BasicRepresentation(elements=("text",)),
         write_trigger=AlwaysWriteTrigger(),
         organization=AppendOrganization(),
-        evolution_trigger=compose_evolution_trigger(
-            name="demo_reflexion_success_trial_trigger",
-            signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
-            scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
-            gate=FeedbackSchemaGate(),
-            policy=ThresholdPolicy(threshold=1.0),
-            input_requirements=("units", "observation"),
-        ),
+        evolution_trigger=OutcomeConditionedEvolutionTrigger(),
         memory_evolution=AppendOnlyEvolution(),
     )
 

@@ -927,6 +927,31 @@ class GraphLayerGate(Gate):
 
 
 @dataclass(slots=True, frozen=True)
+class AllGate(Gate):
+    """Open only when every child gate opens for the current unit.
+
+    Constructor: ``gates`` must contain at least one gate. This is a reusable
+    trigger-family combinator so slot adapters can stay declarative instead of
+    introducing family-specific trigger classes for multi-condition readiness
+    checks.
+    """
+
+    gates: tuple[Gate, ...]
+
+    @property
+    def name(self) -> str:
+        return "all"
+
+    def evaluate(self, context: TriggerContext, unit_index: int, *, signals: SignalMap, score: float) -> bool:
+        if not self.gates:
+            raise ValueError("AllGate requires at least one child gate.")
+        return all(
+            gate.evaluate(context, unit_index, signals=signals, score=score)
+            for gate in self.gates
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class AlwaysPolicy(DecisionPolicy):
     """Always accept units that reach the policy."""
 

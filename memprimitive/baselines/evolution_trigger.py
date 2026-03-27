@@ -8,16 +8,30 @@ from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import EvolutionTriggerModule
 
 from ._trigger_family import (
+    AllGate,
     AlwaysOpenGate,
     ConstantSignal,
     DecisionPolicy,
+    FeedbackPresenceSignal,
+    FeedbackSchemaGate,
     Gate,
+    GraphLayerGate,
+    HasEmbeddingGate,
     IdentityScorer,
+    LayerAllowedGate,
+    MinScorer,
+    NeighborCountSignal,
     NeverPolicy,
+    OutcomeCorrectnessSignal,
+    PartitionKeyPresentSignal,
+    PlacementExistsSignal,
     ScoreAggregator,
     SignalProvider,
     ThresholdPolicy,
+    TopNeighborSimilaritySignal,
     TriggerFamilyRunner,
+    UnitTypeSignal,
+    VectorIndexReadyGate,
     WeightedSumScorer,
 )
 
@@ -100,6 +114,251 @@ class ThresholdEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
         )
 
 
+def compose_outcome_conditioned_evolution_trigger(
+    *,
+    name: str = "outcome_conditioned_evolution_trigger",
+    threshold: float = 1.0,
+    feedback_bonus: float = 0.1,
+) -> EvolutionTriggerModule:
+    """Compose a Reflexion-style failure trigger from shared trigger-family parts.
+
+    This builder intentionally reuses ``OutcomeCorrectnessSignal``,
+    ``FeedbackPresenceSignal``, and ``FeedbackSchemaGate`` so failure-triggered
+    reflection remains inspectable as ``signals -> weighted score -> schema gate
+    -> threshold`` instead of becoming a family-specific black box.
+    """
+
+    return compose_evolution_trigger(
+        name=name,
+        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
+        scorer=WeightedSumScorer(
+            weights={
+                "trial_failed": 1.0,
+                "feedback_present": float(feedback_bonus),
+            }
+        ),
+        gate=FeedbackSchemaGate(),
+        policy=ThresholdPolicy(threshold=threshold),
+        input_requirements=("units", "placements", "observation"),
+        output_guarantees=("evolution_decisions",),
+    )
+
+
+class OutcomeConditionedEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Trigger evolution only when observation outcome indicates a failed trial.
+
+    Constructor: ``threshold`` controls when the weighted failure score turns
+    into a final trigger decision, while ``feedback_bonus`` keeps explicit
+    feedback visible in the trace without making it the sole prerequisite.
+    ``run`` requires ``packet.units``, aligned ``packet.placements``, and
+    ``packet.observation``; it writes ``Packet.evolution_decisions`` without
+    mutating ``store``.
+    """
+
+    spec = ModuleSpec(
+        name="outcome_conditioned_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements", "observation"),
+        output_guarantees=("evolution_decisions",),
+    )
+
+    def __init__(self, *, threshold: float = 1.0, feedback_bonus: float = 0.1) -> None:
+        composed = compose_outcome_conditioned_evolution_trigger(
+            name=self.spec.name,
+            threshold=threshold,
+            feedback_bonus=feedback_bonus,
+        )
+        super().__init__(
+            runner=composed._runner,
+            spec=self.spec,
+            required_fields=("placements", "observation"),
+        )
+
+
+def compose_new_write_evolution_trigger(
+    *,
+    name: str = "new_write_evolution_trigger",
+    expected_unit_type: str = "tim_thought",
+    allowed_layers: tuple[str, ...] = ("thought_memory",),
+    partition_key_paths: tuple[str, ...] = ("tim.group_id", "tim.hash_index"),
+    partition_key_source: str = "unit.metadata",
+    strict_missing_partition_key: bool = False,
+) -> EvolutionTriggerModule:
+    """Compose a TiM-style local-maintenance trigger from shared trigger parts.
+
+    This is an inferred decomposition of "new write triggers local maintenance"
+    motifs: unit family identity, placement readiness, and partition-key
+    readiness are separate signals; allowed target layers stay in the gate.
+    """
+
+    return compose_evolution_trigger(
+        name=name,
+        signal_providers=(
+            UnitTypeSignal(expected_unit_type=expected_unit_type, signal_name="unit_type_ready"),
+            PlacementExistsSignal(signal_name="has_placement"),
+            PartitionKeyPresentSignal(
+                paths=partition_key_paths,
+                source=partition_key_source,
+                strict_missing=strict_missing_partition_key,
+                signal_name="partition_key_ready",
+            ),
+        ),
+        scorer=MinScorer(sources=("unit_type_ready", "has_placement", "partition_key_ready")),
+        gate=LayerAllowedGate(allowed_layers=allowed_layers),
+        policy=ThresholdPolicy(threshold=1.0),
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
+    )
+
+
+class NewWriteEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Trigger local maintenance when a newly written partition-ready unit lands.
+
+    Constructor: ``expected_unit_type`` selects the family to watch,
+    ``allowed_layers`` restricts where maintenance may fire, and
+    ``partition_key_paths`` declares the partition/key metadata that must be
+    present. ``run`` requires aligned ``packet.units`` and ``packet.placements``
+    and writes ``Packet.evolution_decisions`` without mutating ``store``.
+    """
+
+    spec = ModuleSpec(
+        name="new_write_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
+    )
+
+    def __init__(
+        self,
+        *,
+        expected_unit_type: str = "tim_thought",
+        allowed_layers: tuple[str, ...] = ("thought_memory",),
+        partition_key_paths: tuple[str, ...] = ("tim.group_id", "tim.hash_index"),
+        partition_key_source: str = "unit.metadata",
+        strict_missing_partition_key: bool = False,
+    ) -> None:
+        composed = compose_new_write_evolution_trigger(
+            name=self.spec.name,
+            expected_unit_type=expected_unit_type,
+            allowed_layers=allowed_layers,
+            partition_key_paths=partition_key_paths,
+            partition_key_source=partition_key_source,
+            strict_missing_partition_key=strict_missing_partition_key,
+        )
+        super().__init__(
+            runner=composed._runner,
+            spec=self.spec,
+            required_fields=("placements",),
+        )
+
+
+def compose_graph_neighbor_evolution_trigger(
+    *,
+    name: str = "graph_neighbor_evolution_trigger",
+    layer: str | None = None,
+    candidate_top_k: int = 3,
+    similarity_threshold: float | None = None,
+    require_embedding: bool = True,
+    require_vector_index: bool = True,
+    require_graph_layer: bool = True,
+    include_top_similarity_signal: bool = True,
+) -> EvolutionTriggerModule:
+    """Compose a graph-dependent neighbor-availability evolution trigger.
+
+    This is an inferred decomposition of graph-triggered evolution motifs:
+    candidate discovery remains a signal-provider concern, while graph/vector
+    readiness stays in reusable gates. The resulting adapter writes
+    ``Packet.evolution_decisions`` without changing the pipeline API.
+    """
+
+    signal_providers: list[SignalProvider] = [
+        NeighborCountSignal(
+            top_k=candidate_top_k,
+            layer=layer,
+            similarity_threshold=similarity_threshold,
+            signal_name="neighbor_count",
+        ),
+    ]
+    if include_top_similarity_signal:
+        signal_providers.append(
+            TopNeighborSimilaritySignal(
+                top_k=candidate_top_k,
+                layer=layer,
+                similarity_threshold=similarity_threshold,
+                signal_name="top_neighbor_similarity",
+            )
+        )
+
+    gates: list[Gate] = []
+    if require_embedding:
+        gates.append(HasEmbeddingGate())
+    if require_vector_index:
+        gates.append(VectorIndexReadyGate(layer=layer))
+    if require_graph_layer:
+        gates.append(GraphLayerGate(layer=layer))
+    gate: Gate = AllGate(tuple(gates)) if gates else AlwaysOpenGate()
+
+    return compose_evolution_trigger(
+        name=name,
+        signal_providers=tuple(signal_providers),
+        scorer=IdentityScorer(source="neighbor_count"),
+        gate=gate,
+        policy=ThresholdPolicy(threshold=1.0),
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
+    )
+
+
+class NeighborExistsEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Trigger graph evolution only when the current unit has graph neighbors.
+
+    Constructor: ``target_layer`` should name a graph layer that also exposes a
+    vector index. ``candidate_top_k`` must be positive. ``similarity_threshold``
+    optionally filters weak neighbors before the trigger decides.
+
+    ``run`` requires aligned ``packet.units`` and ``packet.placements``. The
+    implementation is deliberately composed from shared trigger-family pieces
+    rather than a bespoke black-box trigger, matching the motif guide's inferred
+    decomposition of neighbor-triggered graph evolution.
+    """
+
+    spec = ModuleSpec(
+        name="neighbor_exists_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
+        store_requirements=("shape:Graph", "index:graph", "index:vector"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:vector"),
+    )
+
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        candidate_top_k: int = 3,
+        similarity_threshold: float | None = None,
+    ) -> None:
+        if candidate_top_k <= 0:
+            raise ValueError("NeighborExistsEvolutionTrigger requires candidate_top_k > 0.")
+        self.target_layer = target_layer
+        self.candidate_top_k = candidate_top_k
+        self.similarity_threshold = similarity_threshold
+        composed = compose_graph_neighbor_evolution_trigger(
+            name=self.spec.name,
+            layer=target_layer,
+            candidate_top_k=candidate_top_k,
+            similarity_threshold=similarity_threshold,
+            require_embedding=True,
+            require_vector_index=True,
+            require_graph_layer=True,
+        )
+        super().__init__(
+            runner=composed._runner,
+            spec=self.spec,
+            required_fields=("placements",),
+        )
+
+
 def compose_evolution_trigger(
     *,
     name: str,
@@ -134,4 +393,7 @@ BASELINE_SLOT: Final[str] = "evolution_trigger"
 BASELINE_CLASSES: Final[tuple[type[EvolutionTriggerModule], ...]] = (
     NeverEvolutionTrigger,
     ThresholdEvolutionTrigger,
+    OutcomeConditionedEvolutionTrigger,
+    NewWriteEvolutionTrigger,
+    NeighborExistsEvolutionTrigger,
 )

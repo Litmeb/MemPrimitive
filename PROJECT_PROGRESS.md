@@ -130,6 +130,57 @@ Validation status:
 - `tests/test_baselines.py` now includes dedicated coverage for each of the new trigger-family signals/gates, including normal paths, missing-field failures where applicable, and blocked graph/vector readiness paths.
 - `python -m memprimitive.example.demonstration.trigger_family_infrastructure` provides a runnable TiM-like plus A-MEM-like shared infrastructure demo.
 
+### 4.3 Graph-dependent trigger and evolution baselines now exist as stage-3 building blocks
+
+The baseline graph family is no longer limited to append-plus-link demos. The repository now has reusable graph-dependent trigger/evolution primitives that can be composed into a fuller graph pipeline:
+
+- `NeighborExistsEvolutionTrigger` in [memprimitive/baselines/evolution_trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/evolution_trigger.py) implements the motif-guide's neighbor-exists trigger as a trigger-family composition, not a bespoke black-box trigger.
+- `compose_graph_neighbor_evolution_trigger(...)` provides a reusable graph evolution trigger composer over `NeighborCountSignal`, `TopNeighborSimilaritySignal`, `HasEmbeddingGate`, `VectorIndexReadyGate`, and `GraphLayerGate`.
+- `GraphLinkEvolution` in [memprimitive/baselines/memory_evolution.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/memory_evolution.py) performs graph-layer-local link evolution using same-layer neighbor candidates, `MemoryStore.add_graph_links`, and safe graph metadata rewrites.
+- `GraphNeighborContextTraceEvolution` adds the simplified/trace-first neighbor-context update baseline. It can stay trace-only or conservatively write a namespaced `graph.neighbor_context` snapshot.
+- The older `GraphNeighborAppendEvolution` now remains as a backward-compatible wrapper on the newer graph-link evolution path instead of diverging as a separate implementation.
+
+Practical impact:
+
+- There is now a clear stage-3 baseline path for graph-dependent evolution motifs before implementing more paper-faithful A-MEM-style controllers.
+- Later A-MEM-like work can reuse a stable end-to-end substrate rather than bundling trigger, link evolution, and retrieval logic into one family-specific module.
+- Graph evolution writes are intentionally scoped to the target graph layer, and metadata rewrites stay under the `metadata["graph"]` namespace.
+
+Validation status:
+
+- `tests/test_baselines.py` now includes dedicated coverage for the graph neighbor trigger composer, `NeighborExistsEvolutionTrigger`, `GraphLinkEvolution`, `GraphNeighborContextTraceEvolution`, and a full ingest -> organization -> evolution_trigger -> memory_evolution -> retrieval -> readout pipeline.
+- `python -m memprimitive.example.demonstration.graph_dependent_pipeline` provides the new minimal stage-3 graph pipeline demonstration.
+
+### 4.4 Non-graph trigger-family motif baselines now exist for TiM / Reflexion / MemGPT-style triggers
+
+The stage-1 trigger-family substrate now also covers the non-graph trigger motifs called out by the motif DSL layer guide, without introducing new pipeline slots or family-specific trigger black boxes:
+
+- `MetadataGatedWriteTrigger` in [memprimitive/baselines/write_trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/write_trigger.py) expresses TiM-style metadata-gated write as `UnitTypeSignal + MetadataFlagSignal + MinScorer + AlwaysOpenGate + ThresholdPolicy`.
+- `KeyReadyWriteTrigger` in [memprimitive/baselines/write_trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/write_trigger.py) expresses key/presence-gated write for keyed or partition-addressable storage paths such as MemGPT-style upsert flows.
+- `OutcomeConditionedEvolutionTrigger` in [memprimitive/baselines/evolution_trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/evolution_trigger.py) expresses Reflexion-style failure-triggered reflection using the shared `OutcomeCorrectnessSignal`, `FeedbackPresenceSignal`, and `FeedbackSchemaGate`.
+- `NewWriteEvolutionTrigger` in [memprimitive/baselines/evolution_trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/evolution_trigger.py) expresses TiM-style "new write triggers local maintenance" using `UnitTypeSignal`, `PlacementExistsSignal`, `PartitionKeyPresentSignal`, `MinScorer`, and `LayerAllowedGate`.
+
+The same slot modules now also expose motif-oriented builders:
+
+- `compose_metadata_gated_write_trigger`
+- `compose_key_ready_write_trigger`
+- `compose_outcome_conditioned_evolution_trigger`
+- `compose_new_write_evolution_trigger`
+
+Practical impact:
+
+- TiM / Reflexion / MemGPT-style trigger motifs can now be reconstructed directly inside the baseline slot files rather than only inside classic-family modules or ad hoc examples.
+- The trigger-family four-piece decomposition is now visible in stable baseline class names, which makes these motifs easier to compare, test, and later search over.
+- Existing Reflexion demonstrations were updated to use the stable `OutcomeConditionedEvolutionTrigger` baseline, and a new demonstration now shows a partition-ready unit opening TiM-style local maintenance.
+
+Validation status:
+
+- `tests/test_baselines.py` now includes dedicated coverage for `MetadataGatedWriteTrigger`, `KeyReadyWriteTrigger`, `OutcomeConditionedEvolutionTrigger`, and `NewWriteEvolutionTrigger`.
+- The following demonstrations run successfully:
+  - `python -m memprimitive.example.demonstration.reflexion_trigger_failed_trial`
+  - `python -m memprimitive.example.demonstration.reflexion_trigger_success_trial`
+  - `python -m memprimitive.example.demonstration.partition_ready_local_maintenance`
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:
@@ -218,6 +269,7 @@ The graph family is improved here, but still only partially formalized:
 - graph retrieval still uses simplified heuristic seed scoring rather than a general vector-seed abstraction
 - graph link evolution is baseline-safe and local, not yet paper-faithful A-MEM agentic evolution
 - graph metadata contracts are stabilized in code, but not yet surfaced as a full searchable ontology layer
+- neighbor-context updates are still conservative baseline summaries, not LLM-driven graph-note rewrites
 
 ### 4. Classic reconstructions are present, but not yet turned into a stable search-ready ontology
 
