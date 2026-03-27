@@ -161,8 +161,8 @@ Factory entry points: **`compose_write_trigger`** (`write_trigger.py`) and **`co
 | `UnitTypeSignal` | `1.0` iff `unit.unit_type == expected_unit_type`. |
 | `PlacementExistsSignal` | **Requires** aligned `packet.placements`. Emits `1.0` when the current unit already has a placement entry. |
 | `PartitionKeyPresentSignal` | Checks one or more dotted metadata paths (for example TiM-like group/hash keys) and emits `1.0` iff any configured key is present. |
-| `NeighborCountSignal` | Counts comparable vector neighbors already present in the target layer, using an explicitly configured `layer` when provided and otherwise falling back to placement-derived targeting. |
-| `TopNeighborSimilaritySignal` | Returns the best cosine similarity among comparable vector neighbors in the target layer, using an explicitly configured `layer` when provided and otherwise falling back to placement-derived targeting. |
+| `NeighborCountSignal` | Counts comparable vector neighbors already present in the target layer, using an explicitly configured `layer` when provided and otherwise falling back to placement-derived targeting; when placements are present they must still align with `packet.units`. |
+| `TopNeighborSimilaritySignal` | Returns the best cosine similarity among comparable vector neighbors in the target layer, using an explicitly configured `layer` when provided and otherwise falling back to placement-derived targeting; when placements are present they must still align with `packet.units`. |
 | `OutcomeCorrectnessSignal` | `1.0` if observation metadata implies the trial failed; else `0.0`. |
 | `FeedbackPresenceSignal` | `1.0` if supported feedback text exists in observation metadata; else `0.0`. |
 
@@ -192,8 +192,8 @@ Hard predicate per unit after scoring; receives full `signals` and `score` for c
 | `SchemaPresentGate` | Checks dotted schema paths on a selected source object (`unit`, `unit.metadata`, `observation`, `query`, etc.) and opens only when the required fields are present. |
 | `FeedbackSchemaGate` | Opens only when observation metadata exposes a parseable outcome or feedback schema. |
 | `HasEmbeddingGate` | Opens only when the configured source exposes a non-empty embedding vector. |
-| `VectorIndexReadyGate` | Opens only when the target layer exists and supports the `vector` index; explicit `layer` overrides placement targeting when both are available. |
-| `GraphLayerGate` | Opens only when the target layer exists and has `shape="Graph"`; explicit `layer` overrides placement targeting when both are available. |
+| `VectorIndexReadyGate` | Opens only when the target layer exists and supports the `vector` index; explicit `layer` overrides placement targeting when both are available, but present placements are still validated for alignment. |
+| `GraphLayerGate` | Opens only when the target layer exists and has `shape="Graph"`; explicit `layer` overrides placement targeting when both are available, but present placements are still validated for alignment. |
 | `AllGate` | Opens only when every child gate opens; useful for graph/vector readiness bundles. |
 
 ### Policy role — `DecisionPolicy` (`decide`)

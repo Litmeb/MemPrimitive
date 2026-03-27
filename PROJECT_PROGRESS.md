@@ -148,7 +148,7 @@ Validation status:
 
 - `tests/test_baselines.py` now includes dedicated coverage for the graph neighbor trigger composer, `NeighborExistsEvolutionTrigger`, `GraphLinkEvolution`, `GraphNeighborContextTraceEvolution`, and a full ingest -> organization -> evolution_trigger -> memory_evolution -> retrieval -> readout pipeline.
 - `python -m memprimitive.example.demonstration.graph_dependent_pipeline` provides the new minimal stage-3 graph pipeline demonstration.
-- Trigger-family graph neighbor lookup and graph/vector readiness now honor an explicitly configured `target_layer` / `layer` ahead of packet placement, which prevents mixed-layer pipelines from firing neighbor-driven evolution against the wrong layer when placements disagree with trigger configuration.
+- Trigger-family graph neighbor lookup and graph/vector readiness now honor an explicitly configured `target_layer` / `layer` ahead of packet placement, while still validating any present placements for alignment with `packet.units`; this prevents both mixed-layer misrouting and silent acceptance of malformed placement state.
 
 ### 4.4 Non-graph trigger-family motif baselines now exist for TiM / Reflexion / MemGPT-style triggers
 
