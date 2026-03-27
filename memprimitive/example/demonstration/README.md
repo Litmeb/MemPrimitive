@@ -36,6 +36,23 @@ python -m memprimitive.example.demonstration.<模块名>
 | `layer_aware_semantic_working.py` | 多写入管道写入 `working` / `semantic`，`LayerAwareRetrieval` 按层选不同检索器并合并。 |
 | `graph_append_entity_retrieval.py` | 图层的 `GraphAppendOrganization`，`EntityRetrieval` 在图数据上召回。 |
 | `layer_aware_working_graph.py` | 分离的 working / 图写入管道，再经 `LayerAwareRetrieval` 合并检索与读出。 |
+| `graph_baseline_pipeline.py` | graph baseline family 的完整闭环：`GraphAppendOrganization` -> `GraphNeighborAppendEvolution` -> `GraphSeedAndExpandRetrieval` -> `GraphReadout`。 |
 | `conditional_layer_routing.py` | `ConditionalLayerOrganization` 按规则（实体、结构化三元组等）自动路由到不同存储层。 |
 | `dispatch_organization_recall.py` | `DispatchOrganization` 同时挂 `AppendOrganization` 与 `GraphAppendOrganization`，单管道做 ingest + 分层召回。 |
 | `dispatch_organization_trace.py` | 同上 dispatch 结构，并打印 `dispatch` 的 organization trace，便于调试分派行为。 |
+
+## Graph baseline 推荐组合
+
+如果你想先验证 graph family 的最小可组合闭环，推荐优先使用下面这组 baseline：
+
+- ingest / graph 写入：`BasicRepresentation(elements=("text", "entities", "triple", "tags", "keywords"))` + `GraphAppendOrganization`
+- link evolution：`ThresholdEvolutionTrigger` + `GraphNeighborAppendEvolution`
+- graph recall：`GraphSeedAndExpandRetrieval`
+- readout：`GraphReadout`
+
+这套组合覆盖了阶段 1 需要的四个动作：
+
+- ingest 到 `Graph` layer
+- 在 graph layer 内建立 links
+- 按 seed + neighbor expansion 召回
+- 以 graph-readable 形式输出 readout

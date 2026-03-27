@@ -8,7 +8,18 @@ from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
     registered_baseline_class_names,
 )
-from memprimitive.core import MemoryRecord, MemoryStore, Observation, Packet, Query, RetrievedSet, StoreLayerSpec, StoreTopology
+from memprimitive.core import (
+    MemoryRecord,
+    MemoryStore,
+    MemoryUnit,
+    Observation,
+    Packet,
+    Placement,
+    Query,
+    RetrievedSet,
+    StoreLayerSpec,
+    StoreTopology,
+)
 from memprimitive.pipeline_slots import PRE_EVOLUTION_SLOTS
 
 
@@ -19,6 +30,17 @@ def _stored_pipeline_packet(text: str, store: MemoryStore) -> tuple[Packet, Memo
     for slot in PRE_EVOLUTION_SLOTS:
         packet, store = mods[slot].run(packet, store)
     return packet, store
+
+
+def _graph_store() -> MemoryStore:
+    return MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
 
 
 def test_unit_formation_returns_one_unit_with_provenance() -> None:
@@ -1379,24 +1401,186 @@ def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -
 def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadata() -> None:
     from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, GraphAppendOrganization, PassThroughUnitFormation
 
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [
-                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "entity")),
-            ]
-        )
-    )
+    store = _graph_store()
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice likes tea.", source="notes")),
         store,
     )
     packet, store = BasicRepresentation(elements=("text", "entities", "triple")).run(packet, store)
     packet, store = AlwaysWriteTrigger().run(packet, store)
-    _, store = GraphAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+    packet, store = GraphAppendOrganization(target_layer="knowledge_graph").run(packet, store)
 
     record = store.iter_records("knowledge_graph")[0]
     assert "graph" in record.metadata
     assert record.metadata["graph"]["triples"]
+    assert record.metadata["graph"]["links"] == []
+    assert record.metadata["graph"]["link_count"] == 0
+    assert packet.trace["organization"]["graph_metadata_schema"]
+
+
+def test_memory_store_graph_link_round_trip_returns_neighbors() -> None:
+    store = _graph_store()
+    first = MemoryRecord(record_id="rec-1", unit_id="unit-1", layer="knowledge_graph", text="Alice likes tea", timestamp="t1")
+    second = MemoryRecord(record_id="rec-2", unit_id="unit-2", layer="knowledge_graph", text="Alice studies graphs", timestamp="t2")
+    store.append(first)
+    store.append(second)
+
+    merged_links = store.add_graph_links("knowledge_graph", "rec-2", ["rec-1"])
+    neighbors = store.iter_graph_neighbors("knowledge_graph", "rec-2")
+
+    assert merged_links == ["rec-1"]
+    assert [record.record_id for record in neighbors] == ["rec-1"]
+
+
+def test_graph_neighbor_retrieval_handles_missing_and_present_links() -> None:
+    from memprimitive.baselines import GraphNeighborRetrieval
+
+    store = _graph_store()
+    seed = MemoryRecord(
+        record_id="rec-seed",
+        unit_id="unit-seed",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": []}},
+    )
+    neighbor = MemoryRecord(
+        record_id="rec-neighbor",
+        unit_id="unit-neighbor",
+        layer="knowledge_graph",
+        text="Alice likes jasmine tea",
+        timestamp="2026-03-27T00:01:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": []}},
+    )
+    store.append(seed)
+    store.append(neighbor)
+
+    empty_packet, _ = GraphNeighborRetrieval(top_k=3).run(
+        Packet(query=Query(text="Alice", metadata={"graph_seed_record_ids": ["rec-seed"]})),
+        store,
+    )
+    assert empty_packet.retrieved.items == []
+
+    store.add_graph_links("knowledge_graph", "rec-seed", ["rec-neighbor"])
+    linked_packet, _ = GraphNeighborRetrieval(top_k=3).run(
+        Packet(query=Query(text="Alice", metadata={"graph_seed_record_ids": ["rec-seed"]})),
+        store,
+    )
+
+    assert [record.record_id for record in linked_packet.retrieved.items] == ["rec-neighbor"]
+    assert linked_packet.trace["retrieval"]["expanded_neighbor_ids"] == ["rec-neighbor"]
+
+
+def test_graph_seed_and_expand_retrieval_uses_candidate_set_and_neighbor_expansion() -> None:
+    from memprimitive.baselines import GraphSeedAndExpandRetrieval
+
+    store = _graph_store()
+    seed = MemoryRecord(
+        record_id="rec-seed",
+        unit_id="unit-seed",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": ["rec-neighbor"]}},
+    )
+    neighbor = MemoryRecord(
+        record_id="rec-neighbor",
+        unit_id="unit-neighbor",
+        layer="knowledge_graph",
+        text="Alice likes jasmine tea",
+        timestamp="2026-03-27T00:01:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": []}},
+    )
+    other = MemoryRecord(
+        record_id="rec-other",
+        unit_id="unit-other",
+        layer="knowledge_graph",
+        text="Bob studies memory retrieval",
+        timestamp="2026-03-27T00:02:00+00:00",
+        metadata={"graph": {"entities": ["Bob"], "links": []}},
+    )
+    store.append(seed)
+    store.append(neighbor)
+    store.append(other)
+
+    packet_out, _ = GraphSeedAndExpandRetrieval(top_k=3, seed_top_k=1).run(
+        Packet(
+            query=Query(
+                text="Alice graph",
+                metadata={"graph_candidate_record_ids": ["rec-seed", "rec-neighbor"]},
+            )
+        ),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-seed", "rec-neighbor"]
+    assert packet_out.trace["retrieval"]["seed_record_ids"] == ["rec-seed"]
+    assert packet_out.trace["retrieval"]["expanded_neighbor_ids"] == ["rec-neighbor"]
+
+
+def test_graph_neighbor_append_evolution_only_modifies_graph_layer() -> None:
+    from memprimitive.baselines import GraphNeighborAppendEvolution
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-working",
+            unit_id="unit-working",
+            layer="default",
+            text="Working memory note",
+            timestamp="2026-03-27T00:00:00+00:00",
+        )
+    )
+    existing = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="knowledge_graph",
+        text="Alice likes jasmine tea",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": []}},
+    )
+    incoming = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:01:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": []}},
+    )
+    store.append(existing)
+    store.append(incoming)
+
+    packet = Packet(
+        units=[MemoryUnit(text="Alice studies graph memory", unit_id="unit-2")],
+        placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
+        evolution_decisions=[True],
+    )
+
+    packet_out, store = GraphNeighborAppendEvolution(target_layer="knowledge_graph", neighbor_limit=1).run(packet, store)
+
+    updated_graph_records = store.iter_records("knowledge_graph")
+    updated_incoming = [record for record in updated_graph_records if record.record_id == "rec-2"][0]
+    assert updated_incoming.metadata["graph"]["links"] == ["rec-1"]
+    assert store.iter_records("default")[0].record_id == "rec-working"
+    assert packet_out.trace["memory_evolution"]["effects"][0]["target_layer"] == "knowledge_graph"
+
+
+def test_graph_readout_renders_graph_metadata() -> None:
+    from memprimitive.baselines import GraphReadout
+
+    record = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"entities": ["Alice"], "links": ["rec-0"]}},
+    )
+    packet_out, _ = GraphReadout().run(Packet(retrieved=RetrievedSet(items=[record], scores=[])), _graph_store())
+
+    assert "entities=Alice" in packet_out.readout.text
+    assert "links=rec-0" in packet_out.readout.text
+    assert packet_out.readout.metadata["graph_item_count"] == 1
 
 
 def test_summary_rewrite_evolution_appends_summary_record() -> None:

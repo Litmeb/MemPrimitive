@@ -54,6 +54,7 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `TraceOnlyEvolution`
 - `SummaryRewriteEvolution`
 - `LayerMoveEvolution`
+- `GraphNeighborAppendEvolution`
 
 ### Slot `retrieval` — `retrieval.py`
 
@@ -63,6 +64,8 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `TagRetrieval`
 - `EntityRetrieval`
 - `BM25Retrieval`
+- `GraphNeighborRetrieval`
+- `GraphSeedAndExpandRetrieval`
 - `LayerAwareRetrieval`
 
 `BM25Retrieval` uses Okapi BM25 from `rank-bm25` over lowercase whitespace tokens from record text plus
@@ -75,6 +78,7 @@ ties, and falls back to recency when all candidates score zero.
 - `BulletListReadout`
 - `GroupedByLayerReadout`
 - `JSONReadout`
+- `GraphReadout`
 
 ## Representation: supported element kinds (`representation.py`)
 

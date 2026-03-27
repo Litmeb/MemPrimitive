@@ -571,6 +571,10 @@ class MemoryStore:
     def add_graph_links(self, layer: str, record_id: str, linked_record_ids: Iterable[str]) -> list[str]:
         layer_name = _require_non_empty_text(layer, "layer")
         rid = _require_non_empty_text(record_id, "record_id")
+        if not self.has_layer(layer_name):
+            raise ValueError(f"Layer {layer_name!r} is not declared in the store topology.")
+        if self.layer_shape(layer_name) != "Graph":
+            raise ValueError(f"MemoryStore.add_graph_links requires graph layer {layer_name!r}.")
         additions = [str(value).strip() for value in linked_record_ids if str(value).strip()]
         if not additions:
             return []
@@ -595,6 +599,7 @@ class MemoryStore:
                     "graph": {
                         **graph_meta,
                         "links": merged_links,
+                        "link_count": len(merged_links),
                     },
                 },
             )
@@ -605,6 +610,10 @@ class MemoryStore:
     def iter_graph_neighbors(self, layer: str, record_id: str) -> list[MemoryRecord]:
         layer_name = _require_non_empty_text(layer, "layer")
         rid = _require_non_empty_text(record_id, "record_id")
+        if not self.has_layer(layer_name):
+            raise ValueError(f"Layer {layer_name!r} is not declared in the store topology.")
+        if self.layer_shape(layer_name) != "Graph":
+            raise ValueError(f"MemoryStore.iter_graph_neighbors requires graph layer {layer_name!r}.")
         links: list[str] = []
         for record in self.layers[layer_name]:
             if record.record_id == rid:

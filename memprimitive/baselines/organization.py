@@ -8,6 +8,7 @@ from typing import Any, Final
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
 
+from ._graph_family import graph_metadata_for_unit
 from ._trace import copy_trace
 
 
@@ -178,6 +179,8 @@ class GraphAppendOrganization(OrganizationModule):
         slot="organization",
         input_requirements=("units", "decisions"),
         output_guarantees=("placements",),
+        store_requirements=("shape:Graph", "index:graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
         side_effects=("modify_store", "append_records"),
     )
 
@@ -208,18 +211,24 @@ class GraphAppendOrganization(OrganizationModule):
             "written_record_ids": written_record_ids,
             "written_unit_ids": written_unit_ids,
             "skipped_unit_count": skipped_units,
+            "graph_metadata_schema": (
+                "graph.layer",
+                "graph.shape",
+                "graph.entities",
+                "graph.triples",
+                "graph.links",
+                "graph.node_count",
+                "graph.link_count",
+                "graph.last_linked_at",
+                "graph.link_history",
+            ),
         }
         return replace(packet, placements=placements, trace=trace), store
 
     @staticmethod
     def _graph_metadata(unit, placement: Placement) -> dict[str, Any]:
         return {
-            "graph": {
-                "layer": placement.target_layer,
-                "entities": list(unit.entities),
-                "triples": list(unit.triples),
-                "node_count": max(len(unit.entities), 1 if unit.triples else 0),
-            }
+            "graph": graph_metadata_for_unit(unit, layer=placement.target_layer),
         }
 
 

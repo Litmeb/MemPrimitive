@@ -9,6 +9,7 @@ from typing import Final
 from ..core import MemoryStore, ModuleSpec, Packet, Readout
 from ..interfaces import ReadoutModule
 
+from ._graph_family import graph_metadata_from_record
 from ._trace import copy_trace
 
 
@@ -145,10 +146,70 @@ class JSONReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
+class GraphReadout(ReadoutModule):
+    """Render retrieved records with graph metadata in a stable readable format.
+
+    Constructor: ``include_links`` controls whether linked record ids are
+    rendered. The module can consume mixed retrieval results, but it is designed
+    for graph-layer payloads and summarizes normalized graph metadata per item.
+
+    ``run`` requires ``packet.retrieved`` and does not mutate the store. It
+    renders one graph-oriented line per record and preserves retrieval order.
+    """
+
+    spec = ModuleSpec(
+        name="graph_readout",
+        slot="readout",
+        input_requirements=("retrieved.items",),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(self, *, include_links: bool = True) -> None:
+        self.include_links = include_links
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.retrieved is None:
+            raise ValueError("GraphReadout requires packet.retrieved.")
+
+        lines: list[str] = []
+        source_ids: list[str] = []
+        graph_item_count = 0
+        for record in packet.retrieved.items:
+            source_ids.append(record.record_id)
+            graph = graph_metadata_from_record(record)
+            parts = [f"[{record.layer}] {record.text}"]
+            if graph["entities"]:
+                graph_item_count += 1
+                parts.append(f"entities={', '.join(graph['entities'])}")
+            if self.include_links and graph["links"]:
+                parts.append(f"links={', '.join(graph['links'])}")
+            elif self.include_links:
+                parts.append("links=<none>")
+            lines.append(" | ".join(parts))
+
+        readout = Readout(
+            text="\n".join(lines),
+            source_ids=source_ids,
+            metadata={
+                "item_count": len(source_ids),
+                "graph_item_count": graph_item_count,
+                "format": "graph",
+            },
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "source_ids": source_ids,
+            "graph_item_count": graph_item_count,
+        }
+        return replace(packet, readout=readout, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "readout"
 BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     ConcatenateReadout,
     BulletListReadout,
     GroupedByLayerReadout,
     JSONReadout,
+    GraphReadout,
 )

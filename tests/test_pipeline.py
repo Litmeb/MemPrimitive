@@ -248,7 +248,7 @@ def test_pipeline_iteration_surfaces_incompatible_graph_layer_compositions() -> 
     iterator = iter_baseline_pipeline_instances(top_k=2)
 
     successful_pipelines = 0
-    with pytest.raises(IncompatibleCompositionError, match=r"slot='organization'.*declared graph layer.*knowledge_graph"):
+    with pytest.raises(IncompatibleCompositionError, match=r"slot='(organization|retrieval|memory_evolution)'.*graph"):
         for pipeline in iterator:
             successful_pipelines += 1
             pipeline.ingest(Observation(text="combinatorial ingest.", source="dialogue"))

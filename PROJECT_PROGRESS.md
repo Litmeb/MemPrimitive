@@ -88,6 +88,19 @@ The examples under [memprimitive/example/demonstration/README.md](D:/Git/MemPrim
 
 This means the project already demonstrates the framework's compositional claims in runnable form.
 
+### 4.1 Graph baseline family is now a reusable stage-1 pipeline base
+
+The repository now has a more complete graph-oriented baseline family, not just isolated demo behavior:
+
+- `GraphAppendOrganization` writes a stabilized graph metadata payload (`graph.layer`, `graph.shape`, `graph.entities`, `graph.triples`, `graph.links`, `graph.node_count`, `graph.link_count`, `graph.last_linked_at`, `graph.link_history`).
+- `GraphNeighborRetrieval` supports explicit seed-id neighbor recall on graph layers.
+- `GraphSeedAndExpandRetrieval` provides a simplified baseline seed-and-expand graph retrieval path using query-token/entity scoring plus one-hop graph expansion.
+- `GraphNeighborAppendEvolution` appends graph links for newly written graph records without touching non-graph layers.
+- `GraphReadout` renders retrieved graph payloads in a stable graph-readable format.
+- `memprimitive/example/demonstration/graph_baseline_pipeline.py` now shows the full graph loop: ingest -> link evolution -> neighbor recall -> readout.
+
+This stage is important because it turns graph memory into a reusable test base for later graph-dependent motifs instead of leaving it as a one-off organization demo.
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:
@@ -120,6 +133,8 @@ The test suite indicates meaningful implementation maturity:
 - classic composition tests
 
 This strongly suggests the repository is already in a serious prototyping phase rather than an idea-only phase.
+
+**Running tests:** The suite is large; a full run can take a long time. For day-to-day work, prefer running only the tests relevant to your change (e.g., a single file or a narrowed `pytest` selection). Slow full runs are normal—allow extra time if you do run everything.
 
 ## What is not finished yet
 
@@ -168,6 +183,12 @@ But the repository itself notes that it still cannot fully validate:
 - topology-family compatibility beyond current hard-coded checks
 
 Until those are explicit and machine-readable, many "valid" combinations will still only be syntactically valid rather than semantically sound.
+
+The graph family is improved here, but still only partially formalized:
+
+- graph retrieval still uses simplified heuristic seed scoring rather than a general vector-seed abstraction
+- graph link evolution is baseline-safe and local, not yet paper-faithful A-MEM agentic evolution
+- graph metadata contracts are stabilized in code, but not yet surfaced as a full searchable ontology layer
 
 ### 4. Classic reconstructions are present, but not yet turned into a stable search-ready ontology
 
