@@ -46,7 +46,7 @@ entries.)
 - `ConditionalLayerOrganization`
 - `GraphAppendOrganization`
 
-### Slot `evolution_trigger` — `evolution_trigger.py`
+### Slot `evolution_trigger` – `evolution_trigger.py`
 
 - `NeverEvolutionTrigger`
 - `ThresholdEvolutionTrigger`
