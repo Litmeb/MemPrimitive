@@ -13,6 +13,8 @@ dist/
 build/
 .cursor/
 .vscode/
+AGENTS.md
+output.txt
 
 # Environment and secrets
 .env

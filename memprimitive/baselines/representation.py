@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 import os
 import re
 from dataclasses import replace
@@ -16,6 +17,13 @@ from sentence_transformers import SentenceTransformer
 from ..core import MemoryStore, MemoryUnit, ModuleSpec, Packet, _representation_summary_from_unit
 from ..interfaces import RepresentationModule
 
+from ._amem_family import (
+    DEFAULT_CATEGORY,
+    DEFAULT_EMBEDDING_VERSION,
+    DEFAULT_NOTE_NAMESPACE,
+    repair_note_payload,
+    representation_from_note_payload,
+)
 from ._trace import copy_trace
 
 _VALID_ELEMENTS: Final[tuple[str, ...]] = (
@@ -496,8 +504,230 @@ class KeywordRepresentation(BasicRepresentation):
         )
 
 
+class SemanticFieldEnrichmentRepresentation(RepresentationModule):
+    """Generate enriched note fields for later graph organization and retrieval.
+
+    Constructor: ``note_namespace`` must be a non-empty metadata namespace used
+    to store the repaired note payload. ``strict_llm`` is currently required to
+    be ``True`` because heuristic fallback is intentionally not supported.
+
+    ``run`` requires ``packet.units``. It preserves unit identity and primary
+    text while adding a repaired note schema plus traceable context/tags under
+    ``unit.metadata[note_namespace]``. The store is unchanged.
+    """
+
+    spec = ModuleSpec(
+        name="semantic_field_enrichment_representation",
+        slot="representation",
+        input_requirements=("units",),
+        output_guarantees=("units.metadata.note", "units.metadata.representation"),
+    )
+
+    def __init__(
+        self,
+        *,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        strict_llm: bool = True,
+        default_category: str = DEFAULT_CATEGORY,
+    ) -> None:
+        if not str(note_namespace).strip():
+            raise ValueError("SemanticFieldEnrichmentRepresentation requires a non-empty note_namespace.")
+        if not strict_llm:
+            raise ValueError("SemanticFieldEnrichmentRepresentation requires strict_llm=True.")
+        self.note_namespace = str(note_namespace).strip()
+        self.strict_llm = strict_llm
+        self.default_category = default_category
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("SemanticFieldEnrichmentRepresentation requires packet.units.")
+
+        represented_units: list[MemoryUnit] = []
+        per_unit_trace: list[dict[str, Any]] = []
+        for unit in packet.units:
+            payload = self._analyze_unit(unit)
+            represented_units.append(
+                replace(
+                    unit,
+                    description=payload["context"],
+                    tags=list(payload["tags"]),
+                    metadata={
+                        **unit.metadata,
+                        self.note_namespace: dict(payload),
+                    },
+                )
+            )
+            per_unit_trace.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "content": payload["content"],
+                    "context": payload["context"],
+                    "keywords": list(payload["keywords"]),
+                    "tags": list(payload["tags"]),
+                    "category": payload["category"],
+                    "namespace": self.note_namespace,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["representation"] = {
+            "module": self.spec.name,
+            "note_namespace": self.note_namespace,
+            "strict_llm": self.strict_llm,
+            "per_unit": per_unit_trace,
+        }
+        return replace(packet, units=represented_units, trace=trace), store
+
+    def _analyze_unit(self, unit: MemoryUnit) -> dict[str, Any]:
+        from ..classic_modules._runtime import get_classic_runtime
+
+        runtime = get_classic_runtime()
+        runtime.require_llm(capability="SemanticFieldEnrichmentRepresentation")
+        raw = runtime.json(
+            system=(
+                "You are the note generator for downstream graph memory modules. "
+                "Return JSON with fields: content, note_text, context, keywords, tags, category, attributes."
+            ),
+            user=json.dumps(
+                {
+                    "content": unit.text,
+                    "unit_text": unit.text,
+                    "unit_type": unit.unit_type,
+                    "existing_tags": unit.tags,
+                    "existing_metadata": unit.metadata,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("SemanticFieldEnrichmentRepresentation must receive a JSON object response.")
+        return repair_note_payload(raw, fallback_content=unit.text, default_category=self.default_category)
+
+
+class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
+    """Embed enriched note fields into a retrieval-oriented composite representation.
+
+    Constructor: ``note_namespace`` selects which repaired note payload to read.
+    ``embedding_version`` is written into trace and representation metadata so
+    downstream retrieval/readout modules can reason about the embedding source.
+
+    ``run`` requires ``packet.units`` and does not mutate ``store``. Units keep
+    their original identity while gaining embedding vectors plus a structured
+    ``metadata['representation']`` projection derived from the note payload.
+    """
+
+    spec = ModuleSpec(
+        name="retrieval_oriented_embedding_representation",
+        slot="representation",
+        input_requirements=("units",),
+        output_guarantees=("units.embedding", "units.metadata.representation"),
+    )
+
+    def __init__(
+        self,
+        *,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        default_category: str = DEFAULT_CATEGORY,
+        embedding_version: str = DEFAULT_EMBEDDING_VERSION,
+        embedding_model: str | None = None,
+    ) -> None:
+        if not str(note_namespace).strip():
+            raise ValueError("RetrievalOrientedEmbeddingRepresentation requires a non-empty note_namespace.")
+        self.note_namespace = str(note_namespace).strip()
+        self.default_category = default_category
+        self.embedding_version = embedding_version
+        load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
+        env = os.environ
+        self.embedding_model = embedding_model or env.get(
+            "MEMPRIMITIVE_EMBEDDING_MODEL",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        )
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("RetrievalOrientedEmbeddingRepresentation requires packet.units.")
+
+        represented_units: list[MemoryUnit] = []
+        per_unit_trace: list[dict[str, Any]] = []
+        for unit in packet.units:
+            payload = repair_note_payload(
+                unit.metadata.get(self.note_namespace),
+                fallback_content=unit.text,
+                default_category=self.default_category,
+            )
+            representation = representation_from_note_payload(payload, embedding_version=self.embedding_version)
+            embedding = self._embed_text(representation["enhanced_embedding_text"])
+            represented_units.append(
+                replace(
+                    unit,
+                    text=payload["content"],
+                    normalized_text=payload["content"].casefold(),
+                    embedding=embedding,
+                    description=payload["context"],
+                    tags=list(payload["tags"]),
+                    representation_elements=tuple(
+                        sorted(
+                            {
+                                *unit.representation_elements,
+                                "text",
+                                "embedding",
+                                "description",
+                                "keywords",
+                                "tags",
+                            }
+                        )
+                    ),
+                    metadata={
+                        **unit.metadata,
+                        self.note_namespace: {
+                            **payload,
+                            "enhanced_embedding_text": representation["enhanced_embedding_text"],
+                            "embedding_version": self.embedding_version,
+                        },
+                        "representation": {
+                            **_representation_summary_from_unit(
+                                replace(
+                                    unit,
+                                    text=payload["content"],
+                                    normalized_text=payload["content"].casefold(),
+                                    embedding=embedding,
+                                    description=payload["context"],
+                                    tags=list(payload["tags"]),
+                                )
+                            ),
+                            **representation,
+                        },
+                    },
+                )
+            )
+            per_unit_trace.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "namespace": self.note_namespace,
+                    "embedding_version": self.embedding_version,
+                    "enhanced_embedding_text": representation["enhanced_embedding_text"],
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["representation"] = {
+            "module": self.spec.name,
+            "note_namespace": self.note_namespace,
+            "embedding_version": self.embedding_version,
+            "per_unit": per_unit_trace,
+        }
+        return replace(packet, units=represented_units, trace=trace), store
+
+    def _embed_text(self, text: str) -> list[float]:
+        from ..classic_modules._runtime import get_classic_runtime
+
+        return list(get_classic_runtime().embed(text))
+
+
 BASELINE_SLOT: Final[str] = "representation"
 BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
     BasicRepresentation,
     KeywordRepresentation,
+    SemanticFieldEnrichmentRepresentation,
+    RetrievalOrientedEmbeddingRepresentation,
 )

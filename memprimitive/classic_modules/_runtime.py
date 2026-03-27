@@ -16,7 +16,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency at runtime
     tiktoken = None
 
-_JSON_BLOCK_PATTERN = re.compile(r"\{.*\}|\[.*\]", re.S)
+_JSON_START_PATTERN = re.compile(r"[\{\[]")
 _MEMPRIMITIVE_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 
@@ -27,10 +27,14 @@ def _coerce_json(content: str) -> Any:
     try:
         return json.loads(stripped)
     except json.JSONDecodeError:
-        match = _JSON_BLOCK_PATTERN.search(stripped)
-        if match is None:
-            raise
-        return json.loads(match.group(0))
+        decoder = json.JSONDecoder()
+        for match in _JSON_START_PATTERN.finditer(stripped):
+            try:
+                parsed, _end = decoder.raw_decode(stripped, match.start())
+            except json.JSONDecodeError:
+                continue
+            return parsed
+        raise
 
 
 class ClassicRuntime:

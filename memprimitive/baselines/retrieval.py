@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from math import sqrt
 from typing import Any, ClassVar, Final
 
@@ -12,6 +13,18 @@ from sentence_transformers import SentenceTransformer
 from ..core import MemoryStore, ModuleSpec, Packet, RetrievedSet
 from ..interfaces import RetrievalModule
 
+from ._amem_family import (
+    DEFAULT_CATEGORY,
+    DEFAULT_NOTE_NAMESPACE,
+    build_enhanced_embedding_text,
+    collect_neighbor_candidates,
+    merge_records_by_id,
+    note_payload_from_record,
+    repair_note_payload,
+    retrieve_candidates_by_embedding,
+)
+from ._graph_family import graph_metadata_from_record
+from ._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
 from ._trace import copy_trace
 
 
@@ -35,6 +48,48 @@ def _document_tokens(record) -> list[str]:
         for keyword in keywords:
             tokens.extend(_tokenize_text(str(keyword)))
     return tokens
+
+
+def _graph_candidate_record_ids(query) -> set[str] | None:
+    metadata = query.metadata if isinstance(query.metadata, dict) else {}
+    nested = metadata.get("graph")
+    if "graph_candidate_record_ids" in metadata:
+        return set(str(value).strip() for value in metadata["graph_candidate_record_ids"] if str(value).strip())
+    if isinstance(nested, dict) and "candidate_record_ids" in nested:
+        return set(str(value).strip() for value in nested["candidate_record_ids"] if str(value).strip())
+    return None
+
+
+def _graph_seed_record_ids(query) -> list[str]:
+    metadata = query.metadata if isinstance(query.metadata, dict) else {}
+    nested = metadata.get("graph")
+    if "graph_seed_record_ids" in metadata:
+        return [str(value).strip() for value in metadata["graph_seed_record_ids"] if str(value).strip()]
+    if isinstance(nested, dict) and "seed_record_ids" in nested:
+        return [str(value).strip() for value in nested["seed_record_ids"] if str(value).strip()]
+    return []
+
+
+def _graph_token_haystack(record) -> set[str]:
+    graph = graph_metadata_from_record(record)
+    tokens = set(_document_tokens(record))
+    tokens.update(_tokenize_text(" ".join(graph["entities"])))
+    for subject, predicate, obj in graph["triples"]:
+        tokens.update(_tokenize_text(subject))
+        tokens.update(_tokenize_text(predicate))
+        tokens.update(_tokenize_text(obj))
+    return tokens
+
+
+def _score_graph_seed(query_text: str, record) -> float:
+    query_tokens = _query_tokens(query_text)
+    if not query_tokens:
+        return 0.0
+    graph = graph_metadata_from_record(record)
+    haystack = _graph_token_haystack(record)
+    overlap = len(query_tokens & haystack)
+    entity_overlap = len(query_tokens & {entity.casefold() for entity in graph["entities"]})
+    return float(overlap + (2 * entity_overlap))
 
 
 class RecencyRetrieval(RetrievalModule):
@@ -473,6 +528,226 @@ class BM25Retrieval(RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
+class GraphNeighborRetrieval(RetrievalModule):
+    """Expand explicit graph seed record ids into their linked neighbors.
+
+    Constructor: ``top_k`` must be positive. ``layer`` must refer to a graph
+    layer, and the query must provide seed ids via
+    ``query.metadata["graph_seed_record_ids"]`` or
+    ``query.metadata["graph"]["seed_record_ids"]``. ``include_seed_records``
+    controls whether seed records themselves are returned alongside neighbors.
+
+    ``run`` requires ``packet.query``. It does not mutate the store. Results are
+    returned in graph-link order and can optionally be constrained to a query-
+    supplied candidate set.
+    """
+
+    spec = ModuleSpec(
+        name="graph_neighbor_retrieval",
+        slot="retrieval",
+        input_requirements=("query",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("index:graph", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+    )
+
+    def __init__(self, top_k: int = 3, layer: str = "knowledge_graph", *, include_seed_records: bool = False) -> None:
+        if top_k <= 0:
+            raise ValueError("GraphNeighborRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+        self.target_layer = layer
+        self.include_seed_records = include_seed_records
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("GraphNeighborRetrieval requires packet.query.")
+
+        all_records = store.iter_records(self.layer)
+        by_id = {record.record_id: record for record in all_records}
+        seed_ids = [record_id for record_id in _graph_seed_record_ids(packet.query) if record_id in by_id]
+        candidate_filter = _graph_candidate_record_ids(packet.query)
+
+        selected_records: list[Any] = []
+        selected_scores: list[dict[str, Any]] = []
+        seen_record_ids: set[str] = set()
+        discovered_neighbor_ids: list[str] = []
+
+        def add_record(record, *, seed_record_id: str | None, hop: int, strategy: str) -> None:
+            if record.record_id in seen_record_ids:
+                return
+            if candidate_filter is not None and record.record_id not in candidate_filter:
+                return
+            seen_record_ids.add(record.record_id)
+            selected_records.append(record)
+            selected_scores.append(
+                {
+                    "record_id": record.record_id,
+                    "rank": len(selected_records),
+                    "strategy": strategy,
+                    "hop": hop,
+                    "seed_record_id": seed_record_id,
+                }
+            )
+
+        for seed_id in seed_ids:
+            seed_record = by_id[seed_id]
+            if self.include_seed_records:
+                add_record(seed_record, seed_record_id=seed_id, hop=0, strategy="graph_seed")
+                if len(selected_records) >= self.top_k:
+                    break
+            for neighbor in store.iter_graph_neighbors(self.layer, seed_id):
+                discovered_neighbor_ids.append(neighbor.record_id)
+                add_record(neighbor, seed_record_id=seed_id, hop=1, strategy="graph_neighbor")
+                if len(selected_records) >= self.top_k:
+                    break
+            if len(selected_records) >= self.top_k:
+                break
+
+        retrieved = RetrievedSet(
+            items=selected_records[: self.top_k],
+            scores=selected_scores[: self.top_k],
+            trace={
+                "module": self.spec.name,
+                "layer": self.layer,
+                "top_k": self.top_k,
+                "seed_record_ids": seed_ids,
+                "candidate_count": len(all_records),
+                "candidate_filter_count": 0 if candidate_filter is None else len(candidate_filter),
+                "expanded_neighbor_ids": list(dict.fromkeys(discovered_neighbor_ids)),
+                "returned_count": min(len(selected_records), self.top_k),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
+class GraphSeedAndExpandRetrieval(RetrievalModule):
+    """Select graph seed records from query text, then expand through links.
+
+    Constructor: ``top_k`` and ``seed_top_k`` must be positive. ``layer`` must
+    refer to a graph layer. The simplified baseline uses token/entity overlap to
+    choose seed records before performing one-hop graph expansion; this is an
+    inferred engineering decomposition of the classic A-MEM-style motif.
+
+    ``run`` requires ``packet.query`` and does not mutate the store. It returns
+    seeds plus expanded neighbors, deduplicated and optionally bounded by a
+    query-provided graph candidate set.
+    """
+
+    spec = ModuleSpec(
+        name="graph_seed_and_expand_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("index:graph", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = 3,
+        layer: str = "knowledge_graph",
+        *,
+        seed_top_k: int = 2,
+        include_seed_records: bool = True,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("GraphSeedAndExpandRetrieval requires top_k > 0.")
+        if seed_top_k <= 0:
+            raise ValueError("GraphSeedAndExpandRetrieval requires seed_top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+        self.target_layer = layer
+        self.seed_top_k = seed_top_k
+        self.include_seed_records = include_seed_records
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("GraphSeedAndExpandRetrieval requires packet.query.")
+
+        candidate_filter = _graph_candidate_record_ids(packet.query)
+        candidate_records = [
+            record
+            for record in store.iter_records(self.layer)
+            if candidate_filter is None or record.record_id in candidate_filter
+        ]
+        scored_seeds = [
+            (_score_graph_seed(packet.query.text, record), order_index, record)
+            for order_index, record in enumerate(reversed(candidate_records))
+        ]
+        scored_seeds = [item for item in scored_seeds if item[0] > 0.0]
+        scored_seeds.sort(key=lambda item: (-item[0], item[1]))
+        seed_candidates = scored_seeds[: self.seed_top_k]
+
+        merged_records: list[Any] = []
+        merged_scores: list[dict[str, Any]] = []
+        seen_record_ids: set[str] = set()
+        expanded_neighbor_ids: list[str] = []
+
+        def append_result(record, *, strategy: str, score: float, seed_record_id: str, hop: int) -> None:
+            if record.record_id in seen_record_ids:
+                return
+            seen_record_ids.add(record.record_id)
+            merged_records.append(record)
+            merged_scores.append(
+                {
+                    "record_id": record.record_id,
+                    "rank": len(merged_records),
+                    "score": score,
+                    "strategy": strategy,
+                    "seed_record_id": seed_record_id,
+                    "hop": hop,
+                }
+            )
+
+        for seed_score, _, seed_record in seed_candidates:
+            if self.include_seed_records:
+                append_result(
+                    seed_record,
+                    strategy="graph_seed",
+                    score=seed_score,
+                    seed_record_id=seed_record.record_id,
+                    hop=0,
+                )
+                if len(merged_records) >= self.top_k:
+                    break
+            for neighbor in store.iter_graph_neighbors(self.layer, seed_record.record_id):
+                expanded_neighbor_ids.append(neighbor.record_id)
+                neighbor_score = max(seed_score - 0.5, 0.0)
+                append_result(
+                    neighbor,
+                    strategy="graph_expand",
+                    score=neighbor_score,
+                    seed_record_id=seed_record.record_id,
+                    hop=1,
+                )
+                if len(merged_records) >= self.top_k:
+                    break
+            if len(merged_records) >= self.top_k:
+                break
+
+        retrieved = RetrievedSet(
+            items=merged_records[: self.top_k],
+            scores=merged_scores[: self.top_k],
+            trace={
+                "module": self.spec.name,
+                "layer": self.layer,
+                "top_k": self.top_k,
+                "seed_top_k": self.seed_top_k,
+                "candidate_count": len(candidate_records),
+                "candidate_filter_count": 0 if candidate_filter is None else len(candidate_filter),
+                "seed_record_ids": [record.record_id for _, _, record in seed_candidates],
+                "expanded_neighbor_ids": list(dict.fromkeys(expanded_neighbor_ids)),
+                "returned_count": min(len(merged_records), self.top_k),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
 class _LayerScopedStore:
     """Proxy ``MemoryStore`` so retrievers only see one logical layer."""
 
@@ -668,6 +943,246 @@ class LayerAwareRetrieval(RetrievalModule):
         return (1, normalized_rank, candidate["layer_index"], candidate["item_index"])
 
 
+class BufferRetrieval(RetrievalModule):
+    """Read a bounded recency window from one layer instead of doing query search.
+
+    Constructor: ``top_k`` must be positive. ``layer`` selects the temporal
+    buffer to read from. ``chronological`` controls whether the returned window
+    is reordered oldest-to-newest after selecting the most recent ``top_k``.
+
+    ``run`` requires ``packet.query`` so the module remains a normal recall-slot
+    primitive. It does not use query text for ranking. The store is unchanged.
+    """
+
+    spec = ModuleSpec(
+        name="buffer_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = DEFAULT_MEMORY_SIZE,
+        *,
+        layer: str = DEFAULT_REFLECTION_LAYER,
+        chronological: bool = True,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("BufferRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+        self.chronological = chronological
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("BufferRetrieval requires packet.query.")
+
+        reverse_window = list(reversed(store.iter_records(self.layer)))[: self.top_k]
+        items = list(reversed(reverse_window)) if self.chronological else reverse_window
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "strategy": "buffer_window",
+                "layer": self.layer,
+            }
+            for rank, record in enumerate(items, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "layer": self.layer,
+                "top_k": self.top_k,
+                "chronological": self.chronological,
+                "candidate_count": len(store.iter_records(self.layer)),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
+class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
+    """Use vector seeds plus graph-neighbor expansion for enriched note records.
+
+    Constructor: ``top_k`` and ``candidate_k`` must be positive. ``layer`` must
+    refer to a graph layer that supports the vector index. ``neighbor_expansion_k``
+    controls one-hop expansion beyond the seed set. ``agentic_search`` enables
+    an optional LLM rerank over the merged candidate set, while
+    ``query_expand_with_llm`` lets the module build a retrieval-oriented query
+    projection before embedding.
+
+    ``run`` requires ``packet.query`` and does not mutate ``store``. The module
+    reuses ``query.embedding`` when present; otherwise it embeds the query or
+    its LLM-expanded projection and returns the updated query on the packet.
+    """
+
+    spec = ModuleSpec(
+        name="vector_graph_seed_and_expand_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("index:graph", "index:vector", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = 3,
+        *,
+        layer: str = "knowledge_graph",
+        candidate_k: int = 5,
+        neighbor_expansion_k: int = 3,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        default_category: str = DEFAULT_CATEGORY,
+        agentic_search: bool = False,
+        query_expand_with_llm: bool = False,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("VectorGraphSeedAndExpandRetrieval requires top_k > 0.")
+        if candidate_k <= 0:
+            raise ValueError("VectorGraphSeedAndExpandRetrieval requires candidate_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+        self.target_layer = layer
+        self.candidate_k = candidate_k
+        self.neighbor_expansion_k = neighbor_expansion_k
+        self.note_namespace = note_namespace
+        self.default_category = default_category
+        self.agentic_search = agentic_search
+        self.query_expand_with_llm = query_expand_with_llm
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("VectorGraphSeedAndExpandRetrieval requires packet.query.")
+
+        runtime = None
+        query_payload = repair_note_payload(
+            {"content": packet.query.text, "note_text": packet.query.text},
+            fallback_content=packet.query.text,
+            default_category="query",
+        )
+        if self.query_expand_with_llm:
+            from ..classic_modules._runtime import get_classic_runtime
+
+            runtime = get_classic_runtime()
+            runtime.require_llm(capability="Vector graph seed-and-expand query expansion")
+            raw = runtime.json(
+                system=(
+                    "Expand the query for enriched graph-memory retrieval. "
+                    "Return JSON with fields query_text, content, context, keywords, tags, category, attributes."
+                ),
+                user=json.dumps({"query": packet.query.text}, ensure_ascii=False),
+            )
+            query_payload = repair_note_payload(raw, fallback_content=packet.query.text, default_category="query")
+            query_payload["content"] = query_payload["content"] or packet.query.text
+        if packet.query.embedding is not None:
+            query_embedding = list(packet.query.embedding)
+        else:
+            if runtime is None:
+                from ..classic_modules._runtime import get_classic_runtime
+
+                runtime = get_classic_runtime()
+            embedding_text = (
+                build_enhanced_embedding_text(
+                    content=query_payload["content"],
+                    context=query_payload["context"],
+                    keywords=query_payload["keywords"],
+                    tags=query_payload["tags"],
+                )
+                if self.query_expand_with_llm
+                else packet.query.text
+            )
+            query_embedding = runtime.embed(embedding_text)
+        query = replace(packet.query, embedding=list(query_embedding))
+
+        primary = retrieve_candidates_by_embedding(
+            store=store,
+            layer=self.layer,
+            query_embedding=list(query_embedding),
+            top_k=self.candidate_k,
+        )
+        primary_records = [record for _, record in primary]
+        neighbor_records = collect_neighbor_candidates(
+            store=store,
+            layer=self.layer,
+            seed_records=primary_records,
+            neighbor_expansion_k=self.neighbor_expansion_k,
+        )
+        merged_records = merge_records_by_id(primary_records + neighbor_records)
+
+        candidate_payload = []
+        primary_scores = {record.record_id: score for score, record in primary}
+        for record in merged_records:
+            payload = note_payload_from_record(
+                record,
+                note_namespace=self.note_namespace,
+                default_category=self.default_category,
+            )
+            candidate_payload.append(
+                {
+                    "id": record.record_id,
+                    "content": payload["content"],
+                    "note_text": payload["note_text"],
+                    "context": payload["context"],
+                    "tags": payload["tags"],
+                    "keywords": payload["keywords"],
+                    "score": float(primary_scores.get(record.record_id, 0.0)),
+                }
+            )
+
+        if self.agentic_search:
+            if runtime is None:
+                from ..classic_modules._runtime import get_classic_runtime
+
+                runtime = get_classic_runtime()
+            reranked = runtime.rerank(
+                query=query.text,
+                candidates=candidate_payload,
+                task="Perform graph seed-and-expand retrieval over enriched note records.",
+                top_k=self.top_k,
+            )
+            retrieval_mode = "search_agentic"
+        else:
+            reranked = sorted(
+                candidate_payload,
+                key=lambda item: (-float(item.get("score", 0.0)), str(item.get("id", ""))),
+            )[: self.top_k]
+            retrieval_mode = "vector_plus_links"
+
+        record_by_id = {record.record_id: record for record in merged_records}
+        items = [record_by_id[item["id"]] for item in reranked if item["id"] in record_by_id][: self.top_k]
+        scores = [
+            {
+                "record_id": item["id"],
+                "score": float(item.get("score", 0.0)),
+                "rationale": str(item.get("rationale", "")).strip(),
+                "strategy": retrieval_mode,
+            }
+            for item in reranked
+            if item["id"] in record_by_id
+        ][: self.top_k]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "retrieval_mode": retrieval_mode,
+                "candidate_count": len(merged_records),
+                "selected_count": len(items),
+                "candidate_record_ids": [record.record_id for record in merged_records],
+                "expanded_neighbor_ids": [record.record_id for record in neighbor_records],
+                "note_namespace": self.note_namespace,
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, query=query, retrieved=retrieved, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "retrieval"
 BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     RecencyRetrieval,
@@ -676,5 +1191,9 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     TagRetrieval,
     EntityRetrieval,
     BM25Retrieval,
+    GraphNeighborRetrieval,
+    GraphSeedAndExpandRetrieval,
+    VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
+    BufferRetrieval,
 )

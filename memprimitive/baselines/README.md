@@ -27,26 +27,43 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 
 - `BasicRepresentation`
 - `KeywordRepresentation`
+- `SemanticFieldEnrichmentRepresentation`
+- `RetrievalOrientedEmbeddingRepresentation`
 
 ### Slot `write_trigger` — `write_trigger.py`
 
 - `AlwaysWriteTrigger`
 - `ThresholdWriteTrigger`
+- `MetadataGatedWriteTrigger`
+- `KeyReadyWriteTrigger`
+- `LLMJudgedWriteTrigger`
 
-(The same module also exposes `compose_write_trigger` for assembling trigger-family adapters; those are not extra `BASELINE_CLASSES` entries.)
+(The same module also exposes `compose_write_trigger` plus motif-oriented helpers
+`compose_metadata_gated_write_trigger` and `compose_key_ready_write_trigger` for
+assembling trigger-family adapters; those are not extra `BASELINE_CLASSES`
+entries.)
 
 ### Slot `organization` — `organization.py`
 
 - `AppendOrganization`
 - `ConditionalLayerOrganization`
 - `GraphAppendOrganization`
+- `PlacementWithoutAppendOrganization`
+- `GraphAppendLinkReadyOrganization`
 
-### Slot `evolution_trigger` — `evolution_trigger.py`
+### Slot `evolution_trigger` – `evolution_trigger.py`
 
 - `NeverEvolutionTrigger`
 - `ThresholdEvolutionTrigger`
+- `OutcomeConditionedEvolutionTrigger`
+- `NewWriteEvolutionTrigger`
+- `NeighborExistsEvolutionTrigger`
 
-(The same module also exposes `compose_evolution_trigger` for assembling trigger-family adapters; those are not extra `BASELINE_CLASSES` entries.)
+(The same module also exposes `compose_evolution_trigger` plus the motif-oriented
+helpers `compose_outcome_conditioned_evolution_trigger`,
+`compose_new_write_evolution_trigger`, and the graph-oriented helper
+`compose_graph_neighbor_evolution_trigger` for assembling trigger-family
+adapters; those are not extra `BASELINE_CLASSES` entries.)
 
 ### Slot `memory_evolution` — `memory_evolution.py`
 
@@ -54,6 +71,12 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `TraceOnlyEvolution`
 - `SummaryRewriteEvolution`
 - `LayerMoveEvolution`
+- `GraphLinkEvolution`
+- `GraphNeighborContextTraceEvolution`
+- `GraphNeighborAppendEvolution`
+- `LinkStrengtheningEvolution`
+- `NeighborContextUpdateEvolution`
+- `ReflectionGenerationEvolution`
 
 ### Slot `retrieval` — `retrieval.py`
 
@@ -63,7 +86,11 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `TagRetrieval`
 - `EntityRetrieval`
 - `BM25Retrieval`
+- `GraphNeighborRetrieval`
+- `GraphSeedAndExpandRetrieval`
+- `VectorGraphSeedAndExpandRetrieval`
 - `LayerAwareRetrieval`
+- `BufferRetrieval`
 
 `BM25Retrieval` uses Okapi BM25 from `rank-bm25` over lowercase whitespace tokens from record text plus
 `metadata["representation"]["keywords"]` when present. It sorts by descending BM25 score, uses recency to break
@@ -75,6 +102,9 @@ ties, and falls back to recency when all candidates score zero.
 - `BulletListReadout`
 - `GroupedByLayerReadout`
 - `JSONReadout`
+- `GraphReadout`
+- `PromptContextReadout`
+- `NoteRenderReadout`
 
 ## Representation: supported element kinds (`representation.py`)
 
@@ -127,6 +157,14 @@ Factory entry points: **`compose_write_trigger`** (`write_trigger.py`) and **`co
 | `TagMatchSignal` | **Requires** `packet.query`. Counts overlap between query tokens and `unit.tags`. |
 | `LayerTargetSignal` | **Requires** `packet.placements`. `1.0` if `placements[unit_index].target_layer` is in `allowed_layers`. |
 | `QueryOverlapSignal` | **Requires** `packet.query`. Token overlap between query and unit text. |
+| `MetadataFlagSignal` | Reads a bool-ish metadata flag from a dotted path on `unit.metadata`, `observation.metadata`, or `query.metadata`; missing paths may raise or use a configured default. |
+| `UnitTypeSignal` | `1.0` iff `unit.unit_type == expected_unit_type`. |
+| `PlacementExistsSignal` | **Requires** aligned `packet.placements`. Emits `1.0` when the current unit already has a placement entry. |
+| `PartitionKeyPresentSignal` | Checks one or more dotted metadata paths (for example TiM-like group/hash keys) and emits `1.0` iff any configured key is present. |
+| `NeighborCountSignal` | Counts comparable vector neighbors already present in the target layer, using current unit embedding plus placement-derived layer targeting. |
+| `TopNeighborSimilaritySignal` | Returns the best cosine similarity among comparable vector neighbors in the target layer, or `0.0` when none are available. |
+| `OutcomeCorrectnessSignal` | `1.0` if observation metadata implies the trial failed; else `0.0`. |
+| `FeedbackPresenceSignal` | `1.0` if supported feedback text exists in observation metadata; else `0.0`. |
 
 ### Scorer role — `ScoreAggregator` (`score`)
 
@@ -151,6 +189,12 @@ Hard predicate per unit after scoring; receives full `signals` and `score` for c
 | `RequireTagGate` | `True` iff unit tags intersect `required_tags` (case-insensitive). |
 | `LayerAllowedGate` | **Requires** `packet.placements`; `True` iff placement target layer ∈ `allowed_layers`. |
 | `QueryPresentGate` | `True` iff `packet.query` is not `None`. |
+| `SchemaPresentGate` | Checks dotted schema paths on a selected source object (`unit`, `unit.metadata`, `observation`, `query`, etc.) and opens only when the required fields are present. |
+| `FeedbackSchemaGate` | Opens only when observation metadata exposes a parseable outcome or feedback schema. |
+| `HasEmbeddingGate` | Opens only when the configured source exposes a non-empty embedding vector. |
+| `VectorIndexReadyGate` | Opens only when the target layer exists and supports the `vector` index. |
+| `GraphLayerGate` | Opens only when the target layer exists and has `shape="Graph"`. |
+| `AllGate` | Opens only when every child gate opens; useful for graph/vector readiness bundles. |
 
 ### Policy role — `DecisionPolicy` (`decide`)
 
@@ -169,8 +213,14 @@ Final boolean decision from `score` and `gate_open`.
 
 - **`AlwaysWriteTrigger`** — `ConstantSignal` + `IdentityScorer` + `AlwaysOpenGate` + `AlwaysPolicy`.
 - **`ThresholdWriteTrigger`** — `ConstantSignal` + `WeightedSumScorer({"constant": 1.0})` + `AlwaysOpenGate` + `ThresholdPolicy`.
+- **`MetadataGatedWriteTrigger`** — `UnitTypeSignal` + `MetadataFlagSignal` + `MinScorer` + `AlwaysOpenGate` + `ThresholdPolicy(1.0)`.
+- **`KeyReadyWriteTrigger`** — `PartitionKeyPresentSignal` (optionally plus `UnitTypeSignal`) + `IdentityScorer`/`MinScorer` + `AlwaysOpenGate` + `ThresholdPolicy(1.0)`.
+- **`LLMJudgedWriteTrigger`** — classic-runtime-backed write controller over enriched note payloads; keeps explicit `decision/reason/confidence` trace when the write path is LLM judged.
 - **`NeverEvolutionTrigger`** — same signals/scorer/gate as always-write, but **`NeverPolicy`**.
 - **`ThresholdEvolutionTrigger`** — same as `ThresholdWriteTrigger` but writes **`evolution_decisions`** and uses evolution adapter `input_requirements` (`units`, `placements`).
+- **`OutcomeConditionedEvolutionTrigger`** — `OutcomeCorrectnessSignal` + `FeedbackPresenceSignal` + `WeightedSumScorer` + `FeedbackSchemaGate` + `ThresholdPolicy(1.0)`.
+- **`NewWriteEvolutionTrigger`** — `UnitTypeSignal` + `PlacementExistsSignal` + `PartitionKeyPresentSignal` + `MinScorer` + `LayerAllowedGate` + `ThresholdPolicy(1.0)`.
+- **`NeighborExistsEvolutionTrigger`** — `NeighborCountSignal` (+ optional `TopNeighborSimilaritySignal`) + `IdentityScorer` + graph/vector readiness gates + `ThresholdPolicy(1.0)`.
 
 ## `MemoryStore` and topology (pipeline integration)
 
@@ -187,6 +237,7 @@ Relevant types live in `memprimitive.core`:
 
 - `_trace.py` — `copy_trace()` for shallow-copying `Packet.trace` before appending stage-local keys. Leading underscore marks it as package-internal; baseline authors should import it only from sibling modules.
 - `_trigger_family.py` — Shared trigger-family runner/adapters used by `write_trigger.py` and `evolution_trigger.py` factory helpers; not a slot module (no `BASELINE_SLOT` / `BASELINE_CLASSES`). See **Trigger family: signal, scorer, gate, policy** above for the four roles and every concrete class/method.
+- `_amem_family.py` — shared enriched-note schema helpers reused by A-MEM-like representation, retrieval, readout, and evolution modules.
 
 ## Per-file registry (source of truth)
 

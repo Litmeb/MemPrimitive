@@ -8,6 +8,8 @@ from typing import Any, Final
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
 
+from ._graph_family import graph_metadata_for_unit
+from ._reflexion_family import DEFAULT_TRIAL_LAYER
 from ._trace import copy_trace
 
 
@@ -178,6 +180,8 @@ class GraphAppendOrganization(OrganizationModule):
         slot="organization",
         input_requirements=("units", "decisions"),
         output_guarantees=("placements",),
+        store_requirements=("shape:Graph", "index:graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
         side_effects=("modify_store", "append_records"),
     )
 
@@ -208,19 +212,149 @@ class GraphAppendOrganization(OrganizationModule):
             "written_record_ids": written_record_ids,
             "written_unit_ids": written_unit_ids,
             "skipped_unit_count": skipped_units,
+            "graph_metadata_schema": (
+                "graph.layer",
+                "graph.shape",
+                "graph.entities",
+                "graph.triples",
+                "graph.links",
+                "graph.node_count",
+                "graph.link_count",
+                "graph.last_linked_at",
+                "graph.link_history",
+            ),
         }
         return replace(packet, placements=placements, trace=trace), store
 
     @staticmethod
     def _graph_metadata(unit, placement: Placement) -> dict[str, Any]:
         return {
-            "graph": {
-                "layer": placement.target_layer,
-                "entities": list(unit.entities),
-                "triples": list(unit.triples),
-                "node_count": max(len(unit.entities), 1 if unit.triples else 0),
-            }
+            "graph": graph_metadata_for_unit(unit, layer=placement.target_layer),
         }
+
+
+class PlacementWithoutAppendOrganization(OrganizationModule):
+    """Emit placements without persisting the current units into the store.
+
+    Constructor: ``target_layer`` must be a non-empty layer name. This module is
+    useful when the packet needs a placement contract for downstream evolution,
+    but the current trial/buffer contents themselves should remain ephemeral.
+
+    ``run`` requires ``packet.units`` and ``packet.decisions`` with equal length.
+    It emits aligned ``Placement`` objects and records the routing decision in
+    trace, but intentionally does not append any ``MemoryRecord`` objects.
+    """
+
+    spec = ModuleSpec(
+        name="placement_without_append_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+    )
+
+    def __init__(self, *, target_layer: str = DEFAULT_TRIAL_LAYER) -> None:
+        self.target_layer = target_layer
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("PlacementWithoutAppendOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("PlacementWithoutAppendOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("PlacementWithoutAppendOrganization requires decisions aligned with units.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "placement_count": len(placements),
+            "written_record_ids": [],
+            "written_unit_ids": [],
+            "skipped_unit_count": 0,
+            "append_trials": False,
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+
+class GraphAppendLinkReadyOrganization(OrganizationModule):
+    """Append enriched notes into a graph layer with link-ready metadata.
+
+    Constructor: ``target_layer`` must name a declared graph layer that also
+    exposes ``graph`` and ``vector`` indices. ``note_namespace`` records which
+    enriched-note schema is expected to travel with each unit.
+
+    ``run`` requires aligned ``packet.units`` and ``packet.decisions``. It
+    appends regular ``MemoryRecord`` rows, preserves existing note metadata, and
+    initializes graph-link fields so later graph evolution modules can safely
+    write links/context without repairing the whole record shape first.
+    """
+
+    spec = ModuleSpec(
+        name="graph_append_link_ready_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        side_effects=("modify_store", "append_records"),
+        store_requirements=("index:graph", "index:vector", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
+    )
+
+    def __init__(self, *, target_layer: str = "knowledge_graph", note_namespace: str = "note") -> None:
+        self.target_layer = target_layer
+        self.note_namespace = note_namespace
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("GraphAppendLinkReadyOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("GraphAppendLinkReadyOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("GraphAppendLinkReadyOrganization requires decisions aligned with units.")
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(f"GraphAppendLinkReadyOrganization requires target layer {self.target_layer!r} to be Graph.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        effects: list[dict[str, Any]] = []
+        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            if not decision:
+                effects.append({"unit_id": unit.unit_id, "effect_type": "skipped"})
+                continue
+            sequence_id = store.next_sequence_id()
+            record = MemoryRecord.from_unit(unit=unit, layer=placement.target_layer, sequence_id=sequence_id)
+            record.metadata["graph"] = {
+                **graph_metadata_for_unit(unit, layer=placement.target_layer),
+                "link_ready": True,
+                "neighbor_context": {"neighbor_record_ids": [], "neighbor_count": 0},
+            }
+            store.append(record)
+            effects.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "record_id": record.record_id,
+                    "effect_type": "append_note",
+                    "target_layer": self.target_layer,
+                    "note_namespace": self.note_namespace,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "note_namespace": self.note_namespace,
+            "effects": effects,
+            "graph_metadata_schema": (
+                "graph.layer",
+                "graph.shape",
+                "graph.entities",
+                "graph.triples",
+                "graph.links",
+                "graph.link_ready",
+                "graph.neighbor_context",
+            ),
+        }
+        return replace(packet, placements=placements, trace=trace), store
 
 
 BASELINE_SLOT: Final[str] = "organization"
@@ -228,4 +362,6 @@ BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
     ConditionalLayerOrganization,
     GraphAppendOrganization,
+    PlacementWithoutAppendOrganization,
+    GraphAppendLinkReadyOrganization,
 )

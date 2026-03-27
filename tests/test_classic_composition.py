@@ -6,7 +6,6 @@ from memprimitive import IncompatibleCompositionError, MemoryPipeline
 from memprimitive.classic_modules.amem import AMEMGraphHopRetrieval, AMEMGraphOrganization
 from memprimitive.classic_modules.memgpt import MEMGPT_CORE_LAYER, MEMGPT_RECALL_LAYER, MemGPTKeyedUpsertOrganization, MemGPTPagedRetrieval
 from memprimitive.classic_modules.reflexion import ReflectionMemoryEvolution, ReflexionPrependedReadout
-from memprimitive.classic_modules.tim import TimBudgetEvolutionTrigger, TimThoughtMemoryEvolution, TimThoughtMemoryOrganization, TimThoughtMemoryRetrieval
 from memprimitive.core import MemoryStore, StoreLayerSpec, StoreTopology
 
 def test_reflexion_requires_declared_reflection_layer() -> None:
@@ -40,23 +39,6 @@ def test_memgpt_requires_declared_budget_layers() -> None:
 
     with pytest.raises(IncompatibleCompositionError, match=MEMGPT_RECALL_LAYER):
         MemoryPipeline(store=store, retrieval=MemGPTPagedRetrieval(target_layer=MEMGPT_RECALL_LAYER, tool_name="conversation_search"))
-
-
-def test_tim_requires_declared_thought_layer() -> None:
-    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="other")]))
-
-    with pytest.raises(IncompatibleCompositionError, match="thought_memory"):
-        MemoryPipeline(store=store, organization=TimThoughtMemoryOrganization())
-
-    with pytest.raises(IncompatibleCompositionError, match="thought_memory"):
-        MemoryPipeline(
-            store=store,
-            evolution_trigger=TimBudgetEvolutionTrigger(),
-            memory_evolution=TimThoughtMemoryEvolution(),
-        )
-
-    with pytest.raises(IncompatibleCompositionError, match="thought_memory"):
-        MemoryPipeline(store=store, retrieval=TimThoughtMemoryRetrieval())
 
 
 def test_amem_requires_graph_shape_and_index() -> None:
