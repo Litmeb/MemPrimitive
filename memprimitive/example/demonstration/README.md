@@ -23,6 +23,7 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 | `reflexion_trigger_failed_trial.py` | Reflexion 风格失败 trial：使用稳定基线 `OutcomeConditionedEvolutionTrigger`，在 `trial_failed=1.0` 时触发 `evolution_decisions=True`。 |
 | `reflexion_trigger_success_trial.py` | Reflexion 风格成功 trial：同样使用 `OutcomeConditionedEvolutionTrigger`，但 `trial_failed=0.0`，因此不触发 evolution。 |
 | `reflexion_trigger_schema_gate.py` | 缺少可解析 outcome / feedback schema 时，`FeedbackSchemaGate` 会直接阻断 trigger。 |
+| `reflexion_reflection_cycle.py` | 完整 Reflexion-like 闭环：失败 trial 不落盘、触发 `ReflectionGenerationEvolution` 追加 reflection、下一次 recall 通过 `BufferRetrieval + PromptContextReadout` 读出上下文。 |
 | `partition_ready_local_maintenance.py` | TiM 风格 partition-ready 演示：一个带 `tim.group_id` 的 `tim_thought` 放到 `thought_memory` 后，通过 `NewWriteEvolutionTrigger` 触发 local maintenance。 |
 
 上面这些 Reflexion / TiM 风格脚本都不是黑盒触发器，而是显式复用 trigger family 四件套：
@@ -78,9 +79,10 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 3. `trigger_family_infrastructure.py`
 4. `reflexion_trigger_failed_trial.py`
 5. `reflexion_trigger_success_trial.py`
-6. `partition_ready_local_maintenance.py`
-7. `layer_aware_semantic_working.py`
-8. `graph_baseline_pipeline.py`
-9. `graph_dependent_pipeline.py`
+6. `reflexion_reflection_cycle.py`
+7. `partition_ready_local_maintenance.py`
+8. `layer_aware_semantic_working.py`
+9. `graph_baseline_pipeline.py`
+10. `graph_dependent_pipeline.py`
 
 这样会先建立 baseline pipeline 心智模型，再进入 trigger family、layered retrieval，最后看 graph baseline family。

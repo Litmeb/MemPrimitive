@@ -45,6 +45,7 @@ entries.)
 - `AppendOrganization`
 - `ConditionalLayerOrganization`
 - `GraphAppendOrganization`
+- `PlacementWithoutAppendOrganization`
 
 ### Slot `evolution_trigger` – `evolution_trigger.py`
 
@@ -60,7 +61,7 @@ helpers `compose_outcome_conditioned_evolution_trigger`,
 `compose_graph_neighbor_evolution_trigger` for assembling trigger-family
 adapters; those are not extra `BASELINE_CLASSES` entries.)
 
-### Slot `memory_evolution` – `memory_evolution.py`
+### Slot `memory_evolution` — `memory_evolution.py`
 
 - `AppendOnlyEvolution`
 - `TraceOnlyEvolution`
@@ -69,6 +70,7 @@ adapters; those are not extra `BASELINE_CLASSES` entries.)
 - `GraphLinkEvolution`
 - `GraphNeighborContextTraceEvolution`
 - `GraphNeighborAppendEvolution`
+- `ReflectionGenerationEvolution`
 
 ### Slot `retrieval` — `retrieval.py`
 
@@ -81,6 +83,7 @@ adapters; those are not extra `BASELINE_CLASSES` entries.)
 - `GraphNeighborRetrieval`
 - `GraphSeedAndExpandRetrieval`
 - `LayerAwareRetrieval`
+- `BufferRetrieval`
 
 `BM25Retrieval` uses Okapi BM25 from `rank-bm25` over lowercase whitespace tokens from record text plus
 `metadata["representation"]["keywords"]` when present. It sorts by descending BM25 score, uses recency to break
@@ -93,6 +96,7 @@ ties, and falls back to recency when all candidates score zero.
 - `GroupedByLayerReadout`
 - `JSONReadout`
 - `GraphReadout`
+- `PromptContextReadout`
 
 ## Representation: supported element kinds (`representation.py`)
 

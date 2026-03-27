@@ -524,6 +524,99 @@ def test_outcome_conditioned_evolution_trigger_triggers_only_for_failed_trials()
     assert success_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["trial_failed"] == 0.0
 
 
+def test_reflection_generation_evolution_skips_success_trial_with_outcome_trigger() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import (
+        AlwaysWriteTrigger,
+        BasicRepresentation,
+        OutcomeConditionedEvolutionTrigger,
+        PassThroughUnitFormation,
+        PlacementWithoutAppendOrganization,
+        ReflectionGenerationEvolution,
+    )
+
+    pipeline = MemoryPipeline(
+        store=MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")])),
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(elements=("text",)),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=PlacementWithoutAppendOrganization(target_layer="trial_buffer"),
+        evolution_trigger=OutcomeConditionedEvolutionTrigger(),
+        memory_evolution=ReflectionGenerationEvolution(
+            target_layer="reflections",
+            reflection_generator=lambda payload: f"Reflection: avoid {payload.evaluator_feedback}",
+        ),
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Trial scratchpad",
+            source="dialogue",
+            metadata={
+                "reflexion": {
+                    "question": "Parse the input stream",
+                    "scratchpad": "Attempt handled the edge case correctly.",
+                    "is_correct": True,
+                    "evaluator_feedback": "Correct answer.",
+                }
+            },
+        )
+    )
+
+    assert packet.evolution_decisions == [False]
+    assert pipeline.store.count("reflections") == 0
+    assert packet.trace["memory_evolution"]["effects"] == []
+
+
+def test_reflection_generation_evolution_appends_reflection_for_failed_trial() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import (
+        AlwaysWriteTrigger,
+        BasicRepresentation,
+        OutcomeConditionedEvolutionTrigger,
+        PassThroughUnitFormation,
+        PlacementWithoutAppendOrganization,
+        ReflectionGenerationEvolution,
+    )
+
+    pipeline = MemoryPipeline(
+        store=MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")])),
+        unit_formation=PassThroughUnitFormation(),
+        representation=BasicRepresentation(elements=("text",)),
+        write_trigger=AlwaysWriteTrigger(),
+        organization=PlacementWithoutAppendOrganization(target_layer="trial_buffer"),
+        evolution_trigger=OutcomeConditionedEvolutionTrigger(),
+        memory_evolution=ReflectionGenerationEvolution(
+            target_layer="reflections",
+            reflection_generator=lambda payload: f"Reflection: avoid {payload.evaluator_feedback}",
+        ),
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Trial scratchpad",
+            source="dialogue",
+            metadata={
+                "reflexion": {
+                    "question": "Parse the input stream",
+                    "scratchpad": "Attempt missed the empty-input edge case.",
+                    "is_correct": False,
+                    "evaluator_feedback": "the empty-input edge case",
+                    "trial_index": 2,
+                }
+            },
+        )
+    )
+
+    assert packet.evolution_decisions == [True]
+    assert pipeline.store.count("reflections") == 1
+    reflection_record = pipeline.store.iter_records("reflections")[0]
+    assert reflection_record.text == "Reflection: avoid the empty-input edge case"
+    assert reflection_record.metadata["reflection"]["question"] == "Parse the input stream"
+    assert packet.trace["memory_evolution"]["effects"][0]["effect_type"] == "reflection_append"
+    assert packet.trace["memory_evolution"]["residual_boundary"]["skeleton"] == "generic reflection generation evolution"
+
+
 def test_new_write_evolution_trigger_requires_partition_ready_local_write_context() -> None:
     from memprimitive.baselines import NewWriteEvolutionTrigger
 
@@ -2402,6 +2495,30 @@ def test_bullet_list_readout_formats_bullets() -> None:
     assert packet_out.readout.text.startswith("- Alice likes tea.")
 
 
+def test_buffer_retrieval_returns_latest_window_in_chronological_order() -> None:
+    from memprimitive.baselines import BufferRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")]))
+    for index in range(1, 5):
+        store.append(
+            MemoryRecord(
+                record_id=f"rec-{index}",
+                unit_id=f"unit-{index}",
+                layer="reflections",
+                text=f"Reflection {index}",
+                timestamp=f"2026-01-01T00:00:0{index}+00:00",
+            )
+        )
+
+    packet_out, _ = BufferRetrieval(top_k=2, layer="reflections").run(
+        Packet(query=Query(text="Current question")),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-3", "rec-4"]
+    assert packet_out.retrieved.trace["candidate_count"] == 4
+
+
 def test_grouped_by_layer_readout_groups_items() -> None:
     from memprimitive.baselines import GroupedByLayerReadout
 
@@ -2415,6 +2532,46 @@ def test_grouped_by_layer_readout_groups_items() -> None:
 
     assert "[working]" in packet_out.readout.text
     assert packet_out.readout.metadata["group_counts"] == {"working": 1, "semantic": 1}
+
+
+def test_prompt_context_readout_switches_between_strategies() -> None:
+    from memprimitive.baselines import PromptContextReadout
+
+    reflection_record = MemoryRecord(
+        record_id="rec-reflection",
+        unit_id="unit-reflection",
+        layer="reflections",
+        text="Reflection: handle the empty-input edge case first.",
+        timestamp="2026-01-01T00:00:00+00:00",
+    )
+    retrieved = RetrievedSet(items=[reflection_record], scores=[])
+
+    reflexion_packet, _ = PromptContextReadout(memory_layer="reflections", default_strategy="reflexion").run(
+        Packet(
+            query=Query(
+                text="Parse the input stream",
+                metadata={"reflexion": {"last_attempt": "Attempt missed the edge case."}},
+            ),
+            retrieved=retrieved,
+        ),
+        MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")])),
+    )
+    assert "Reflection 1:" in reflexion_packet.readout.text
+    assert reflexion_packet.readout.source_ids == ["rec-reflection"]
+
+    last_attempt_packet, _ = PromptContextReadout(memory_layer="reflections", default_strategy="reflexion").run(
+        Packet(
+            query=Query(
+                text="Parse the input stream",
+                metadata={"reflexion": {"strategy": "last_trial", "last_attempt": "Attempt missed the edge case."}},
+            ),
+            retrieved=retrieved,
+        ),
+        MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")])),
+    )
+    assert "Below is the last trial you attempted" in last_attempt_packet.readout.text
+    assert "Reflection 1:" not in last_attempt_packet.readout.text
+    assert last_attempt_packet.readout.source_ids == []
 
 
 def test_json_readout_returns_json_string() -> None:

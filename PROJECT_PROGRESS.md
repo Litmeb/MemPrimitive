@@ -181,6 +181,27 @@ Validation status:
   - `python -m memprimitive.example.demonstration.reflexion_trigger_success_trial`
   - `python -m memprimitive.example.demonstration.partition_ready_local_maintenance`
 
+### 4.5 Reflexion-like back-half motifs are now baseline-first instead of classic-only
+
+The Reflexion family is no longer represented only by classic-family classes. Its reusable back-half motifs now live in the baseline slot files and the classic wrapper composes them for backward compatibility:
+
+- `PlacementWithoutAppendOrganization` in [memprimitive/baselines/organization.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/organization.py) expresses the placement-without-append organization motif for ephemeral trial packets.
+- `OutcomeConditionedEvolutionTrigger` remains the shared failure-trigger path and is now the underlying implementation for the classic `TrialFailureEvolutionTrigger`.
+- `ReflectionGenerationEvolution` in [memprimitive/baselines/memory_evolution.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/memory_evolution.py) separates the generic memory-evolution skeleton from the benchmark/prompt residual through a `reflection_generator` / `prompt_builder` boundary.
+- `BufferRetrieval` in [memprimitive/baselines/retrieval.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/retrieval.py) expresses bounded temporal buffer recall without query-dependent search.
+- `PromptContextReadout` in [memprimitive/baselines/readout.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/readout.py) renders switchable next-trial prompt context (`base`, `last_trial`, `reflexion`, `last_trial_and_reflexion`).
+
+Practical impact:
+
+- Reflexion-like modules can now participate in the baseline registry and be compared at the slot level instead of only through a family-specific classic file.
+- The classic API in [memprimitive/classic_modules/reflexion.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/classic_modules/reflexion.py) is preserved via thin wrappers and compatibility traces.
+- A full Reflexion-like closed-loop demo now exists at `python -m memprimitive.example.demonstration.reflexion_reflection_cycle`.
+
+Validation status:
+
+- `tests/test_baselines.py` now covers success-suppressed reflection generation, failure-triggered reflection append, buffer-window retrieval truncation, and prompt-context strategy switching.
+- Existing classic Reflexion tests continue to target the old public class names while exercising the baseline-backed implementation.
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:

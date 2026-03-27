@@ -13,6 +13,7 @@ from ..core import MemoryStore, ModuleSpec, Packet, RetrievedSet
 from ..interfaces import RetrievalModule
 
 from ._graph_family import graph_metadata_from_record
+from ._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
 from ._trace import copy_trace
 
 
@@ -931,6 +932,68 @@ class LayerAwareRetrieval(RetrievalModule):
         return (1, normalized_rank, candidate["layer_index"], candidate["item_index"])
 
 
+class BufferRetrieval(RetrievalModule):
+    """Read a bounded recency window from one layer instead of doing query search.
+
+    Constructor: ``top_k`` must be positive. ``layer`` selects the temporal
+    buffer to read from. ``chronological`` controls whether the returned window
+    is reordered oldest-to-newest after selecting the most recent ``top_k``.
+
+    ``run`` requires ``packet.query`` so the module remains a normal recall-slot
+    primitive. It does not use query text for ranking. The store is unchanged.
+    """
+
+    spec = ModuleSpec(
+        name="buffer_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = DEFAULT_MEMORY_SIZE,
+        *,
+        layer: str = DEFAULT_REFLECTION_LAYER,
+        chronological: bool = True,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("BufferRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+        self.chronological = chronological
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("BufferRetrieval requires packet.query.")
+
+        reverse_window = list(reversed(store.iter_records(self.layer)))[: self.top_k]
+        items = list(reversed(reverse_window)) if self.chronological else reverse_window
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "strategy": "buffer_window",
+                "layer": self.layer,
+            }
+            for rank, record in enumerate(items, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "layer": self.layer,
+                "top_k": self.top_k,
+                "chronological": self.chronological,
+                "candidate_count": len(store.iter_records(self.layer)),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["retrieval"] = retrieved.trace
+        return replace(packet, retrieved=retrieved, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "retrieval"
 BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     RecencyRetrieval,
@@ -942,4 +1005,5 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     GraphNeighborRetrieval,
     GraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
+    BufferRetrieval,
 )

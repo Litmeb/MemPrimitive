@@ -10,6 +10,14 @@ from ..core import MemoryStore, ModuleSpec, Packet, Readout
 from ..interfaces import ReadoutModule
 
 from ._graph_family import graph_metadata_from_record
+from ._reflexion_family import (
+    DEFAULT_MEMORY_SIZE,
+    DEFAULT_REFLECTION_LAYER,
+    VALID_PROMPT_CONTEXT_STRATEGIES,
+    build_prompt_context,
+    last_attempt_from_query_metadata,
+    strategy_from_query_metadata,
+)
 from ._trace import copy_trace
 
 
@@ -205,6 +213,83 @@ class GraphReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
+class PromptContextReadout(ReadoutModule):
+    """Render retrieved records into next-step prompt context with switchable strategy.
+
+    Constructor: ``default_strategy`` must be one of the supported prompt
+    context modes. ``memory_layer`` filters which retrieved records count as
+    prompt-memory items. ``top_k`` limits how many retrieved memory records are
+    rendered into the final prompt context.
+
+    ``run`` requires ``packet.query``. ``packet.retrieved`` is optional; when
+    absent, the module still supports strategies that only use query metadata
+    such as last-attempt context. The store is unchanged.
+    """
+
+    spec = ModuleSpec(
+        name="prompt_context_readout",
+        slot="readout",
+        input_requirements=("query.text",),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(
+        self,
+        *,
+        memory_layer: str = DEFAULT_REFLECTION_LAYER,
+        default_strategy: str = "reflexion",
+        top_k: int = DEFAULT_MEMORY_SIZE,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("PromptContextReadout requires top_k > 0.")
+        if default_strategy not in VALID_PROMPT_CONTEXT_STRATEGIES:
+            raise ValueError(
+                f"PromptContextReadout requires strategy in {sorted(VALID_PROMPT_CONTEXT_STRATEGIES)}."
+            )
+        self.memory_layer = memory_layer
+        self.default_strategy = default_strategy
+        self.top_k = top_k
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("PromptContextReadout requires packet.query.")
+
+        strategy = strategy_from_query_metadata(packet.query.metadata, self.default_strategy)
+        last_attempt = last_attempt_from_query_metadata(packet.query.metadata)
+        memory_items = []
+        if packet.retrieved is not None:
+            memory_items = [
+                record for record in packet.retrieved.items if record.layer == self.memory_layer
+            ][: self.top_k]
+
+        source_ids = []
+        if strategy in {"reflexion", "last_trial_and_reflexion"}:
+            source_ids = [record.record_id for record in memory_items]
+
+        readout = Readout(
+            text=build_prompt_context(
+                strategy=strategy,
+                question=packet.query.text,
+                last_attempt=last_attempt,
+                reflections=[record.text for record in memory_items],
+            ),
+            source_ids=source_ids,
+            metadata={
+                "strategy": strategy,
+                "reflection_count": len(memory_items),
+                "last_attempt_present": bool(last_attempt),
+                "memory_layer": self.memory_layer,
+            },
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "strategy": strategy,
+            "source_ids": source_ids,
+        }
+        return replace(packet, readout=readout, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "readout"
 BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     ConcatenateReadout,
@@ -212,4 +297,5 @@ BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     GroupedByLayerReadout,
     JSONReadout,
     GraphReadout,
+    PromptContextReadout,
 )

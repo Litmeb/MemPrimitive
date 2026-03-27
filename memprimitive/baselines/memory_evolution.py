@@ -10,6 +10,18 @@ from ..core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet
 from ..interfaces import MemoryEvolutionModule
 
 from ._graph_family import graph_metadata_from_record, rewrite_graph_record
+from ._reflexion_family import (
+    DEFAULT_MEMORY_SIZE,
+    DEFAULT_REFLECTION_LAYER,
+    ReflectionGenerationPayload,
+    ReflectionGenerator,
+    ReflectionPromptBuilder,
+    feedback_from_payload,
+    question_from_payload,
+    reflexion_controls,
+    runtime_reflection_generator,
+    scratchpad_from_payload,
+)
 from ._trace import copy_trace
 
 
@@ -608,6 +620,165 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
         return replace(packet, trace=trace), store
 
 
+class ReflectionGenerationEvolution(MemoryEvolutionModule):
+    """Generate strategy notes from failed trials and append them to a memory layer.
+
+    Constructor: ``target_layer`` selects where generated reflections are stored.
+    ``memory_size`` is the retained sliding-window size and must be positive.
+    ``reflection_generator`` may override generation for testing or custom
+    controllers. ``prompt_builder`` customizes only the benchmark/prompt
+    residual while preserving the generic evolution skeleton.
+
+    ``run`` requires aligned ``packet.units``, ``packet.placements``,
+    ``packet.evolution_decisions``, and ``packet.observation``. The store is
+    mutated by appending generated records and pruning the target layer to the
+    configured window.
+    """
+
+    spec = ModuleSpec(
+        name="reflection_generation_evolution",
+        slot="memory_evolution",
+        input_requirements=("units", "placements", "evolution_decisions", "observation"),
+        output_guarantees=("trace.memory_evolution.effects",),
+        side_effects=("modify_store", "append_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        target_layer: str = DEFAULT_REFLECTION_LAYER,
+        memory_size: int = DEFAULT_MEMORY_SIZE,
+        window_size: int | None = None,
+        reflection_generator: ReflectionGenerator | None = None,
+        prompt_builder: ReflectionPromptBuilder | None = None,
+    ) -> None:
+        effective_size = memory_size if window_size is None else window_size
+        if effective_size <= 0:
+            raise ValueError("ReflectionGenerationEvolution requires memory_size > 0.")
+        self.target_layer = target_layer
+        self.memory_size = effective_size
+        self.reflection_generator = reflection_generator
+        self.prompt_builder = prompt_builder
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.observation is None:
+            raise ValueError("ReflectionGenerationEvolution requires packet.observation.")
+        if packet.units is None:
+            raise ValueError("ReflectionGenerationEvolution requires packet.units.")
+        if packet.placements is None:
+            raise ValueError("ReflectionGenerationEvolution requires packet.placements.")
+        if packet.evolution_decisions is None:
+            raise ValueError("ReflectionGenerationEvolution requires packet.evolution_decisions.")
+        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
+            raise ValueError(
+                "ReflectionGenerationEvolution requires aligned units, placements, and evolution decisions."
+            )
+
+        if not store.has_layer(self.target_layer):
+            store.ensure_layer(self.target_layer, allow_create=True, theme="semantic")
+
+        question = question_from_payload(packet.observation.metadata)
+        scratchpad = scratchpad_from_payload(packet.observation.metadata)
+        evaluator_feedback = feedback_from_payload(packet.observation.metadata)
+        prior_reflections = tuple(record.text for record in store.iter_records(self.target_layer))
+        generator = self.reflection_generator or (
+            lambda payload: runtime_reflection_generator(payload, prompt_builder=self.prompt_builder)
+        )
+        generation_mode = "callable_override" if self.reflection_generator is not None else "classic_runtime"
+
+        active_unit_ids: list[str] = []
+        record_ids: list[str] = []
+        effects: list[dict[str, Any]] = []
+        trial_index = reflexion_controls(packet.observation.metadata).get("trial_index", 0)
+
+        for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True):
+            if not decision:
+                continue
+            active_unit_ids.append(unit.unit_id)
+            payload = ReflectionGenerationPayload(
+                question=question,
+                scratchpad=scratchpad,
+                evaluator_feedback=evaluator_feedback,
+                prior_reflections=prior_reflections,
+                observation_metadata=packet.observation.metadata,
+                unit_metadata=unit.metadata,
+            )
+            reflection_text = generator(payload).strip()
+            reflection_unit = MemoryUnit(
+                text=reflection_text,
+                unit_type="reflection",
+                metadata={
+                    **unit.metadata,
+                    "reflection": {
+                        "question": question,
+                        "trial_index": trial_index,
+                        "evaluator_feedback": evaluator_feedback,
+                        "source_unit_id": unit.unit_id,
+                        "source_layer": placement.target_layer,
+                        "target_layer": self.target_layer,
+                        "memory_size": self.memory_size,
+                        "last_attempt": scratchpad,
+                        "generation_mode": generation_mode,
+                        "inferred_decomposition": True,
+                    },
+                    # Backward-compatible namespace for existing classic tests/examples.
+                    "reflexion": {
+                        "triggered": True,
+                        "question": question,
+                        "trial_index": trial_index,
+                        "evaluator_feedback": evaluator_feedback,
+                        "source_unit_id": unit.unit_id,
+                        "source_layer": placement.target_layer,
+                        "target_layer": self.target_layer,
+                        "memory_size": self.memory_size,
+                        "last_attempt": scratchpad,
+                    },
+                },
+            )
+            sequence_id = store.next_sequence_id()
+            record = MemoryRecord.from_unit(reflection_unit, layer=self.target_layer, sequence_id=sequence_id)
+            store.append(record)
+            prior_reflections = (*prior_reflections, record.text)
+            record_ids.append(record.record_id)
+            effects.append(
+                {
+                    "effect_type": "reflection_append",
+                    "unit_id": unit.unit_id,
+                    "record_id": record.record_id,
+                    "question": question,
+                    "target_layer": self.target_layer,
+                }
+            )
+
+        removed_record_ids: list[str] = []
+        records = store.layers.get(self.target_layer, [])
+        if len(records) > self.memory_size:
+            removed = records[:-self.memory_size]
+            removed_record_ids = [record.record_id for record in removed]
+            store.layers[self.target_layer] = records[-self.memory_size:]
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "decision_source": "evolution_decisions",
+            "active_unit_ids": active_unit_ids,
+            "effects": effects,
+            "record_ids": record_ids,
+            "target_layer": self.target_layer,
+            "memory_size": self.memory_size,
+            "trial_trace": scratchpad,
+            "question": question,
+            "generation_mode": generation_mode,
+            "residual_boundary": {
+                "skeleton": "generic reflection generation evolution",
+                "prompt_residual": "classic runtime prompt builder",
+            },
+            "pruned_record_ids": removed_record_ids,
+            "retained_record_ids": [record.record_id for record in store.layers[self.target_layer]],
+        }
+        return replace(packet, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "memory_evolution"
 BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     AppendOnlyEvolution,
@@ -617,4 +788,5 @@ BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     GraphLinkEvolution,
     GraphNeighborContextTraceEvolution,
     GraphNeighborAppendEvolution,
+    ReflectionGenerationEvolution,
 )
