@@ -1,5 +1,11 @@
 # MemPrimitive
 
+## Stage-7 A-MEM-like Graph Motifs
+
+The graph pipeline now also covers an A-MEM-like enriched note family on top of the existing graph substrate. The baseline layer includes `SemanticFieldEnrichmentRepresentation`, `RetrievalOrientedEmbeddingRepresentation`, `LLMJudgedWriteTrigger`, `GraphAppendLinkReadyOrganization`, `NeighborExistsEvolutionTrigger`, `LinkStrengtheningEvolution`, `NeighborContextUpdateEvolution`, `VectorGraphSeedAndExpandRetrieval`, and `NoteRenderReadout`.
+
+The baseline-first runnable demonstration for this stage is `python -m memprimitive.example.demonstration.amem_like_graph_cycle`, while the paper-aligned classic wrapper remains available through `python -m memprimitive.example.classics.amem_agentic_memory`. Both flows now rely on the shared classic runtime for real LLM calls, so configure `MEMPRIMITIVE_API_KEY`, `MEMPRIMITIVE_BASE_URL`, and `MEMPRIMITIVE_MODEL` before running them.
+
 ## 项目简介
 
 `MemPrimitive` 是一个面向 agent memory research 的系统化研究框架。这个项目的核心目标，不是再提出一个单独的 memory 方法，而是试图回答一个更基础的问题：

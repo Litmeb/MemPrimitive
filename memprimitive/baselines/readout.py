@@ -9,6 +9,7 @@ from typing import Final
 from ..core import MemoryStore, ModuleSpec, Packet, Readout
 from ..interfaces import ReadoutModule
 
+from ._amem_family import DEFAULT_CATEGORY, DEFAULT_NOTE_NAMESPACE, note_payload_from_record
 from ._graph_family import graph_metadata_from_record
 from ._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
@@ -290,6 +291,80 @@ class PromptContextReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
+class NoteRenderReadout(ReadoutModule):
+    """Render enriched note payloads into a readable note-centric readout.
+
+    Constructor: ``note_namespace`` selects which repaired note payload to read.
+    ``include_context`` and ``include_tags`` control optional detail lines.
+
+    ``run`` requires ``packet.query`` and ``packet.retrieved``. The store is
+    unchanged. The readout preserves retrieval order and is designed for
+    enriched semantic-note payloads rather than generic graph metadata dumps.
+    """
+
+    spec = ModuleSpec(
+        name="note_render_readout",
+        slot="readout",
+        input_requirements=("query.text", "retrieved.items"),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(
+        self,
+        *,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        default_category: str = DEFAULT_CATEGORY,
+        include_context: bool = True,
+        include_tags: bool = True,
+    ) -> None:
+        self.note_namespace = note_namespace
+        self.default_category = default_category
+        self.include_context = include_context
+        self.include_tags = include_tags
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("NoteRenderReadout requires packet.query.")
+        if packet.retrieved is None:
+            raise ValueError("NoteRenderReadout requires packet.retrieved.")
+
+        lines = [f"Query: {packet.query.text}", ""]
+        source_ids: list[str] = []
+        for record in packet.retrieved.items:
+            payload = note_payload_from_record(
+                record,
+                note_namespace=self.note_namespace,
+                default_category=self.default_category,
+            )
+            source_ids.append(record.record_id)
+            lines.append(f"- {payload['content']}")
+            if self.include_context:
+                lines.append(f"  context: {payload['context']}")
+            if self.include_tags:
+                lines.append(f"  tags: {', '.join(payload['tags'])}")
+        if not packet.retrieved.items:
+            lines.append("No enriched notes retrieved.")
+
+        readout = Readout(
+            text="\n".join(lines).strip(),
+            source_ids=source_ids,
+            metadata={
+                "item_count": len(packet.retrieved.items),
+                "format": "note_render",
+                "note_namespace": self.note_namespace,
+                "retrieval_mode": packet.retrieved.trace.get("retrieval_mode", "unknown"),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "source_ids": source_ids,
+            "note_namespace": self.note_namespace,
+            "format": "note_render",
+        }
+        return replace(packet, readout=readout, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "readout"
 BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     ConcatenateReadout,
@@ -298,4 +373,5 @@ BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     JSONReadout,
     GraphReadout,
     PromptContextReadout,
+    NoteRenderReadout,
 )

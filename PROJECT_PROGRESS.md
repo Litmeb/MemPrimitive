@@ -202,6 +202,41 @@ Validation status:
 - `tests/test_baselines.py` now covers success-suppressed reflection generation, failure-triggered reflection append, buffer-window retrieval truncation, and prompt-context strategy switching.
 - Existing classic Reflexion tests continue to target the old public class names while exercising the baseline-backed implementation.
 
+### 4.6 A-MEM-like graph-note motifs now exist as baseline-first modules on top of the graph pipeline
+
+The graph pipeline is no longer limited to generic append/link/readout primitives. It now also covers the A-MEM-like enriched-note path through reusable slot modules plus thin classic wrappers:
+
+- Representation:
+  - `SemanticFieldEnrichmentRepresentation` generates repaired note payloads (`content`, `note_text`, `context`, `keywords`, `tags`, `category`, `attributes`) through the shared classic runtime.
+  - `RetrievalOrientedEmbeddingRepresentation` turns that note payload into retrieval-oriented embedding text and writes embeddings plus stable `metadata["representation"]`.
+- Write trigger:
+  - `LLMJudgedWriteTrigger` adds a reusable LLM-judged write path with explicit `decision/reason/confidence` trace output.
+- Organization:
+  - `GraphAppendLinkReadyOrganization` appends enriched notes into graph layers while initializing link-ready graph metadata.
+- Evolution:
+  - Existing `NeighborExistsEvolutionTrigger` remains the generic trigger-family decomposition for graph-neighbor-triggered evolution.
+  - `LinkStrengtheningEvolution` now performs LLM-selected graph link strengthening plus current-note tag refresh.
+  - `NeighborContextUpdateEvolution` rewrites linked neighbors' note context/tags with schema repair.
+- Retrieval and readout:
+  - `VectorGraphSeedAndExpandRetrieval` provides the vector-seed + graph-expansion retrieval path used by A-MEM-like pipelines.
+  - `NoteRenderReadout` renders enriched note payloads into readable note/context/tag output.
+
+Classic-layer impact:
+
+- `memprimitive/classic_modules/amem.py` is now mostly a compatibility layer over the new baseline modules.
+- The classic wrapper keeps the paper residual mainly in the higher-level A-MEM evolution controller prompt/decision loop and naming compatibility.
+- `memprimitive/example/classics/amem_agentic_memory.py` still exposes the familiar classic entry point, while `memprimitive/example/demonstration/amem_like_graph_cycle.py` shows the same family as explicit baseline slot composition and now uses the shared classic runtime instead of an in-script fake demo runtime.
+- The shared classic runtime JSON coercion is now more tolerant of extra prose around a valid JSON block, which matters for real-API demonstrations where some models occasionally prepend or append commentary despite a strict-JSON instruction.
+
+Validation status:
+
+- `tests/test_baselines.py` now covers:
+  - note-schema repair across representation stages
+  - graph/vector store precondition validation for link-ready graph organization
+  - vector-seed retrieval neighbor expansion
+  - link-strengthening + neighbor-context writeback
+- Existing `tests/test_classic_amem.py` should continue to exercise the public classic A-MEM API on top of the baseline-backed implementation.
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:
@@ -290,7 +325,8 @@ The graph family is improved here, but still only partially formalized:
 - graph retrieval still uses simplified heuristic seed scoring rather than a general vector-seed abstraction
 - graph link evolution is baseline-safe and local, not yet paper-faithful A-MEM agentic evolution
 - graph metadata contracts are stabilized in code, but not yet surfaced as a full searchable ontology layer
-- neighbor-context updates are still conservative baseline summaries, not LLM-driven graph-note rewrites
+- there is now an LLM-driven neighbor-note rewrite path, but the full graph-note metadata contract is still not elevated into a searchable ontology layer
+- the classic A-MEM evolution controller still keeps prompt-level residual logic at the wrapper layer instead of exposing every paper residual as search metadata
 
 ### 4. Classic reconstructions are present, but not yet turned into a stable search-ready ontology
 

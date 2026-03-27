@@ -27,6 +27,8 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 
 - `BasicRepresentation`
 - `KeywordRepresentation`
+- `SemanticFieldEnrichmentRepresentation`
+- `RetrievalOrientedEmbeddingRepresentation`
 
 ### Slot `write_trigger` — `write_trigger.py`
 
@@ -34,6 +36,7 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `ThresholdWriteTrigger`
 - `MetadataGatedWriteTrigger`
 - `KeyReadyWriteTrigger`
+- `LLMJudgedWriteTrigger`
 
 (The same module also exposes `compose_write_trigger` plus motif-oriented helpers
 `compose_metadata_gated_write_trigger` and `compose_key_ready_write_trigger` for
@@ -46,6 +49,7 @@ entries.)
 - `ConditionalLayerOrganization`
 - `GraphAppendOrganization`
 - `PlacementWithoutAppendOrganization`
+- `GraphAppendLinkReadyOrganization`
 
 ### Slot `evolution_trigger` – `evolution_trigger.py`
 
@@ -70,6 +74,8 @@ adapters; those are not extra `BASELINE_CLASSES` entries.)
 - `GraphLinkEvolution`
 - `GraphNeighborContextTraceEvolution`
 - `GraphNeighborAppendEvolution`
+- `LinkStrengtheningEvolution`
+- `NeighborContextUpdateEvolution`
 - `ReflectionGenerationEvolution`
 
 ### Slot `retrieval` — `retrieval.py`
@@ -82,6 +88,7 @@ adapters; those are not extra `BASELINE_CLASSES` entries.)
 - `BM25Retrieval`
 - `GraphNeighborRetrieval`
 - `GraphSeedAndExpandRetrieval`
+- `VectorGraphSeedAndExpandRetrieval`
 - `LayerAwareRetrieval`
 - `BufferRetrieval`
 
@@ -97,6 +104,7 @@ ties, and falls back to recency when all candidates score zero.
 - `JSONReadout`
 - `GraphReadout`
 - `PromptContextReadout`
+- `NoteRenderReadout`
 
 ## Representation: supported element kinds (`representation.py`)
 
@@ -207,6 +215,7 @@ Final boolean decision from `score` and `gate_open`.
 - **`ThresholdWriteTrigger`** — `ConstantSignal` + `WeightedSumScorer({"constant": 1.0})` + `AlwaysOpenGate` + `ThresholdPolicy`.
 - **`MetadataGatedWriteTrigger`** — `UnitTypeSignal` + `MetadataFlagSignal` + `MinScorer` + `AlwaysOpenGate` + `ThresholdPolicy(1.0)`.
 - **`KeyReadyWriteTrigger`** — `PartitionKeyPresentSignal` (optionally plus `UnitTypeSignal`) + `IdentityScorer`/`MinScorer` + `AlwaysOpenGate` + `ThresholdPolicy(1.0)`.
+- **`LLMJudgedWriteTrigger`** — classic-runtime-backed write controller over enriched note payloads; keeps explicit `decision/reason/confidence` trace when the write path is LLM judged.
 - **`NeverEvolutionTrigger`** — same signals/scorer/gate as always-write, but **`NeverPolicy`**.
 - **`ThresholdEvolutionTrigger`** — same as `ThresholdWriteTrigger` but writes **`evolution_decisions`** and uses evolution adapter `input_requirements` (`units`, `placements`).
 - **`OutcomeConditionedEvolutionTrigger`** — `OutcomeCorrectnessSignal` + `FeedbackPresenceSignal` + `WeightedSumScorer` + `FeedbackSchemaGate` + `ThresholdPolicy(1.0)`.
@@ -228,6 +237,7 @@ Relevant types live in `memprimitive.core`:
 
 - `_trace.py` — `copy_trace()` for shallow-copying `Packet.trace` before appending stage-local keys. Leading underscore marks it as package-internal; baseline authors should import it only from sibling modules.
 - `_trigger_family.py` — Shared trigger-family runner/adapters used by `write_trigger.py` and `evolution_trigger.py` factory helpers; not a slot module (no `BASELINE_SLOT` / `BASELINE_CLASSES`). See **Trigger family: signal, scorer, gate, policy** above for the four roles and every concrete class/method.
+- `_amem_family.py` — shared enriched-note schema helpers reused by A-MEM-like representation, retrieval, readout, and evolution modules.
 
 ## Per-file registry (source of truth)
 

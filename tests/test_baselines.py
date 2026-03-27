@@ -568,6 +568,104 @@ def test_reflection_generation_evolution_skips_success_trial_with_outcome_trigge
     assert packet.trace["memory_evolution"]["effects"] == []
 
 
+class _FakeAMEMRuntime:
+    def require_llm(self, *, capability: str) -> None:
+        return None
+
+    def embed(self, text: str) -> list[float]:
+        lowered = text.casefold()
+        return [
+            10.0 if "alice" in lowered else 0.0,
+            8.0 if "tea" in lowered else 0.0,
+            6.0 if "focus" in lowered else 0.0,
+            4.0 if "graph" in lowered else 0.0,
+            float(len(lowered)),
+        ]
+
+    def json(self, *, system: str, user: str):
+        payload = json.loads(user)
+        lowered_system = system.casefold()
+        if "enrich memory notes" in lowered_system or "note generator" in lowered_system:
+            unit_text = payload["unit_text"].casefold()
+            if "alice likes tea" in unit_text:
+                return {
+                    "content": "Alice likes tea.",
+                    "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
+                    "context": "Alice's tea habit supports her daily routine.",
+                    "keywords": ["alice", "tea", "routine"],
+                    "tags": ["preference", "habit", "beverage"],
+                    "category": "personal_preference",
+                    "attributes": {"person": "Alice"},
+                }
+            if "tea routines improve focus" in unit_text:
+                return {
+                    "content": "Tea routines improve focus.",
+                    "note_text": "Comprehensive note: Tea routines improve focus during reflective work.",
+                    "context": "Tea routines are linked to improved focus.",
+                    "keywords": ["tea", "focus", "routine"],
+                    "tags": ["productivity", "habit", "focus"],
+                    "category": "insight",
+                    "attributes": {"topic": "focus"},
+                }
+            return {
+                "content": payload["unit_text"],
+                "note_text": "Graph note",
+                "context": "Graph memory context.",
+                "keywords": ["graph", "memory"],
+                "tags": ["graph", "memory"],
+                "category": "insight",
+                "attributes": {"topic": "graph"},
+            }
+        if "memory write controller" in lowered_system:
+            return {"decision": "write", "reason": "store the note", "confidence": 0.9}
+        if "choose which neighbors should receive" in lowered_system:
+            return {"connections": [0], "tags": ["focus", "tea", "bridge"]}
+        if "update each neighbor note's context and tags" in lowered_system:
+            return {
+                "updates": [
+                    {
+                        "context": "Alice's tea habit is now understood as a focus-supporting routine.",
+                        "tags": ["preference", "habit", "focus"],
+                    }
+                ]
+            }
+        if "expand the query" in lowered_system:
+            return {
+                "query_text": payload["query"],
+                "content": payload["query"],
+                "context": "Retrieve the most relevant enriched note.",
+                "keywords": ["alice", "tea"] if "alice" in payload["query"].casefold() else ["focus", "graph"],
+                "tags": ["query", "memory"],
+                "category": "query",
+                "attributes": {},
+            }
+        raise AssertionError(f"Unexpected runtime prompt: {system}")
+
+    def rerank(self, *, query: str, candidates: list[dict[str, object]], task: str, top_k: int):
+        return [
+            {
+                "id": str(candidate["id"]),
+                "score": float(candidate.get("score", 0.0)),
+                "rationale": f"selected for {query}",
+            }
+            for candidate in sorted(
+                candidates,
+                key=lambda item: (-float(item.get("score", 0.0)), str(item.get("id", ""))),
+            )[:top_k]
+        ]
+
+
+class _WrapperShapeAMEMRuntime(_FakeAMEMRuntime):
+    def json(self, *, system: str, user: str):
+        payload = super().json(system=system, user=user)
+        lowered_system = system.casefold()
+        if "choose which neighbors should receive" in lowered_system:
+            return [0]
+        if "update each neighbor note's context and tags" in lowered_system:
+            return payload["updates"]
+        return payload
+
+
 def test_reflection_generation_evolution_appends_reflection_for_failed_trial() -> None:
     from memprimitive import MemoryPipeline
     from memprimitive.baselines import (
@@ -2280,6 +2378,258 @@ def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieva
     assert linked_record.metadata["graph"]["neighbor_context"]["neighbor_record_ids"]
     assert "Alice studies graph memory systems." in readout.text or "Alice likes jasmine tea." in readout.text
     assert readout.source_ids
+
+
+def test_semantic_field_enrichment_and_retrieval_embedding_repair_note_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.classic_modules import _runtime
+    from memprimitive.baselines import RetrievalOrientedEmbeddingRepresentation, SemanticFieldEnrichmentRepresentation
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    packet = Packet(
+        units=[
+            MemoryUnit(
+                text="Alice likes tea.",
+                metadata={"amem": {"context": "Alice routine only", "keywords": ["alice", "tea"]}},
+            )
+        ]
+    )
+
+    packet, store = SemanticFieldEnrichmentRepresentation(note_namespace="amem").run(packet, MemoryStore())
+    packet, _ = RetrievalOrientedEmbeddingRepresentation(note_namespace="amem").run(packet, store)
+
+    unit = packet.units[0]
+    assert unit.metadata["amem"]["note_text"].startswith("Comprehensive note:")
+    assert unit.metadata["representation"]["enhanced_embedding_text"].startswith("content: Alice likes tea.")
+    assert unit.embedding == _runtime._DEFAULT_RUNTIME.embed(unit.metadata["representation"]["enhanced_embedding_text"])
+
+
+def test_graph_append_link_ready_organization_requires_graph_vector_layer() -> None:
+    from memprimitive import IncompatibleCompositionError, MemoryPipeline
+    from memprimitive.baselines import GraphAppendLinkReadyOrganization
+
+    bad_store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="memory_graph", shape="Graph", indices=("graph", "keyword", "tag"))]
+        )
+    )
+
+    with pytest.raises(IncompatibleCompositionError, match="vector"):
+        MemoryPipeline(store=bad_store, organization=GraphAppendLinkReadyOrganization(target_layer="memory_graph"))
+
+
+def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.classic_modules import _runtime
+    from memprimitive.baselines import VectorGraphSeedAndExpandRetrieval
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    store = _graph_vector_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-seed",
+            unit_id="unit-seed",
+            layer="knowledge_graph",
+            text="Alice likes tea.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=_runtime._DEFAULT_RUNTIME.embed("content: Alice likes tea."),
+            metadata={
+                "amem": {
+                    "content": "Alice likes tea.",
+                    "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
+                    "context": "Alice's tea habit supports her daily routine.",
+                    "keywords": ["alice", "tea", "routine"],
+                    "tags": ["preference", "habit", "beverage"],
+                    "category": "personal_preference",
+                    "attributes": {"person": "Alice"},
+                },
+                "representation": {
+                    "keywords": ["alice", "tea", "routine"],
+                    "tags": ["preference", "habit", "beverage"],
+                    "context": "Alice's tea habit supports her daily routine.",
+                    "enhanced_embedding_text": "content: Alice likes tea.",
+                },
+                "graph": {"entities": ["Alice"], "links": ["rec-neighbor"]},
+            },
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-neighbor",
+            unit_id="unit-neighbor",
+            layer="knowledge_graph",
+            text="Tea routines improve focus.",
+            timestamp="2026-03-27T00:00:01+00:00",
+            embedding=_runtime._DEFAULT_RUNTIME.embed("content: Tea routines improve focus."),
+            metadata={
+                "amem": {
+                    "content": "Tea routines improve focus.",
+                    "note_text": "Comprehensive note: Tea routines improve focus during reflective work.",
+                    "context": "Tea routines are linked to improved focus.",
+                    "keywords": ["tea", "focus", "routine"],
+                    "tags": ["productivity", "habit", "focus"],
+                    "category": "insight",
+                    "attributes": {"topic": "focus"},
+                },
+                "representation": {
+                    "keywords": ["tea", "focus", "routine"],
+                    "tags": ["productivity", "habit", "focus"],
+                    "context": "Tea routines are linked to improved focus.",
+                    "enhanced_embedding_text": "content: Tea routines improve focus.",
+                },
+                "graph": {"entities": ["Tea"], "links": []},
+            },
+        )
+    )
+
+    packet_out, _ = VectorGraphSeedAndExpandRetrieval(
+        top_k=2,
+        layer="knowledge_graph",
+        candidate_k=1,
+        neighbor_expansion_k=1,
+        note_namespace="amem",
+    ).run(Packet(query=Query(text="Alice")), store)
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-seed", "rec-neighbor"]
+    assert packet_out.retrieved.trace["expanded_neighbor_ids"] == ["rec-neighbor"]
+
+
+def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.classic_modules import _runtime
+    from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    store = _graph_vector_store()
+    first_embedding = _runtime._DEFAULT_RUNTIME.embed("content: Alice likes tea.")
+    second_embedding = _runtime._DEFAULT_RUNTIME.embed("content: Tea routines improve focus.")
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes tea.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=first_embedding,
+            metadata={
+                "amem": {
+                    "content": "Alice likes tea.",
+                    "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
+                    "context": "Alice's tea habit supports her daily routine.",
+                    "keywords": ["alice", "tea", "routine"],
+                    "tags": ["preference", "habit", "beverage"],
+                    "category": "personal_preference",
+                    "attributes": {"person": "Alice"},
+                },
+                "representation": {"enhanced_embedding_text": "content: Alice likes tea."},
+                "graph": {"entities": ["Alice"], "links": []},
+            },
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="knowledge_graph",
+            text="Tea routines improve focus.",
+            timestamp="2026-03-27T00:00:01+00:00",
+            embedding=second_embedding,
+            metadata={
+                "amem": {
+                    "content": "Tea routines improve focus.",
+                    "note_text": "Comprehensive note: Tea routines improve focus during reflective work.",
+                    "context": "Tea routines are linked to improved focus.",
+                    "keywords": ["tea", "focus", "routine"],
+                    "tags": ["productivity", "habit", "focus"],
+                    "category": "insight",
+                    "attributes": {"topic": "focus"},
+                },
+                "representation": {"enhanced_embedding_text": "content: Tea routines improve focus."},
+                "graph": {"entities": ["Tea"], "links": []},
+            },
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2", embedding=second_embedding)],
+        placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
+        evolution_decisions=[True],
+    )
+
+    packet, store = LinkStrengtheningEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
+    packet, store = NeighborContextUpdateEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
+
+    current = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-2")
+    neighbor = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-1")
+    assert current.metadata["graph"]["links"] == ["rec-1"]
+    assert neighbor.metadata["amem"]["context"] == "Alice's tea habit is now understood as a focus-supporting routine."
+    assert neighbor.metadata["amem"]["tags"] == ["preference", "habit", "focus"]
+
+
+def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.classic_modules import _runtime
+    from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _WrapperShapeAMEMRuntime())
+    store = _graph_vector_store()
+    first_embedding = _runtime._DEFAULT_RUNTIME.embed("content: Alice likes tea.")
+    second_embedding = _runtime._DEFAULT_RUNTIME.embed("content: Tea routines improve focus.")
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes tea.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            embedding=first_embedding,
+            metadata={
+                "amem": {
+                    "content": "Alice likes tea.",
+                    "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
+                    "context": "Alice's tea habit supports her daily routine.",
+                    "keywords": ["alice", "tea", "routine"],
+                    "tags": ["preference", "habit", "beverage"],
+                    "category": "personal_preference",
+                    "attributes": {"person": "Alice"},
+                },
+                "representation": {"enhanced_embedding_text": "content: Alice likes tea."},
+                "graph": {"entities": ["Alice"], "links": []},
+            },
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="knowledge_graph",
+            text="Tea routines improve focus.",
+            timestamp="2026-03-27T00:00:01+00:00",
+            embedding=second_embedding,
+            metadata={
+                "amem": {
+                    "content": "Tea routines improve focus.",
+                    "note_text": "Comprehensive note: Tea routines improve focus during reflective work.",
+                    "context": "Tea routines are linked to improved focus.",
+                    "keywords": ["tea", "focus", "routine"],
+                    "tags": ["productivity", "habit", "focus"],
+                    "category": "insight",
+                    "attributes": {"topic": "focus"},
+                },
+                "representation": {"enhanced_embedding_text": "content: Tea routines improve focus."},
+                "graph": {"entities": ["Tea"], "links": []},
+            },
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2", embedding=second_embedding)],
+        placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
+        evolution_decisions=[True],
+    )
+
+    packet, store = LinkStrengtheningEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
+    packet, store = NeighborContextUpdateEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
+
+    current = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-2")
+    neighbor = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-1")
+    assert current.metadata["graph"]["links"] == ["rec-1"]
+    assert neighbor.metadata["amem"]["context"] == "Alice's tea habit is now understood as a focus-supporting routine."
+    assert neighbor.metadata["amem"]["tags"] == ["preference", "habit", "focus"]
 
 
 def test_summary_rewrite_evolution_appends_summary_record() -> None:

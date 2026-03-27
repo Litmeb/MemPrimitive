@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from math import sqrt
 from typing import Any, Final
 
 from ..core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet
 from ..interfaces import MemoryEvolutionModule
 
+from ._amem_family import (
+    coerce_index_list,
+    coerce_llm_mapping,
+    DEFAULT_CATEGORY,
+    DEFAULT_EMBEDDING_VERSION,
+    DEFAULT_NOTE_NAMESPACE,
+    note_payload_from_record,
+    repair_note_payload,
+    retrieve_candidates_by_embedding,
+    rewrite_record_from_note_payload,
+    stringify_note_candidates,
+)
 from ._graph_family import graph_metadata_from_record, rewrite_graph_record
 from ._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
@@ -620,6 +633,347 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
         return replace(packet, trace=trace), store
 
 
+class LinkStrengtheningEvolution(MemoryEvolutionModule):
+    """Strengthen graph links for enriched note records using LLM-selected neighbors.
+
+    Constructor: ``target_layer`` must be a graph layer with a vector index.
+    ``candidate_k`` and ``max_links_per_record`` must be positive. The module
+    reads note payloads from ``note_namespace`` and rewrites only the current
+    target record plus its graph namespace.
+
+    ``run`` requires aligned ``packet.units``, ``packet.placements``, and
+    ``packet.evolution_decisions``. The store is mutated by rewriting the target
+    record and appending graph links for the selected neighbor set.
+    """
+
+    spec = ModuleSpec(
+        name="link_strengthening_evolution",
+        slot="memory_evolution",
+        input_requirements=("units", "placements", "evolution_decisions"),
+        output_guarantees=("trace.memory_evolution.effects",),
+        store_requirements=("index:graph", "index:vector", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
+        side_effects=("modify_store", "rewrite_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        candidate_k: int = 5,
+        max_links_per_record: int = 4,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        default_category: str = DEFAULT_CATEGORY,
+        embedding_version: str = DEFAULT_EMBEDDING_VERSION,
+        strict_llm: bool = True,
+    ) -> None:
+        if candidate_k <= 0:
+            raise ValueError("LinkStrengtheningEvolution requires candidate_k > 0.")
+        if max_links_per_record <= 0:
+            raise ValueError("LinkStrengtheningEvolution requires max_links_per_record > 0.")
+        if not strict_llm:
+            raise ValueError("LinkStrengtheningEvolution requires strict_llm=True.")
+        self.target_layer = target_layer
+        self.candidate_k = candidate_k
+        self.max_links_per_record = max_links_per_record
+        self.note_namespace = note_namespace
+        self.default_category = default_category
+        self.embedding_version = embedding_version
+        self.strict_llm = strict_llm
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("LinkStrengtheningEvolution requires packet.units.")
+        if packet.placements is None:
+            raise ValueError("LinkStrengtheningEvolution requires packet.placements.")
+        if packet.evolution_decisions is None:
+            raise ValueError("LinkStrengtheningEvolution requires packet.evolution_decisions.")
+        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
+            raise ValueError("LinkStrengtheningEvolution requires aligned units, placements, and evolution decisions.")
+
+        from ..classic_modules._runtime import get_classic_runtime
+
+        runtime = get_classic_runtime()
+        runtime.require_llm(capability="LinkStrengtheningEvolution")
+        effects: list[dict[str, Any]] = []
+        active_unit_ids: list[str] = []
+
+        for unit, placement, decision in zip(packet.units, packet.placements, packet.evolution_decisions, strict=True):
+            if not decision or placement.target_layer != self.target_layer:
+                continue
+            current_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
+            if current_record is None or current_record.embedding is None:
+                continue
+
+            neighbor_candidates = [
+                record
+                for _, record in retrieve_candidates_by_embedding(
+                    store=store,
+                    layer=self.target_layer,
+                    query_embedding=current_record.embedding,
+                    top_k=self.candidate_k + 1,
+                )
+                if record.record_id != current_record.record_id
+            ][: self.candidate_k]
+            if not neighbor_candidates:
+                continue
+
+            current_payload = note_payload_from_record(
+                current_record,
+                note_namespace=self.note_namespace,
+                default_category=self.default_category,
+            )
+            raw = runtime.json(
+                system=(
+                    "Given a new note and its nearest neighbors, choose which neighbors should receive "
+                    "a strengthened graph link and optionally return updated tags for the current note. "
+                    "Return JSON with fields: connections, tags."
+                ),
+                user=json.dumps(
+                    {
+                        "content": current_payload["content"],
+                        "keywords": current_payload["keywords"],
+                        "nearest_neighbors_memories": stringify_note_candidates(
+                            neighbor_candidates,
+                            note_namespace=self.note_namespace,
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            raw_mapping = coerce_llm_mapping(raw, list_key="connections")
+            connection_indices = coerce_index_list(raw_mapping.get("connections", []))
+            strengthened_neighbors = [
+                neighbor_candidates[index]
+                for index in connection_indices
+                if isinstance(index, int) and 0 <= index < len(neighbor_candidates)
+            ][: self.max_links_per_record]
+            strengthened_links = [record.record_id for record in strengthened_neighbors]
+            merged_links = list(dict.fromkeys(current_record.metadata.get("graph", {}).get("links", []) + strengthened_links))
+            updated_payload = {
+                **current_payload,
+                "tags": repair_note_payload(
+                    {"tags": raw_mapping.get("tags"), "content": current_payload["content"]},
+                    fallback_content=current_payload["content"],
+                    default_category=self.default_category,
+                )["tags"]
+                or current_payload["tags"],
+            }
+            rewritten = rewrite_record_from_note_payload(
+                store,
+                layer=self.target_layer,
+                record=current_record,
+                payload=updated_payload,
+                note_namespace=self.note_namespace,
+                default_category=self.default_category,
+                embedding_version=self.embedding_version,
+                runtime=runtime,
+            )
+            current_record = replace(
+                rewritten,
+                metadata={
+                    **rewritten.metadata,
+                    "graph": {
+                        **(rewritten.metadata.get("graph", {}) if isinstance(rewritten.metadata.get("graph"), dict) else {}),
+                        "links": merged_links,
+                        "link_count": len(merged_links),
+                    },
+                },
+            )
+            store.replace_record(self.target_layer, current_record.record_id, current_record)
+            active_unit_ids.append(unit.unit_id)
+            effects.append(
+                {
+                    "effect_type": "link_strengthening",
+                    "unit_id": unit.unit_id,
+                    "record_id": current_record.record_id,
+                    "target_layer": self.target_layer,
+                    "strengthened_links": strengthened_links,
+                    "rewritten_record_ids": [current_record.record_id],
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "decision_source": "evolution_decisions",
+            "active_unit_ids": active_unit_ids,
+            "effects": effects,
+            "target_layer": self.target_layer,
+            "note_namespace": self.note_namespace,
+        }
+        return replace(packet, trace=trace), store
+
+
+class NeighborContextUpdateEvolution(MemoryEvolutionModule):
+    """Rewrite linked-neighbor note context/tags from the current note's perspective.
+
+    Constructor: ``target_layer`` must be a graph layer. The module reads note
+    payloads from ``note_namespace`` and updates already linked neighbors when
+    available; when no links exist, it falls back to nearest-neighbor candidates.
+
+    ``run`` requires aligned ``packet.units``, ``packet.placements``, and
+    ``packet.evolution_decisions``. The store is mutated only by rewriting
+    neighbor records under the configured note namespace.
+    """
+
+    spec = ModuleSpec(
+        name="neighbor_context_update_evolution",
+        slot="memory_evolution",
+        input_requirements=("units", "placements", "evolution_decisions"),
+        output_guarantees=("trace.memory_evolution.effects",),
+        store_requirements=("index:graph", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+        side_effects=("modify_store", "rewrite_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        candidate_k: int = 5,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        default_category: str = DEFAULT_CATEGORY,
+        embedding_version: str = DEFAULT_EMBEDDING_VERSION,
+        strict_llm: bool = True,
+    ) -> None:
+        if candidate_k <= 0:
+            raise ValueError("NeighborContextUpdateEvolution requires candidate_k > 0.")
+        if not strict_llm:
+            raise ValueError("NeighborContextUpdateEvolution requires strict_llm=True.")
+        self.target_layer = target_layer
+        self.candidate_k = candidate_k
+        self.note_namespace = note_namespace
+        self.default_category = default_category
+        self.embedding_version = embedding_version
+        self.strict_llm = strict_llm
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("NeighborContextUpdateEvolution requires packet.units.")
+        if packet.placements is None:
+            raise ValueError("NeighborContextUpdateEvolution requires packet.placements.")
+        if packet.evolution_decisions is None:
+            raise ValueError("NeighborContextUpdateEvolution requires packet.evolution_decisions.")
+        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
+            raise ValueError("NeighborContextUpdateEvolution requires aligned units, placements, and evolution decisions.")
+
+        from ..classic_modules._runtime import get_classic_runtime
+
+        runtime = get_classic_runtime()
+        runtime.require_llm(capability="NeighborContextUpdateEvolution")
+        effects: list[dict[str, Any]] = []
+        active_unit_ids: list[str] = []
+
+        for unit, placement, decision in zip(packet.units, packet.placements, packet.evolution_decisions, strict=True):
+            if not decision or placement.target_layer != self.target_layer:
+                continue
+            current_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
+            if current_record is None:
+                continue
+
+            linked_neighbors = store.iter_graph_neighbors(self.target_layer, current_record.record_id)
+            if not linked_neighbors and current_record.embedding is not None:
+                linked_neighbors = [
+                    record
+                    for _, record in retrieve_candidates_by_embedding(
+                        store=store,
+                        layer=self.target_layer,
+                        query_embedding=current_record.embedding,
+                        top_k=self.candidate_k + 1,
+                    )
+                    if record.record_id != current_record.record_id
+                ][: self.candidate_k]
+            if not linked_neighbors:
+                continue
+
+            current_payload = note_payload_from_record(
+                current_record,
+                note_namespace=self.note_namespace,
+                default_category=self.default_category,
+            )
+            raw = runtime.json(
+                system=(
+                    "Update each neighbor note's context and tags based on the current note and its linked neighbors. "
+                    "Return JSON with an updates list. Each update may contain context and tags."
+                ),
+                user=json.dumps(
+                    {
+                        "content": current_payload["content"],
+                        "context": current_payload["context"],
+                        "nearest_neighbors_memories": stringify_note_candidates(
+                            linked_neighbors,
+                            note_namespace=self.note_namespace,
+                        ),
+                        "neighbor_count": len(linked_neighbors),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            raw_mapping = coerce_llm_mapping(raw, list_key="updates")
+            updates = raw_mapping.get("updates", [])
+            if not isinstance(updates, list):
+                updates = []
+
+            updated_neighbor_record_ids: list[str] = []
+            rewritten_record_ids: list[str] = []
+            for index, update in enumerate(updates[: len(linked_neighbors)]):
+                if not isinstance(update, dict):
+                    continue
+                neighbor_record = linked_neighbors[index]
+                neighbor_payload = note_payload_from_record(
+                    neighbor_record,
+                    note_namespace=self.note_namespace,
+                    default_category=self.default_category,
+                )
+                patched_payload = {
+                    **neighbor_payload,
+                    "context": str(update.get("context", "")).strip() or neighbor_payload["context"],
+                    "tags": repair_note_payload(
+                        {"tags": update.get("tags"), "content": neighbor_payload["content"]},
+                        fallback_content=neighbor_payload["content"],
+                        default_category=self.default_category,
+                    )["tags"]
+                    or neighbor_payload["tags"],
+                }
+                rewrite_record_from_note_payload(
+                    store,
+                    layer=self.target_layer,
+                    record=neighbor_record,
+                    payload=patched_payload,
+                    note_namespace=self.note_namespace,
+                    default_category=self.default_category,
+                    embedding_version=self.embedding_version,
+                    runtime=runtime,
+                )
+                updated_neighbor_record_ids.append(neighbor_record.record_id)
+                rewritten_record_ids.append(neighbor_record.record_id)
+
+            if updated_neighbor_record_ids:
+                active_unit_ids.append(unit.unit_id)
+                effects.append(
+                    {
+                        "effect_type": "neighbor_context_update",
+                        "unit_id": unit.unit_id,
+                        "record_id": current_record.record_id,
+                        "target_layer": self.target_layer,
+                        "updated_neighbor_record_ids": updated_neighbor_record_ids,
+                        "rewritten_record_ids": rewritten_record_ids,
+                    }
+                )
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "decision_source": "evolution_decisions",
+            "active_unit_ids": active_unit_ids,
+            "effects": effects,
+            "target_layer": self.target_layer,
+            "note_namespace": self.note_namespace,
+        }
+        return replace(packet, trace=trace), store
+
+
 class ReflectionGenerationEvolution(MemoryEvolutionModule):
     """Generate strategy notes from failed trials and append them to a memory layer.
 
@@ -788,5 +1142,7 @@ BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     GraphLinkEvolution,
     GraphNeighborContextTraceEvolution,
     GraphNeighborAppendEvolution,
+    LinkStrengtheningEvolution,
+    NeighborContextUpdateEvolution,
     ReflectionGenerationEvolution,
 )

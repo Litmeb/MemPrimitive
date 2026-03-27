@@ -10,6 +10,16 @@ from memprimitive.classic_modules.amem import AMEMConfig, AMEM_GRAPH_LAYER
 from memprimitive.example.classics.amem_agentic_memory import build_amem_pipeline
 
 
+def test_runtime_coerce_json_extracts_first_valid_block() -> None:
+    payload = (
+        "Here is the result.\n"
+        '{"decision": "write", "confidence": 0.91}\n'
+        "Additional commentary that should be ignored."
+    )
+
+    assert _runtime._coerce_json(payload) == {"decision": "write", "confidence": 0.91}
+
+
 class FakeClassicRuntime:
     def require_llm(self, *, capability: str) -> None:
         return None

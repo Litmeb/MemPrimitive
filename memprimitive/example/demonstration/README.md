@@ -65,6 +65,7 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 | `graph_append_entity_retrieval.py` | `GraphAppendOrganization` + `EntityRetrieval` 的轻量 graph 示例。 |
 | `graph_baseline_pipeline.py` | graph baseline family 的完整闭环：`GraphAppendOrganization -> GraphNeighborAppendEvolution -> GraphSeedAndExpandRetrieval -> GraphReadout`。 |
 | `graph_dependent_pipeline.py` | graph-dependent 闭环：`NeighborExistsEvolutionTrigger -> GraphLinkEvolution -> GraphNeighborContextTraceEvolution -> GraphSeedAndExpandRetrieval -> GraphReadout`。 |
+| `amem_like_graph_cycle.py` | A-MEM-like graph 闭环，但直接用 baseline slot 组合表达：`SemanticFieldEnrichmentRepresentation -> RetrievalOrientedEmbeddingRepresentation -> LLMJudgedWriteTrigger -> GraphAppendLinkReadyOrganization -> NeighborExistsEvolutionTrigger -> LinkStrengtheningEvolution + NeighborContextUpdateEvolution -> VectorGraphSeedAndExpandRetrieval -> NoteRenderReadout`。默认复用 classic runtime 调真实 LLM，需配置 `MEMPRIMITIVE_API_KEY`、`MEMPRIMITIVE_BASE_URL`、`MEMPRIMITIVE_MODEL`。 |
 
 ## 推荐阅读顺序
 
@@ -80,3 +81,4 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 8. `layer_aware_semantic_working.py`
 9. `graph_baseline_pipeline.py`
 10. `graph_dependent_pipeline.py`
+11. `amem_like_graph_cycle.py`

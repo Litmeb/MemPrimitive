@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 from typing import Final
 
 from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import WriteTriggerModule
 
+from ._amem_family import DEFAULT_CATEGORY, DEFAULT_NOTE_NAMESPACE, repair_note_payload
 from ._trigger_family import (
     AlwaysOpenGate,
     AlwaysPolicy,
@@ -24,6 +27,7 @@ from ._trigger_family import (
     UnitTypeSignal,
     WeightedSumScorer,
 )
+from ._trace import copy_trace
 
 
 class _TriggerFamilyWriteAdapter(WriteTriggerModule):
@@ -254,6 +258,112 @@ class KeyReadyWriteTrigger(_TriggerFamilyWriteAdapter):
         super().__init__(runner=composed._runner, spec=self.spec)
 
 
+class LLMJudgedWriteTrigger(WriteTriggerModule):
+    """Use an LLM to judge whether enriched note content should be written.
+
+    Constructor: ``note_namespace`` must point to the repaired note payload to
+    inspect. ``enabled=False`` turns the module into an always-write path while
+    preserving explicit trace output. ``strict_llm`` is currently required to be
+    ``True`` because heuristic fallback is intentionally unsupported.
+
+    ``run`` requires ``packet.units``. It writes one boolean per unit into
+    ``Packet.decisions`` and records textual reasons/confidence in trace. The
+    store is unchanged.
+    """
+
+    spec = ModuleSpec(
+        name="llm_judged_write_trigger",
+        slot="write_trigger",
+        input_requirements=("units",),
+        output_guarantees=("decisions",),
+    )
+
+    def __init__(
+        self,
+        *,
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        enabled: bool = True,
+        strict_llm: bool = True,
+        default_category: str = DEFAULT_CATEGORY,
+    ) -> None:
+        if not str(note_namespace).strip():
+            raise ValueError("LLMJudgedWriteTrigger requires a non-empty note_namespace.")
+        if not strict_llm:
+            raise ValueError("LLMJudgedWriteTrigger requires strict_llm=True.")
+        self.note_namespace = str(note_namespace).strip()
+        self.enabled = enabled
+        self.strict_llm = strict_llm
+        self.default_category = default_category
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("LLMJudgedWriteTrigger requires packet.units.")
+
+        decisions: list[bool] = []
+        per_unit: list[dict[str, object]] = []
+        for unit in packet.units:
+            note_payload = repair_note_payload(
+                unit.metadata.get(self.note_namespace),
+                fallback_content=unit.text,
+                default_category=self.default_category,
+            )
+            if not self.enabled:
+                decision = True
+                reason = "write_decision_disabled"
+                confidence = 1.0
+            else:
+                payload = self._judge_payload(unit.text, note_payload)
+                decision = str(payload.get("decision", "write")).strip().casefold() != "skip"
+                reason = str(payload.get("reason", "")).strip() or "unspecified"
+                raw_confidence = payload.get("confidence", 1.0)
+                confidence = float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 1.0
+            decisions.append(decision)
+            per_unit.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "decision": "write" if decision else "skip",
+                    "reason": reason,
+                    "confidence": confidence,
+                    "namespace": self.note_namespace,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["write_trigger"] = {
+            "module": self.spec.name,
+            "note_namespace": self.note_namespace,
+            "per_unit": per_unit,
+            "decisions": list(decisions),
+        }
+        return replace(packet, decisions=decisions, trace=trace), store
+
+    def _judge_payload(self, unit_text: str, note_payload: dict[str, object]) -> dict[str, object]:
+        from ..classic_modules._runtime import get_classic_runtime
+
+        runtime = get_classic_runtime()
+        runtime.require_llm(capability="LLMJudgedWriteTrigger")
+        parsed = runtime.json(
+            system=(
+                "You are a memory write controller. Decide whether the note should be stored. "
+                "Return JSON with fields: decision, reason, confidence."
+            ),
+            user=json.dumps(
+                {
+                    "content": unit_text,
+                    "note_text": note_payload["note_text"],
+                    "context": note_payload["context"],
+                    "keywords": note_payload["keywords"],
+                    "tags": note_payload["tags"],
+                    "category": note_payload["category"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        if not isinstance(parsed, dict):
+            raise ValueError("LLMJudgedWriteTrigger must receive a JSON object response.")
+        return parsed
+
+
 def compose_write_trigger(
     *,
     name: str,
@@ -290,4 +400,5 @@ BASELINE_CLASSES: Final[tuple[type[WriteTriggerModule], ...]] = (
     ThresholdWriteTrigger,
     MetadataGatedWriteTrigger,
     KeyReadyWriteTrigger,
+    LLMJudgedWriteTrigger,
 )
