@@ -372,6 +372,29 @@ The project has already built the foundation and a meaningful prototype framewor
 
 If the goal is to actually complete the repository's stated agenda, the most important next steps appear to be:
 
+### Stage-gate note: readiness for phase 2 (search design)
+
+Current best judgment: the repository is ready to enter **phase 2**, but only if phase 2 starts with **search-space formalization** rather than immediately implementing a search algorithm.
+
+Why this is now reasonable:
+
+- stage-1 runtime and slot interfaces are already stable enough to serve as the executable substrate
+- baseline slot coverage is broad enough that the search space is non-trivial and worth designing around
+- topology/index/shape validation already provides a real first layer of hard constraints
+- classic-family compatibility has already been analyzed in `memprimitive/classic_modules/SEARCH_COMPATIBILITY.md`
+
+What is still missing before "full search" can be safe:
+
+- machine-readable coupling metadata beyond current `ModuleSpec`
+- explicit declarations of required/produced unit, record, and query metadata contracts
+- topology-family and bundle-level search constraints
+- a canonical candidate/config representation that separates free modules, semi-coupled bundles, and bundle-only families
+
+Practical implication:
+
+- **Yes**: begin phase 2 by designing the search substrate, candidate schema, constraint model, and legality checks.
+- **Not yet**: jump straight to unrestricted enumeration, scoring, or optimization over all modules as if the space were already fully orthogonal.
+
 ### A. Make hidden coupling explicit
 
 Add machine-readable metadata for each module family, likely along the lines already proposed in `SEARCH_COMPATIBILITY.md`, such as:
