@@ -235,6 +235,7 @@ class StoreLayerSpec:
     shape: str = "Flat"
     indices: tuple[str, ...] = ()
     capacity: str = "unlimited"
+    settings: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _require_non_empty_text(self.name, "StoreLayerSpec.name"))
@@ -246,10 +247,23 @@ class StoreLayerSpec:
             "capacity",
             _require_choice(self.capacity, "StoreLayerSpec.capacity", _VALID_LAYER_CAPACITIES),
         )
+        object.__setattr__(
+            self,
+            "settings",
+            {str(key): value for key, value in self.settings.items()},
+        )
 
     def supports_index(self, index_name: str) -> bool:
         normalized = _require_choice(index_name, "index_name", _VALID_LAYER_INDICES)
         return normalized in self.indices
+
+    def has_setting(self, key: str) -> bool:
+        normalized = _require_non_empty_text(key, "key")
+        return normalized in self.settings
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        normalized = _require_non_empty_text(key, "key")
+        return self.settings.get(normalized, default)
 
 
 @dataclass(slots=True, frozen=True)
@@ -319,6 +333,10 @@ class StoreTopology:
     def has_keyword_layer(self) -> bool:
         return self.has_index("keyword")
 
+    def has_setting(self, key: str) -> bool:
+        normalized = _require_non_empty_text(key, "key")
+        return any(layer.has_setting(normalized) for layer in self.layers)
+
     def with_added_layer(self, spec: StoreLayerSpec) -> "StoreTopology":
         if self.has_layer(spec.name):
             raise ValueError(f"Layer {spec.name!r} is already declared in the store topology.")
@@ -345,6 +363,12 @@ class Packet:
     query: Query | None = None
     retrieved: RetrievedSet | None = None
     readout: Readout | None = None
+    events: list[str] | None = None
+    tool_call: dict[str, Any] | None = None
+    target_layer_hint: str | None = None
+    token_budget: int | None = None
+    working_set: list[str] | None = None
+    retrieval_context: dict[str, Any] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
 
 
@@ -400,6 +424,20 @@ class MemoryStore:
     def append(self, record: MemoryRecord) -> None:
         self.ensure_layer(record.layer)
         self.layers[record.layer].append(record)
+        self._enforce_layer_capacity(record.layer)
+
+    def _enforce_layer_capacity(self, layer: str) -> None:
+        spec = self.topology.get_layer(layer)
+        if spec.capacity == "unlimited":
+            return
+
+        record_budget = spec.get_setting("record_budget")
+        if isinstance(record_budget, int) and record_budget > 0:
+            self.trim_layer_to_record_budget(layer, record_budget)
+
+        token_budget = spec.get_setting("token_budget")
+        if isinstance(token_budget, int) and token_budget > 0:
+            self.trim_layer_to_token_budget(layer, token_budget)
 
     def next_sequence_id(self) -> int:
         sequence_id = self._next_sequence_id
@@ -440,3 +478,144 @@ class MemoryStore:
 
     def has_keyword_layer(self) -> bool:
         return self.topology.has_keyword_layer()
+
+    def layer_spec(self, layer: str) -> StoreLayerSpec:
+        return self.topology.get_layer(layer)
+
+    def layer_setting(self, layer: str, key: str, default: Any = None) -> Any:
+        return self.layer_spec(layer).get_setting(key, default)
+
+    def has_layer_setting(self, key: str) -> bool:
+        return self.topology.has_setting(key)
+
+    def layer_token_count(self, layer: str) -> int:
+        return sum(len(record.text.split()) for record in self.iter_records(layer))
+
+    def trim_layer_to_record_budget(self, layer: str, record_budget: int) -> list[str]:
+        if record_budget <= 0:
+            raise ValueError("record_budget must be positive.")
+        records = self.layers[layer]
+        removed_ids: list[str] = []
+        while len(records) > record_budget:
+            removed = records.pop(0)
+            removed_ids.append(removed.record_id)
+        return removed_ids
+
+    def trim_layer_to_token_budget(self, layer: str, token_budget: int) -> list[str]:
+        if token_budget <= 0:
+            raise ValueError("token_budget must be positive.")
+        records = self.layers[layer]
+        removed_ids: list[str] = []
+        while self.layer_token_count(layer) > token_budget and records:
+            removed = records.pop(0)
+            removed_ids.append(removed.record_id)
+        return removed_ids
+
+    def find_records_by_metadata(self, metadata_key: str, metadata_value: Any, *, layer: str | None = None) -> list[MemoryRecord]:
+        key = _require_non_empty_text(metadata_key, "metadata_key")
+        matched: list[MemoryRecord] = []
+        for record in self.iter_records(layer):
+            if record.metadata.get(key) == metadata_value:
+                matched.append(record)
+        return matched
+
+    def find_records_by_unit_type(self, unit_type: str, *, layer: str | None = None) -> list[MemoryRecord]:
+        normalized = _require_non_empty_text(unit_type, "unit_type")
+        return self.find_records_by_metadata("unit_type", normalized, layer=layer)
+
+    def find_records_by_entity(self, entity: str, *, layer: str | None = None) -> list[MemoryRecord]:
+        normalized = _require_non_empty_text(entity, "entity").casefold()
+        matched: list[MemoryRecord] = []
+        for record in self.iter_records(layer):
+            representation = record.metadata.get("representation", {})
+            entities = representation.get("entities", []) if isinstance(representation, dict) else []
+            if any(str(candidate).casefold() == normalized for candidate in entities):
+                matched.append(record)
+        return matched
+
+    def find_records_by_key(self, key_name: str, key_value: str, *, layer: str | None = None) -> list[MemoryRecord]:
+        key = _require_non_empty_text(key_name, "key_name")
+        value = _require_non_empty_text(key_value, "key_value")
+        matched: list[MemoryRecord] = []
+        for record in self.iter_records(layer):
+            if str(record.metadata.get(key, "")).strip() == value:
+                matched.append(record)
+        return matched
+
+    def replace_record(self, layer: str, record_id: str, new_record: MemoryRecord) -> None:
+        layer_name = _require_non_empty_text(layer, "layer")
+        rid = _require_non_empty_text(record_id, "record_id")
+        if new_record.layer != layer_name:
+            raise ValueError("new_record.layer must match replace_record layer.")
+        records = self.layers[layer_name]
+        for idx, record in enumerate(records):
+            if record.record_id == rid:
+                records[idx] = new_record
+                return
+        raise KeyError(f"Record {rid!r} not found in layer {layer_name!r}.")
+
+    def upsert_record(self, record: MemoryRecord, *, key_name: str) -> tuple[str, str]:
+        key = _require_non_empty_text(key_name, "key_name")
+        record_key = str(record.metadata.get(key, "")).strip()
+        if not record_key:
+            raise ValueError(f"Record metadata missing upsert key {key!r}.")
+        matches = self.find_records_by_key(key, record_key, layer=record.layer)
+        if not matches:
+            self.append(record)
+            return ("inserted", record.record_id)
+
+        existing = matches[-1]
+        self.replace_record(record.layer, existing.record_id, record)
+        return ("updated", existing.record_id)
+
+    def add_graph_links(self, layer: str, record_id: str, linked_record_ids: Iterable[str]) -> list[str]:
+        layer_name = _require_non_empty_text(layer, "layer")
+        rid = _require_non_empty_text(record_id, "record_id")
+        additions = [str(value).strip() for value in linked_record_ids if str(value).strip()]
+        if not additions:
+            return []
+        records = self.layers[layer_name]
+        for idx, record in enumerate(records):
+            if record.record_id != rid:
+                continue
+            graph_meta = record.metadata.get("graph", {})
+            if not isinstance(graph_meta, dict):
+                graph_meta = {}
+            existing_links = [str(value) for value in graph_meta.get("links", [])]
+            merged_links = list(dict.fromkeys(existing_links + additions))
+            updated = MemoryRecord(
+                record_id=record.record_id,
+                unit_id=record.unit_id,
+                layer=record.layer,
+                text=record.text,
+                timestamp=record.timestamp,
+                embedding=record.embedding,
+                metadata={
+                    **record.metadata,
+                    "graph": {
+                        **graph_meta,
+                        "links": merged_links,
+                    },
+                },
+            )
+            records[idx] = updated
+            return merged_links
+        raise KeyError(f"Record {rid!r} not found in layer {layer_name!r}.")
+
+    def iter_graph_neighbors(self, layer: str, record_id: str) -> list[MemoryRecord]:
+        layer_name = _require_non_empty_text(layer, "layer")
+        rid = _require_non_empty_text(record_id, "record_id")
+        links: list[str] = []
+        for record in self.layers[layer_name]:
+            if record.record_id == rid:
+                graph_meta = record.metadata.get("graph", {})
+                if isinstance(graph_meta, dict):
+                    links = [str(value) for value in graph_meta.get("links", [])]
+                break
+        if not links:
+            return []
+        linked = []
+        for record in self.layers[layer_name]:
+            if record.record_id in links:
+                linked.append(record)
+        return linked
