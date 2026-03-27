@@ -8,16 +8,22 @@ from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import EvolutionTriggerModule
 
 from ._trigger_family import (
+    AllGate,
     AlwaysOpenGate,
     ConstantSignal,
     DecisionPolicy,
     Gate,
+    GraphLayerGate,
+    HasEmbeddingGate,
     IdentityScorer,
+    NeighborCountSignal,
     NeverPolicy,
     ScoreAggregator,
     SignalProvider,
     ThresholdPolicy,
+    TopNeighborSimilaritySignal,
     TriggerFamilyRunner,
+    VectorIndexReadyGate,
     WeightedSumScorer,
 )
 
@@ -100,6 +106,113 @@ class ThresholdEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
         )
 
 
+def compose_graph_neighbor_evolution_trigger(
+    *,
+    name: str = "graph_neighbor_evolution_trigger",
+    layer: str | None = None,
+    candidate_top_k: int = 3,
+    similarity_threshold: float | None = None,
+    require_embedding: bool = True,
+    require_vector_index: bool = True,
+    require_graph_layer: bool = True,
+    include_top_similarity_signal: bool = True,
+) -> EvolutionTriggerModule:
+    """Compose a graph-dependent neighbor-availability evolution trigger.
+
+    This is an inferred decomposition of graph-triggered evolution motifs:
+    candidate discovery remains a signal-provider concern, while graph/vector
+    readiness stays in reusable gates. The resulting adapter writes
+    ``Packet.evolution_decisions`` without changing the pipeline API.
+    """
+
+    signal_providers: list[SignalProvider] = [
+        NeighborCountSignal(
+            top_k=candidate_top_k,
+            layer=layer,
+            similarity_threshold=similarity_threshold,
+            signal_name="neighbor_count",
+        ),
+    ]
+    if include_top_similarity_signal:
+        signal_providers.append(
+            TopNeighborSimilaritySignal(
+                top_k=candidate_top_k,
+                layer=layer,
+                similarity_threshold=similarity_threshold,
+                signal_name="top_neighbor_similarity",
+            )
+        )
+
+    gates: list[Gate] = []
+    if require_embedding:
+        gates.append(HasEmbeddingGate())
+    if require_vector_index:
+        gates.append(VectorIndexReadyGate(layer=layer))
+    if require_graph_layer:
+        gates.append(GraphLayerGate(layer=layer))
+    gate: Gate = AllGate(tuple(gates)) if gates else AlwaysOpenGate()
+
+    return compose_evolution_trigger(
+        name=name,
+        signal_providers=tuple(signal_providers),
+        scorer=IdentityScorer(source="neighbor_count"),
+        gate=gate,
+        policy=ThresholdPolicy(threshold=1.0),
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
+    )
+
+
+class NeighborExistsEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
+    """Trigger graph evolution only when the current unit has graph neighbors.
+
+    Constructor: ``target_layer`` should name a graph layer that also exposes a
+    vector index. ``candidate_top_k`` must be positive. ``similarity_threshold``
+    optionally filters weak neighbors before the trigger decides.
+
+    ``run`` requires aligned ``packet.units`` and ``packet.placements``. The
+    implementation is deliberately composed from shared trigger-family pieces
+    rather than a bespoke black-box trigger, matching the motif guide's inferred
+    decomposition of neighbor-triggered graph evolution.
+    """
+
+    spec = ModuleSpec(
+        name="neighbor_exists_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("evolution_decisions",),
+        store_requirements=("shape:Graph", "index:graph", "index:vector"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:vector"),
+    )
+
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        candidate_top_k: int = 3,
+        similarity_threshold: float | None = None,
+    ) -> None:
+        if candidate_top_k <= 0:
+            raise ValueError("NeighborExistsEvolutionTrigger requires candidate_top_k > 0.")
+        self.target_layer = target_layer
+        self.candidate_top_k = candidate_top_k
+        self.similarity_threshold = similarity_threshold
+        composed = compose_graph_neighbor_evolution_trigger(
+            name=self.spec.name,
+            layer=target_layer,
+            candidate_top_k=candidate_top_k,
+            similarity_threshold=similarity_threshold,
+            require_embedding=True,
+            require_vector_index=True,
+            require_graph_layer=True,
+        )
+        super().__init__(
+            runner=composed._runner,
+            spec=self.spec,
+            required_fields=("placements",),
+        )
+
+
 def compose_evolution_trigger(
     *,
     name: str,
@@ -134,4 +247,5 @@ BASELINE_SLOT: Final[str] = "evolution_trigger"
 BASELINE_CLASSES: Final[tuple[type[EvolutionTriggerModule], ...]] = (
     NeverEvolutionTrigger,
     ThresholdEvolutionTrigger,
+    NeighborExistsEvolutionTrigger,
 )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import sqrt
 from typing import Any, Final
 
 from ..core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet
@@ -265,22 +266,78 @@ def _graph_neighbor_score(target_record: MemoryRecord, candidate_record: MemoryR
     return float((2 * entity_overlap) + text_overlap)
 
 
-class GraphNeighborAppendEvolution(MemoryEvolutionModule):
-    """Append graph links for evolution-active units already written to a graph layer.
+def _cosine_similarity(left: list[float] | None, right: list[float] | None) -> float:
+    if left is None or right is None or len(left) != len(right) or not left:
+        return 0.0
+    numerator = sum(lv * rv for lv, rv in zip(left, right, strict=True))
+    left_norm = sqrt(sum(value * value for value in left))
+    right_norm = sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
-    Constructor: ``target_layer`` must refer to a declared graph layer and
-    ``neighbor_limit`` must be positive. The simplified baseline scores existing
-    same-layer graph records by shared entities and token overlap, then appends
-    links from the newly written record to the strongest neighbors. This is an
-    inferred engineering decomposition of graph-link evolution.
+
+def _select_graph_neighbor_candidates(
+    target_record: MemoryRecord,
+    candidates: list[MemoryRecord],
+    *,
+    neighbor_limit: int,
+    min_score: float,
+) -> list[dict[str, Any]]:
+    scored_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        structural_score = _graph_neighbor_score(target_record, candidate)
+        embedding_score = _cosine_similarity(target_record.embedding, candidate.embedding)
+        total_score = structural_score + embedding_score
+        if total_score < min_score:
+            continue
+        scored_candidates.append(
+            {
+                "record": candidate,
+                "record_id": candidate.record_id,
+                "unit_id": candidate.unit_id,
+                "structural_score": float(structural_score),
+                "embedding_score": float(embedding_score),
+                "total_score": float(total_score),
+            }
+        )
+    scored_candidates.sort(
+        key=lambda item: (-item["total_score"], -item["embedding_score"], item["record"].timestamp, item["record_id"])
+    )
+    return scored_candidates[:neighbor_limit]
+
+
+def _neighbor_context_snapshot(target_record: MemoryRecord, neighbor_records: list[MemoryRecord]) -> dict[str, Any]:
+    neighbor_entities: list[str] = []
+    for neighbor in neighbor_records:
+        neighbor_entities.extend(graph_metadata_from_record(neighbor)["entities"])
+    return {
+        "source_record_id": target_record.record_id,
+        "neighbor_record_ids": [record.record_id for record in neighbor_records],
+        "neighbor_unit_ids": [record.unit_id for record in neighbor_records],
+        "neighbor_entities": list(dict.fromkeys(neighbor_entities)),
+        "neighbor_count": len(neighbor_records),
+    }
+
+
+class GraphLinkEvolution(MemoryEvolutionModule):
+    """Link evolution for graph records based on same-layer neighbor candidates.
+
+    Constructor: ``target_layer`` must refer to a declared graph layer.
+    ``neighbor_limit`` must be positive. ``min_score`` controls the minimum
+    combined structural-plus-embedding score required for a candidate neighbor.
+    ``rewrite_neighbor_metadata`` enables a conservative metadata rewrite under
+    ``metadata["graph"]["neighbor_context"]`` on the evolved target record only.
 
     ``run`` requires aligned ``packet.units``, ``packet.placements``, and
     ``packet.evolution_decisions``. Only units placed into ``target_layer`` are
-    considered. The module mutates only records inside that graph layer.
+    processed, and only records in that graph layer are rewritten. This is an
+    inferred engineering decomposition of graph-link evolution rather than a
+    paper-faithful A-MEM controller.
     """
 
     spec = ModuleSpec(
-        name="graph_neighbor_append_evolution",
+        name="graph_link_evolution",
         slot="memory_evolution",
         input_requirements=("units", "placements", "evolution_decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
@@ -289,24 +346,34 @@ class GraphNeighborAppendEvolution(MemoryEvolutionModule):
         side_effects=("modify_store", "rewrite_records"),
     )
 
-    def __init__(self, *, target_layer: str = "knowledge_graph", neighbor_limit: int = 2, bidirectional: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        neighbor_limit: int = 2,
+        bidirectional: bool = True,
+        min_score: float = 0.1,
+        rewrite_neighbor_metadata: bool = False,
+    ) -> None:
         if neighbor_limit <= 0:
-            raise ValueError("GraphNeighborAppendEvolution requires neighbor_limit > 0.")
+            raise ValueError("GraphLinkEvolution requires neighbor_limit > 0.")
         self.target_layer = target_layer
         self.neighbor_limit = neighbor_limit
         self.bidirectional = bidirectional
+        self.min_score = float(min_score)
+        self.rewrite_neighbor_metadata = rewrite_neighbor_metadata
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
-            raise ValueError("GraphNeighborAppendEvolution requires packet.units.")
+            raise ValueError("GraphLinkEvolution requires packet.units.")
         if packet.placements is None:
-            raise ValueError("GraphNeighborAppendEvolution requires packet.placements.")
+            raise ValueError("GraphLinkEvolution requires packet.placements.")
         if packet.evolution_decisions is None:
-            raise ValueError("GraphNeighborAppendEvolution requires packet.evolution_decisions.")
+            raise ValueError("GraphLinkEvolution requires packet.evolution_decisions.")
         if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
-            raise ValueError(
-                "GraphNeighborAppendEvolution requires aligned units, evolution decisions, and placements."
-            )
+            raise ValueError("GraphLinkEvolution requires aligned units, evolution decisions, and placements.")
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(f"GraphLinkEvolution requires target layer {self.target_layer!r} to be Graph.")
 
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
@@ -318,48 +385,70 @@ class GraphNeighborAppendEvolution(MemoryEvolutionModule):
             if target_record is None:
                 continue
 
+            active_unit_ids.append(unit.unit_id)
             candidates = [
                 record
                 for record in store.iter_records(self.target_layer)
                 if record.record_id != target_record.record_id
             ]
-            scored_candidates = [
-                (_graph_neighbor_score(target_record, candidate), candidate)
-                for candidate in candidates
-            ]
-            scored_candidates = [item for item in scored_candidates if item[0] > 0.0]
-            scored_candidates.sort(key=lambda item: (-item[0], item[1].timestamp, item[1].record_id))
-            selected_neighbors = [record for _, record in scored_candidates[: self.neighbor_limit]]
-            linked_record_ids = [record.record_id for record in selected_neighbors]
+            candidate_details = _select_graph_neighbor_candidates(
+                target_record,
+                candidates,
+                neighbor_limit=self.neighbor_limit,
+                min_score=self.min_score,
+            )
+            linked_record_ids = [detail["record_id"] for detail in candidate_details]
+
+            effect = {
+                "effect_type": "graph_link_evolution",
+                "unit_id": unit.unit_id,
+                "record_id": target_record.record_id,
+                "target_layer": self.target_layer,
+                "candidate_count": len(candidate_details),
+                "candidate_record_ids": linked_record_ids,
+                "candidate_scores": [
+                    {
+                        "record_id": detail["record_id"],
+                        "structural_score": detail["structural_score"],
+                        "embedding_score": detail["embedding_score"],
+                        "total_score": detail["total_score"],
+                    }
+                    for detail in candidate_details
+                ],
+                "linked_record_ids": linked_record_ids,
+                "bidirectional": self.bidirectional,
+                "rewrite_neighbor_metadata": self.rewrite_neighbor_metadata,
+            }
 
             if linked_record_ids:
-                active_unit_ids.append(unit.unit_id)
                 store.add_graph_links(self.target_layer, target_record.record_id, linked_record_ids)
                 refreshed_target = next(
                     record
                     for record in store.iter_records(self.target_layer)
                     if record.record_id == target_record.record_id
                 )
-                target_effect = {
-                    "effect_type": "graph_neighbor_append",
-                    "unit_id": unit.unit_id,
-                    "record_id": target_record.record_id,
-                    "target_layer": self.target_layer,
-                    "linked_record_ids": linked_record_ids,
-                    "bidirectional": self.bidirectional,
-                }
+                extra_graph_fields = None
+                if self.rewrite_neighbor_metadata:
+                    extra_graph_fields = {
+                        "neighbor_context": _neighbor_context_snapshot(
+                            refreshed_target,
+                            [detail["record"] for detail in candidate_details],
+                        )
+                    }
                 store.replace_record(
                     self.target_layer,
                     refreshed_target.record_id,
                     rewrite_graph_record(
                         refreshed_target,
                         linked_record_ids=linked_record_ids,
-                        link_trace_entry=target_effect,
+                        link_trace_entry=effect,
+                        extra_graph_fields=extra_graph_fields,
                     ),
                 )
 
                 if self.bidirectional:
-                    for neighbor_record in selected_neighbors:
+                    for detail in candidate_details:
+                        neighbor_record = detail["record"]
                         store.add_graph_links(self.target_layer, neighbor_record.record_id, [target_record.record_id])
                         refreshed_neighbor = next(
                             record
@@ -373,7 +462,7 @@ class GraphNeighborAppendEvolution(MemoryEvolutionModule):
                                 refreshed_neighbor,
                                 linked_record_ids=[target_record.record_id],
                                 link_trace_entry={
-                                    "effect_type": "graph_neighbor_backlink",
+                                    "effect_type": "graph_link_backlink",
                                     "record_id": neighbor_record.record_id,
                                     "linked_record_ids": [target_record.record_id],
                                     "source_record_id": target_record.record_id,
@@ -382,7 +471,131 @@ class GraphNeighborAppendEvolution(MemoryEvolutionModule):
                             ),
                         )
 
-                effects.append(target_effect)
+            effects.append(effect)
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "decision_source": "evolution_decisions",
+            "active_unit_ids": active_unit_ids,
+            "effects": effects,
+            "target_layer": self.target_layer,
+        }
+        return replace(packet, trace=trace), store
+
+
+class GraphNeighborAppendEvolution(GraphLinkEvolution):
+    """Backward-compatible graph link append baseline built on ``GraphLinkEvolution``.
+
+    Constructor: same as the earlier baseline variant. It preserves the old
+    class name and trace module id while delegating the actual graph-dependent
+    candidate selection and safe rewrite logic to ``GraphLinkEvolution``.
+    """
+
+    spec = ModuleSpec(
+        name="graph_neighbor_append_evolution",
+        slot="memory_evolution",
+        input_requirements=("units", "placements", "evolution_decisions"),
+        output_guarantees=("trace.memory_evolution.effects",),
+        store_requirements=("index:graph", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+        side_effects=("modify_store", "rewrite_records"),
+    )
+
+    def __init__(self, *, target_layer: str = "knowledge_graph", neighbor_limit: int = 2, bidirectional: bool = True) -> None:
+        super().__init__(
+            target_layer=target_layer,
+            neighbor_limit=neighbor_limit,
+            bidirectional=bidirectional,
+            min_score=0.1,
+            rewrite_neighbor_metadata=False,
+        )
+
+
+class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
+    """Trace linked-neighbor context and optionally write a conservative summary.
+
+    Constructor: ``target_layer`` must refer to a graph layer.
+    ``rewrite_metadata`` controls whether the target record gets a minimal
+    ``graph.neighbor_context`` snapshot derived from its currently linked
+    neighbors. This keeps updates namespaced and conservative instead of
+    rewriting arbitrary record metadata.
+
+    ``run`` requires aligned ``packet.units``, ``packet.placements``, and
+    ``packet.evolution_decisions``. Only records in ``target_layer`` are read or
+    rewritten, making this a simplified rule-based stand-in for richer
+    neighbor-context evolution.
+    """
+
+    spec = ModuleSpec(
+        name="graph_neighbor_context_trace_evolution",
+        slot="memory_evolution",
+        input_requirements=("units", "placements", "evolution_decisions"),
+        output_guarantees=("trace.memory_evolution.effects",),
+        store_requirements=("index:graph", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+        side_effects=("modify_store", "rewrite_records"),
+    )
+
+    def __init__(self, *, target_layer: str = "knowledge_graph", rewrite_metadata: bool = False) -> None:
+        self.target_layer = target_layer
+        self.rewrite_metadata = rewrite_metadata
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("GraphNeighborContextTraceEvolution requires packet.units.")
+        if packet.placements is None:
+            raise ValueError("GraphNeighborContextTraceEvolution requires packet.placements.")
+        if packet.evolution_decisions is None:
+            raise ValueError("GraphNeighborContextTraceEvolution requires packet.evolution_decisions.")
+        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
+            raise ValueError(
+                "GraphNeighborContextTraceEvolution requires aligned units, evolution decisions, and placements."
+            )
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(
+                f"GraphNeighborContextTraceEvolution requires target layer {self.target_layer!r} to be Graph."
+            )
+
+        effects: list[dict[str, Any]] = []
+        active_unit_ids: list[str] = []
+
+        for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True):
+            if not decision or placement.target_layer != self.target_layer:
+                continue
+            target_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
+            if target_record is None:
+                continue
+
+            neighbor_records = store.iter_graph_neighbors(self.target_layer, target_record.record_id)
+            snapshot = _neighbor_context_snapshot(target_record, neighbor_records)
+            active_unit_ids.append(unit.unit_id)
+            effect = {
+                "effect_type": "graph_neighbor_context_trace",
+                "unit_id": unit.unit_id,
+                "record_id": target_record.record_id,
+                "target_layer": self.target_layer,
+                "neighbor_record_ids": snapshot["neighbor_record_ids"],
+                "neighbor_unit_ids": snapshot["neighbor_unit_ids"],
+                "neighbor_entities": snapshot["neighbor_entities"],
+                "rewrite_metadata": self.rewrite_metadata,
+            }
+            effects.append(effect)
+
+            if self.rewrite_metadata:
+                refreshed_target = next(
+                    record
+                    for record in store.iter_records(self.target_layer)
+                    if record.record_id == target_record.record_id
+                )
+                store.replace_record(
+                    self.target_layer,
+                    refreshed_target.record_id,
+                    rewrite_graph_record(
+                        refreshed_target,
+                        extra_graph_fields={"neighbor_context": snapshot},
+                    ),
+                )
 
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
@@ -401,5 +614,7 @@ BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     TraceOnlyEvolution,
     SummaryRewriteEvolution,
     LayerMoveEvolution,
+    GraphLinkEvolution,
+    GraphNeighborContextTraceEvolution,
     GraphNeighborAppendEvolution,
 )

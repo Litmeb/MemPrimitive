@@ -41,19 +41,22 @@ Each **slot** below lists the **concrete classes** registered via `BASELINE_CLAS
 - `ConditionalLayerOrganization`
 - `GraphAppendOrganization`
 
-### Slot `evolution_trigger` — `evolution_trigger.py`
+### Slot `evolution_trigger` – `evolution_trigger.py`
 
 - `NeverEvolutionTrigger`
 - `ThresholdEvolutionTrigger`
+- `NeighborExistsEvolutionTrigger`
 
-(The same module also exposes `compose_evolution_trigger` for assembling trigger-family adapters; those are not extra `BASELINE_CLASSES` entries.)
+(The same module also exposes `compose_evolution_trigger` plus the graph-oriented helper `compose_graph_neighbor_evolution_trigger` for assembling trigger-family adapters; those are not extra `BASELINE_CLASSES` entries.)
 
-### Slot `memory_evolution` — `memory_evolution.py`
+### Slot `memory_evolution` – `memory_evolution.py`
 
 - `AppendOnlyEvolution`
 - `TraceOnlyEvolution`
 - `SummaryRewriteEvolution`
 - `LayerMoveEvolution`
+- `GraphLinkEvolution`
+- `GraphNeighborContextTraceEvolution`
 - `GraphNeighborAppendEvolution`
 
 ### Slot `retrieval` — `retrieval.py`
@@ -168,6 +171,7 @@ Hard predicate per unit after scoring; receives full `signals` and `score` for c
 | `HasEmbeddingGate` | Opens only when the configured source exposes a non-empty embedding vector. |
 | `VectorIndexReadyGate` | Opens only when the target layer exists and supports the `vector` index. |
 | `GraphLayerGate` | Opens only when the target layer exists and has `shape="Graph"`. |
+| `AllGate` | Opens only when every child gate opens; useful for graph/vector readiness bundles. |
 
 ### Policy role — `DecisionPolicy` (`decide`)
 

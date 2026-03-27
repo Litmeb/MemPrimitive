@@ -130,6 +130,27 @@ Validation status:
 - `tests/test_baselines.py` now includes dedicated coverage for each of the new trigger-family signals/gates, including normal paths, missing-field failures where applicable, and blocked graph/vector readiness paths.
 - `python -m memprimitive.example.demonstration.trigger_family_infrastructure` provides a runnable TiM-like plus A-MEM-like shared infrastructure demo.
 
+### 4.3 Graph-dependent trigger and evolution baselines now exist as stage-3 building blocks
+
+The baseline graph family is no longer limited to append-plus-link demos. The repository now has reusable graph-dependent trigger/evolution primitives that can be composed into a fuller graph pipeline:
+
+- `NeighborExistsEvolutionTrigger` in [memprimitive/baselines/evolution_trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/evolution_trigger.py) implements the motif-guide's neighbor-exists trigger as a trigger-family composition, not a bespoke black-box trigger.
+- `compose_graph_neighbor_evolution_trigger(...)` provides a reusable graph evolution trigger composer over `NeighborCountSignal`, `TopNeighborSimilaritySignal`, `HasEmbeddingGate`, `VectorIndexReadyGate`, and `GraphLayerGate`.
+- `GraphLinkEvolution` in [memprimitive/baselines/memory_evolution.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/memory_evolution.py) performs graph-layer-local link evolution using same-layer neighbor candidates, `MemoryStore.add_graph_links`, and safe graph metadata rewrites.
+- `GraphNeighborContextTraceEvolution` adds the simplified/trace-first neighbor-context update baseline. It can stay trace-only or conservatively write a namespaced `graph.neighbor_context` snapshot.
+- The older `GraphNeighborAppendEvolution` now remains as a backward-compatible wrapper on the newer graph-link evolution path instead of diverging as a separate implementation.
+
+Practical impact:
+
+- There is now a clear stage-3 baseline path for graph-dependent evolution motifs before implementing more paper-faithful A-MEM-style controllers.
+- Later A-MEM-like work can reuse a stable end-to-end substrate rather than bundling trigger, link evolution, and retrieval logic into one family-specific module.
+- Graph evolution writes are intentionally scoped to the target graph layer, and metadata rewrites stay under the `metadata["graph"]` namespace.
+
+Validation status:
+
+- `tests/test_baselines.py` now includes dedicated coverage for the graph neighbor trigger composer, `NeighborExistsEvolutionTrigger`, `GraphLinkEvolution`, `GraphNeighborContextTraceEvolution`, and a full ingest -> organization -> evolution_trigger -> memory_evolution -> retrieval -> readout pipeline.
+- `python -m memprimitive.example.demonstration.graph_dependent_pipeline` provides the new minimal stage-3 graph pipeline demonstration.
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:
@@ -218,6 +239,7 @@ The graph family is improved here, but still only partially formalized:
 - graph retrieval still uses simplified heuristic seed scoring rather than a general vector-seed abstraction
 - graph link evolution is baseline-safe and local, not yet paper-faithful A-MEM agentic evolution
 - graph metadata contracts are stabilized in code, but not yet surfaced as a full searchable ontology layer
+- neighbor-context updates are still conservative baseline summaries, not LLM-driven graph-note rewrites
 
 ### 4. Classic reconstructions are present, but not yet turned into a stable search-ready ontology
 

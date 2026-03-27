@@ -33,6 +33,17 @@ def normalize_graph_metadata(value: Any, *, layer: str | None = None) -> dict[st
     """Return a stable graph metadata dict used by stage-1 baseline modules."""
 
     raw = value if isinstance(value, dict) else {}
+    known_keys = {
+        "layer",
+        "shape",
+        "entities",
+        "triples",
+        "links",
+        "node_count",
+        "link_count",
+        "last_linked_at",
+        "link_history",
+    }
     links = _dedupe_strings(raw.get("links", []))
     entities = _dedupe_strings(raw.get("entities", []))
     triples = _normalize_triples(raw.get("triples", []))
@@ -53,6 +64,7 @@ def normalize_graph_metadata(value: Any, *, layer: str | None = None) -> dict[st
         "link_count": len(links),
         "last_linked_at": raw.get("last_linked_at"),
         "link_history": history,
+        **{key: raw[key] for key in raw if key not in known_keys},
     }
 
 

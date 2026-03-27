@@ -57,6 +57,7 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 | --- | --- |
 | `graph_append_entity_retrieval.py` | `GraphAppendOrganization` + `EntityRetrieval` 的轻量 graph 示例。 |
 | `graph_baseline_pipeline.py` | graph baseline family 的完整闭环：`GraphAppendOrganization` -> `GraphNeighborAppendEvolution` -> `GraphSeedAndExpandRetrieval` -> `GraphReadout`。 |
+| `graph_dependent_pipeline.py` | 阶段 3 的 graph-dependent 闭环：`NeighborExistsEvolutionTrigger` -> `GraphLinkEvolution` -> `GraphNeighborContextTraceEvolution` -> `GraphSeedAndExpandRetrieval` -> `GraphReadout`。 |
 
 如果你想先验证 graph family 的最小可组合闭环，推荐优先看 `graph_baseline_pipeline.py`。它覆盖了阶段 1 graph baseline 的四个核心动作：
 
@@ -64,6 +65,12 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 - 在 graph layer 内追加 / 维护 links
 - 按 seed + neighbor expansion 做召回
 - 以 graph-readable 形式输出 readout
+
+如果你要给后续 A-MEM-like prompt/controller 版本找一个更完整的阶段 3 底座，推荐看 `graph_dependent_pipeline.py`。它在上面的 graph baseline 闭环之外，又补上了：
+
+- 基于邻居存在性的 graph-dependent evolution trigger
+- 基于同层 neighbor candidates 的 link evolution
+- 简化版 neighbor-context trace / metadata 更新
 
 ## 推荐阅读顺序
 
@@ -75,5 +82,6 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 4. `reflexion_trigger_failed_trial.py`
 5. `layer_aware_semantic_working.py`
 6. `graph_baseline_pipeline.py`
+7. `graph_dependent_pipeline.py`
 
 这样会先建立 baseline pipeline 心智模型，再进入 trigger family、layered retrieval，最后看 graph baseline family。
