@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import ClassVar, Final
 
 from .core import MemoryRecord, MemoryStore, Observation, Packet, Query, Readout
-from .utils.exceptions import IncompatibleCompositionError
 from .interfaces import (
     EvolutionTriggerModule,
     MemoryEvolutionModule,
@@ -130,129 +129,13 @@ class MemoryPipeline:
                         f"MemoryPipeline.{kwarg} expects ModuleSpec.slot={expected_slot!r}, "
                         f"got {module.spec.slot!r} on {type(module).__name__}."
                     )
-        self._validate_store_compatibility()
+        self._run_module_validate_store_hooks()
 
-    def _validate_store_compatibility(self) -> None:
-        from .baselines import GraphAppendOrganization
-
-        for module in (
-            *(_iter_nested_modules(getattr(self, slot_name)) for slot_name, _, _ in _INGEST_SLOT_CHECK + _RECALL_SLOT_CHECK),
-        ):
-            for nested_module in module:
-                if isinstance(nested_module, GraphAppendOrganization):
-                    self._validate_graph_organization(nested_module)
-                self._validate_spec_requirements(nested_module)
-                if hasattr(nested_module, "validate_store"):
-                    nested_module.validate_store(self.store)
-
-    def _validate_graph_organization(self, organization) -> None:
-        target_layer = organization.target_layer
-        declared_layers = list(self.store.topology.layer_names)
-        if not self.store.has_layer(target_layer):
-            raise IncompatibleCompositionError(
-                "Incompatible MemoryPipeline composition: "
-                f"slot='organization', module='{organization.spec.name}' requires "
-                f"declared graph layer {target_layer!r}, but store topology only declares "
-                f"{declared_layers}."
-            )
-
-        layer_shape = self.store.layer_shape(target_layer)
-        if layer_shape != "Graph":
-            raise IncompatibleCompositionError(
-                "Incompatible MemoryPipeline composition: "
-                f"slot='organization', module='{organization.spec.name}' requires "
-                f"layer {target_layer!r} with shape='Graph', but store topology declares "
-                f"shape={layer_shape!r}."
-            )
-
-    def _validate_spec_requirements(self, module: PrimitiveModule) -> None:
-        for requirement in module.spec.store_requirements:
-            self._validate_store_requirement(module, requirement)
-        for requirement in module.spec.layer_requirements:
-            self._validate_layer_requirement(module, requirement)
-
-    def _validate_store_requirement(self, module: PrimitiveModule, requirement: str) -> None:
-        if requirement in {"record.entities", "index:entity"} and not self.store.topology.has_index("entity"):
-            self._raise_incompatible(module, requirement, "store topology declares no entity index.")
-        elif requirement == "index:vector" and not self.store.topology.has_index("vector"):
-            self._raise_incompatible(module, requirement, "store topology declares no vector index.")
-        elif requirement == "index:keyword" and not self.store.topology.has_index("keyword"):
-            self._raise_incompatible(module, requirement, "store topology declares no keyword index.")
-        elif requirement == "index:tag" and not self.store.topology.has_index("tag"):
-            self._raise_incompatible(module, requirement, "store topology declares no tag index.")
-        elif requirement == "index:graph" and not self.store.topology.has_index("graph"):
-            self._raise_incompatible(module, requirement, "store topology declares no graph index.")
-        elif requirement == "shape:Graph" and not self.store.topology.has_graph_layer():
-            self._raise_incompatible(module, requirement, "store topology declares no graph layer.")
-        elif requirement.startswith("setting:"):
-            setting_name = requirement.split(":", 1)[1]
-            if not self.store.has_layer_setting(setting_name):
-                self._raise_incompatible(module, requirement, f"store topology declares no layer setting {setting_name!r}.")
-
-    def _validate_layer_requirement(self, module: PrimitiveModule, requirement: str) -> None:
-        if requirement == "target_layer_exists":
-            layer_name = getattr(module, "target_layer", None)
-            if isinstance(layer_name, str) and layer_name and not self.store.has_layer(layer_name):
-                self._raise_incompatible(
-                    module,
-                    requirement,
-                    f"target layer {layer_name!r} is not declared in the store topology.",
-                )
-        elif requirement.startswith("target_layer_shape:"):
-            layer_name = getattr(module, "target_layer", None)
-            expected_shape = requirement.split(":", 1)[1]
-            if isinstance(layer_name, str) and layer_name:
-                if not self.store.has_layer(layer_name):
-                    self._raise_incompatible(
-                        module,
-                        requirement,
-                        f"target layer {layer_name!r} is not declared in the store topology.",
-                    )
-                actual_shape = self.store.layer_shape(layer_name)
-                if actual_shape != expected_shape:
-                    self._raise_incompatible(
-                        module,
-                        requirement,
-                        f"target layer {layer_name!r} has shape={actual_shape!r}, expected {expected_shape!r}.",
-                    )
-        elif requirement.startswith("target_layer_index:"):
-            layer_name = getattr(module, "target_layer", None)
-            index_name = requirement.split(":", 1)[1]
-            if isinstance(layer_name, str) and layer_name:
-                if not self.store.has_layer(layer_name):
-                    self._raise_incompatible(
-                        module,
-                        requirement,
-                        f"target layer {layer_name!r} is not declared in the store topology.",
-                    )
-                if not self.store.layer_supports_index(layer_name, index_name):
-                    self._raise_incompatible(
-                        module,
-                        requirement,
-                        f"target layer {layer_name!r} does not support index {index_name!r}.",
-                    )
-        elif requirement.startswith("target_layer_setting:"):
-            layer_name = getattr(module, "target_layer", None)
-            setting_name = requirement.split(":", 1)[1]
-            if isinstance(layer_name, str) and layer_name:
-                if not self.store.has_layer(layer_name):
-                    self._raise_incompatible(
-                        module,
-                        requirement,
-                        f"target layer {layer_name!r} is not declared in the store topology.",
-                    )
-                if self.store.layer_setting(layer_name, setting_name, None) is None:
-                    self._raise_incompatible(
-                        module,
-                        requirement,
-                        f"target layer {layer_name!r} does not declare setting {setting_name!r}.",
-                    )
-
-    def _raise_incompatible(self, module: PrimitiveModule, requirement: str, detail: str) -> None:
-        raise IncompatibleCompositionError(
-            "Incompatible MemoryPipeline composition: "
-            f"slot='{module.spec.slot}', module='{module.spec.name}' requires {requirement!r}, but {detail}"
-        )
+    def _run_module_validate_store_hooks(self) -> None:
+        for slot_name, _, _ in _INGEST_SLOT_CHECK + _RECALL_SLOT_CHECK:
+            for module in _iter_nested_modules(getattr(self, slot_name)):
+                if hasattr(module, "validate_store"):
+                    module.validate_store(self.store)
 
     def ingest(self, observation: Observation) -> Packet:
         packet = Packet(observation=observation, trace={"ingest_started": True})

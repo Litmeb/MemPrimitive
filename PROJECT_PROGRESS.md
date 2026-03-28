@@ -63,6 +63,23 @@ Practical impact:
 - The repo now has a more presentation-friendly Chinese entry point for demos, onboarding, and feature showcases.
 - The tutorial is better aligned with the project's strongest current message: building memory modules incrementally through explicit composition rather than selling an abstract future DSL alone.
 
+### 0.2 The Chinese tutorial now also exists as an interactive notebook
+
+An additional notebook version, `TUTORIAL.zh-CN.ipynb`, has now been added at the repository root so users can interact with the tutorial directly inside Jupyter.
+
+The notebook currently turns the showcase flow into runnable cells covering:
+
+- minimal pipeline assembly
+- topology-backed store declaration
+- trigger-family composition
+- dispatch-based multi-view memory organization
+- pointers to the larger runnable demonstrations
+
+Practical impact:
+
+- Users can now learn the framework by editing and executing cells instead of only reading prose.
+- The Chinese tutorial path now supports both static reading (`.md`) and hands-on experimentation (`.ipynb`).
+
 ### 1. A usable stage-1 runtime exists
 
 The core package is not just a concept sketch. `memprimitive` already implements a concrete stage-1 runtime:
@@ -74,16 +91,17 @@ The core package is not just a concept sketch. `memprimitive` already implements
 
 This means the project already has a real executable substrate for composing memory primitives.
 
-### 2. Topology and compatibility checking are already partially formalized
+### 2. Topology and compatibility checking are in transition
 
-This is one of the most important completed pieces because it turns the design space into something machine-checkable instead of purely descriptive:
+This remains one of the most important design areas because it turns the design space into something machine-checkable instead of purely descriptive. Current status is transitional:
 
 - `StoreTopology` and `StoreLayerSpec` encode layers, shapes, indices, capacities, and settings.
 - `ModuleSpec` carries requirement/guarantee metadata.
-- `MemoryPipeline` validates type compatibility, slot compatibility, and some store/layer requirements before execution.
-- Graph-layer compatibility is enforced explicitly.
+- `MemoryPipeline` still validates primitive abstract types and `ModuleSpec.slot` alignment at construction time.
+- The earlier baseline-side eager store/layer compatibility precheck in `MemoryPipeline` has now been removed in preparation for a new `MemoryStore.check()`-style composition-contract pass.
+- Classic-family compatibility checks still exist in `memprimitive/classic_modules/*` and were intentionally left untouched during this cleanup.
 
-This is evidence that the project has already moved beyond prose taxonomy into constrained composition.
+This is evidence that the project has already moved beyond prose taxonomy into constrained composition, but the search-facing legality layer is being reworked away from the older hard-coded topology precheck path.
 
 ### 3. Stage-1 baseline primitive families are substantial
 
