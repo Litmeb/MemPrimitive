@@ -9,7 +9,7 @@ from typing import Final
 from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import WriteTriggerModule
 
-from ._amem_family import DEFAULT_CATEGORY, DEFAULT_NOTE_NAMESPACE, repair_note_payload
+from ..utils._amem_family import DEFAULT_CATEGORY, DEFAULT_NOTE_NAMESPACE, repair_note_payload
 from ._trigger_family import (
     AlwaysOpenGate,
     AlwaysPolicy,
@@ -27,7 +27,7 @@ from ._trigger_family import (
     UnitTypeSignal,
     WeightedSumScorer,
 )
-from ._trace import copy_trace
+from ..utils._trace import copy_trace
 
 
 class _TriggerFamilyWriteAdapter(WriteTriggerModule):
@@ -338,7 +338,7 @@ class LLMJudgedWriteTrigger(WriteTriggerModule):
         return replace(packet, decisions=decisions, trace=trace), store
 
     def _judge_payload(self, unit_text: str, note_payload: dict[str, object]) -> dict[str, object]:
-        from ..classic_modules._runtime import get_classic_runtime
+        from ..utils._runtime import get_classic_runtime
 
         runtime = get_classic_runtime()
         runtime.require_llm(capability="LLMJudgedWriteTrigger")

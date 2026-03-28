@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from memprimitive.classic_modules import _runtime
+from memprimitive.utils import _runtime
 
 
 ROOT = Path(__file__).resolve().parent.parent

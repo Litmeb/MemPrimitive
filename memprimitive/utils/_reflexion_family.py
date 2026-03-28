@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Final
 
-from ..classic_modules._runtime import get_classic_runtime
+from ._runtime import get_classic_runtime
 
 
 DEFAULT_REFLECTION_LAYER: Final[str] = "reflections"

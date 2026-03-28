@@ -14,7 +14,7 @@ from memprimitive import (
     StoreLayerSpec,
     StoreTopology,
 )
-from memprimitive.baselines._amem_family import (
+from memprimitive.utils._amem_family import (
     DEFAULT_CATEGORY,
     DEFAULT_EMBEDDING_VERSION,
     note_payload_from_record,
@@ -23,7 +23,7 @@ from memprimitive.baselines._amem_family import (
     rewrite_record_from_note_payload,
     stringify_note_candidates,
 )
-from memprimitive.baselines._trace import copy_trace
+from memprimitive.utils._trace import copy_trace
 from memprimitive.baselines.evolution_trigger import NeighborExistsEvolutionTrigger
 from memprimitive.baselines.memory_evolution import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
 from memprimitive.baselines.organization import GraphAppendLinkReadyOrganization
@@ -36,7 +36,7 @@ from memprimitive.baselines.retrieval import VectorGraphSeedAndExpandRetrieval
 from memprimitive.baselines.write_trigger import LLMJudgedWriteTrigger
 from memprimitive.interfaces import MemoryEvolutionModule, ReadoutModule, RepresentationModule
 
-from ._runtime import get_classic_runtime
+from ..utils._runtime import get_classic_runtime
 
 
 AMEM_GRAPH_LAYER: Final[str] = "memory_graph"

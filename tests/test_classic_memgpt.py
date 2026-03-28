@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from memprimitive.classic_modules import _runtime
+from memprimitive.utils import _runtime
 from memprimitive.classic_modules.memgpt import (
     MEMGPT_ARCHIVAL_LAYER,
     MEMGPT_CORE_BLOCK_HUMAN,

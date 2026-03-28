@@ -28,7 +28,7 @@ from memprimitive.baselines import (
     PromptContextReadout,
     ReflectionGenerationEvolution,
 )
-from memprimitive.classic_modules._runtime import get_classic_runtime
+from memprimitive.utils._runtime import get_classic_runtime
 
 
 def main() -> None:

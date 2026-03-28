@@ -13,7 +13,7 @@ from sentence_transformers import SentenceTransformer
 from ..core import MemoryStore, ModuleSpec, Packet, RetrievedSet
 from ..interfaces import RetrievalModule
 
-from ._amem_family import (
+from ..utils._amem_family import (
     DEFAULT_CATEGORY,
     DEFAULT_NOTE_NAMESPACE,
     build_enhanced_embedding_text,
@@ -23,9 +23,9 @@ from ._amem_family import (
     repair_note_payload,
     retrieve_candidates_by_embedding,
 )
-from ._graph_family import graph_metadata_from_record
-from ._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
-from ._trace import copy_trace
+from ..utils._graph_family import graph_metadata_from_record
+from ..utils._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
+from ..utils._trace import copy_trace
 
 
 def _tokenize_text(text: str) -> list[str]:
@@ -1066,7 +1066,7 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
             default_category="query",
         )
         if self.query_expand_with_llm:
-            from ..classic_modules._runtime import get_classic_runtime
+            from ..utils._runtime import get_classic_runtime
 
             runtime = get_classic_runtime()
             runtime.require_llm(capability="Vector graph seed-and-expand query expansion")
@@ -1083,7 +1083,7 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
             query_embedding = list(packet.query.embedding)
         else:
             if runtime is None:
-                from ..classic_modules._runtime import get_classic_runtime
+                from ..utils._runtime import get_classic_runtime
 
                 runtime = get_classic_runtime()
             embedding_text = (
@@ -1136,7 +1136,7 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
 
         if self.agentic_search:
             if runtime is None:
-                from ..classic_modules._runtime import get_classic_runtime
+                from ..utils._runtime import get_classic_runtime
 
                 runtime = get_classic_runtime()
             reranked = runtime.rerank(

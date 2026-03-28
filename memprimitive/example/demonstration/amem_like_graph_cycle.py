@@ -26,7 +26,7 @@ from memprimitive.baselines import (
     SemanticFieldEnrichmentRepresentation,
     VectorGraphSeedAndExpandRetrieval,
 )
-from memprimitive.classic_modules._runtime import get_classic_runtime
+from memprimitive.utils._runtime import get_classic_runtime
 
 
 def build_pipeline() -> MemoryPipeline:

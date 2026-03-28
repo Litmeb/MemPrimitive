@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import ClassVar, Final
 
 from .core import MemoryRecord, MemoryStore, Observation, Packet, Query, Readout
-from .exceptions import IncompatibleCompositionError
+from .utils.exceptions import IncompatibleCompositionError
 from .interfaces import (
     EvolutionTriggerModule,
     MemoryEvolutionModule,

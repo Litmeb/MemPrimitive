@@ -8,9 +8,9 @@ from typing import Any, Final
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
 
-from ._graph_family import graph_metadata_for_unit
-from ._reflexion_family import DEFAULT_TRIAL_LAYER
-from ._trace import copy_trace
+from ..utils._graph_family import graph_metadata_for_unit
+from ..utils._reflexion_family import DEFAULT_TRIAL_LAYER
+from ..utils._trace import copy_trace
 
 
 class AppendOrganization(OrganizationModule):

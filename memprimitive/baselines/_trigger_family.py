@@ -14,7 +14,7 @@ from typing import Any
 
 from ..core import MemoryStore, Packet
 
-from ._trace import copy_trace
+from ..utils._trace import copy_trace
 
 
 SignalMap = dict[str, float | bool]

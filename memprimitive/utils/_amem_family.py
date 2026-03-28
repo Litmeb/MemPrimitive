@@ -16,7 +16,7 @@ from dataclasses import replace
 from typing import Any, Final
 
 from ..core import MemoryRecord, MemoryStore
-from ..classic_modules._runtime import ClassicRuntime, get_classic_runtime
+from ._runtime import ClassicRuntime, get_classic_runtime
 
 
 DEFAULT_NOTE_NAMESPACE: Final[str] = "note"

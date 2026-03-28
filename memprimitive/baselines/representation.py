@@ -17,14 +17,14 @@ from sentence_transformers import SentenceTransformer
 from ..core import MemoryStore, MemoryUnit, ModuleSpec, Packet, _representation_summary_from_unit
 from ..interfaces import RepresentationModule
 
-from ._amem_family import (
+from ..utils._amem_family import (
     DEFAULT_CATEGORY,
     DEFAULT_EMBEDDING_VERSION,
     DEFAULT_NOTE_NAMESPACE,
     repair_note_payload,
     representation_from_note_payload,
 )
-from ._trace import copy_trace
+from ..utils._trace import copy_trace
 
 _VALID_ELEMENTS: Final[tuple[str, ...]] = (
     "text",
@@ -579,7 +579,7 @@ class SemanticFieldEnrichmentRepresentation(RepresentationModule):
         return replace(packet, units=represented_units, trace=trace), store
 
     def _analyze_unit(self, unit: MemoryUnit) -> dict[str, Any]:
-        from ..classic_modules._runtime import get_classic_runtime
+        from ..utils._runtime import get_classic_runtime
 
         runtime = get_classic_runtime()
         runtime.require_llm(capability="SemanticFieldEnrichmentRepresentation")
@@ -719,7 +719,7 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
         return replace(packet, units=represented_units, trace=trace), store
 
     def _embed_text(self, text: str) -> list[float]:
-        from ..classic_modules._runtime import get_classic_runtime
+        from ..utils._runtime import get_classic_runtime
 
         return list(get_classic_runtime().embed(text))
 

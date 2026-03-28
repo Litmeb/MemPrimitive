@@ -10,7 +10,7 @@ from typing import Any, Final
 from ..core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet
 from ..interfaces import MemoryEvolutionModule
 
-from ._amem_family import (
+from ..utils._amem_family import (
     coerce_index_list,
     coerce_llm_mapping,
     DEFAULT_CATEGORY,
@@ -22,8 +22,8 @@ from ._amem_family import (
     rewrite_record_from_note_payload,
     stringify_note_candidates,
 )
-from ._graph_family import graph_metadata_from_record, rewrite_graph_record
-from ._reflexion_family import (
+from ..utils._graph_family import graph_metadata_from_record, rewrite_graph_record
+from ..utils._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
     DEFAULT_REFLECTION_LAYER,
     ReflectionGenerationPayload,
@@ -35,7 +35,7 @@ from ._reflexion_family import (
     runtime_reflection_generator,
     scratchpad_from_payload,
 )
-from ._trace import copy_trace
+from ..utils._trace import copy_trace
 
 
 class AppendOnlyEvolution(MemoryEvolutionModule):
@@ -691,7 +691,7 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
         if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
             raise ValueError("LinkStrengtheningEvolution requires aligned units, placements, and evolution decisions.")
 
-        from ..classic_modules._runtime import get_classic_runtime
+        from ..utils._runtime import get_classic_runtime
 
         runtime = get_classic_runtime()
         runtime.require_llm(capability="LinkStrengtheningEvolution")
@@ -858,7 +858,7 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
         if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
             raise ValueError("NeighborContextUpdateEvolution requires aligned units, placements, and evolution decisions.")
 
-        from ..classic_modules._runtime import get_classic_runtime
+        from ..utils._runtime import get_classic_runtime
 
         runtime = get_classic_runtime()
         runtime.require_llm(capability="NeighborContextUpdateEvolution")

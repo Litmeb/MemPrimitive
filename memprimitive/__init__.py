@@ -24,7 +24,7 @@ from .dispatch import (
     DispatchUnitFormation,
     DispatchWriteTrigger,
 )
-from .exceptions import IncompatibleCompositionError
+from .utils.exceptions import IncompatibleCompositionError
 from .pipeline import MemoryPipeline, create_baseline_pipeline
 
 __all__ = [

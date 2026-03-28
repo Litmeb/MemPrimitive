@@ -2503,7 +2503,7 @@ def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieva
 
 
 def test_semantic_field_enrichment_and_retrieval_embedding_repair_note_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.classic_modules import _runtime
+    from memprimitive.utils import _runtime
     from memprimitive.baselines import RetrievalOrientedEmbeddingRepresentation, SemanticFieldEnrichmentRepresentation
 
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
@@ -2540,7 +2540,7 @@ def test_graph_append_link_ready_organization_requires_graph_vector_layer() -> N
 
 
 def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.classic_modules import _runtime
+    from memprimitive.utils import _runtime
     from memprimitive.baselines import VectorGraphSeedAndExpandRetrieval
 
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
@@ -2615,7 +2615,7 @@ def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: p
 
 
 def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.classic_modules import _runtime
+    from memprimitive.utils import _runtime
     from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
 
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
@@ -2685,7 +2685,7 @@ def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metada
 
 
 def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.classic_modules import _runtime
+    from memprimitive.utils import _runtime
     from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
 
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _WrapperShapeAMEMRuntime())

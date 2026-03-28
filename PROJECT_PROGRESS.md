@@ -236,6 +236,21 @@ Validation status:
   - link-strengthening + neighbor-context writeback
 - Existing `tests/test_classic_amem.py` should continue to exercise the public classic A-MEM API on top of the baseline-backed implementation.
 
+### 4.7 Shared utilities consolidated into `memprimitive/utils/`
+
+Cross-cutting helper modules that were previously scattered across `baselines/` and `classic_modules/` have been consolidated into a dedicated `memprimitive/utils/` package. This keeps the slot-implementation packages focused on their pipeline roles while collecting reusable infrastructure in one place.
+
+Contents of `memprimitive/utils/`:
+
+- **`_runtime.py`** — `ClassicRuntime` wrapper around OpenAI-compatible LLM and sentence-transformer embedding backends, plus the module-level singleton `get_classic_runtime()`. Previously lived in `classic_modules/_runtime.py`.
+- **`_amem_family.py`** — A-MEM-style note helpers: note-payload schema repair, retrieval-oriented embedding text construction, record/note payload conversion, and embedding-based candidate collection for graph-note pipelines. Previously lived in `baselines/_amem_family.py`.
+- **`_graph_family.py`** — Graph-family helpers: graph metadata normalization, record rewrite utilities, and link-history management for graph baseline modules. Previously lived in `baselines/_graph_family.py`.
+- **`_reflexion_family.py`** — Reflexion-like helpers: control parsing, prompt-context formatting, reflection generation payloads, and strategy constants. Previously lived in `baselines/_reflexion_family.py`.
+- **`_trace.py`** — Lightweight packet-trace copy utility (`copy_trace`). Previously lived in `baselines/_trace.py`.
+- **`exceptions.py`** — Custom exceptions for MemPrimitive runtime composition checks (`IncompatibleCompositionError`). Previously lived in `memprimitive/exceptions.py`.
+
+All imports across baselines, classic modules, examples, and tests have been updated. The full test suite (160 tests) passes after the move.
+
 ### 5. Classic method families have been partially reconstructed
 
 This is a major step toward the stated goal of re-expressing literature inside one framework:

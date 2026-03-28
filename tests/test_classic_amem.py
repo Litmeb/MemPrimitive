@@ -5,7 +5,7 @@ import json
 import pytest
 
 from memprimitive import Observation, Packet, Query
-from memprimitive.classic_modules import _runtime
+from memprimitive.utils import _runtime
 from memprimitive.classic_modules.amem import AMEMConfig, AMEM_GRAPH_LAYER
 from memprimitive.example.classics.amem_agentic_memory import build_amem_pipeline
 

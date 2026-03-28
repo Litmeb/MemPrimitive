@@ -22,7 +22,7 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation
-from memprimitive.classic_modules._runtime import get_classic_runtime
+from memprimitive.utils._runtime import get_classic_runtime
 from memprimitive.classic_modules.memgpt import (
     MEMGPT_ARCHIVAL_LAYER,
     MEMGPT_CORE_BLOCK_HUMAN,

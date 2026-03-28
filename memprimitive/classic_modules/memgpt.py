@@ -16,11 +16,11 @@ import json
 from math import sqrt
 from typing import Any, Final
 
-from ..baselines._trace import copy_trace
+from ..utils._trace import copy_trace
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement, Query, Readout, RetrievedSet, StoreLayerSpec, StoreTopology
-from ..exceptions import IncompatibleCompositionError
+from ..utils.exceptions import IncompatibleCompositionError
 from ..interfaces import OrganizationModule, ReadoutModule, RetrievalModule
-from ._runtime import get_classic_runtime
+from ..utils._runtime import get_classic_runtime
 
 MEMGPT_CORE_LAYER: Final[str] = "core_memory"
 MEMGPT_WORKING_LAYER: Final[str] = "working_memory"

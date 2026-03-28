@@ -9,7 +9,7 @@ from typing import Final
 from ..core import MemoryStore, MemoryUnit, ModuleSpec, Packet
 from ..interfaces import UnitFormationModule
 
-from ._trace import copy_trace
+from ..utils._trace import copy_trace
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 

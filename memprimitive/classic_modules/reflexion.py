@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from memprimitive.baselines._reflexion_family import (
+from memprimitive.utils._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
     DEFAULT_REFLECTION_LAYER,
     DEFAULT_TRIAL_LAYER,
@@ -28,7 +28,7 @@ from memprimitive.baselines.organization import PlacementWithoutAppendOrganizati
 from memprimitive.baselines.readout import PromptContextReadout
 from memprimitive.baselines.retrieval import BufferRetrieval
 from memprimitive.core import MemoryStore, ModuleSpec, Packet
-from memprimitive.exceptions import IncompatibleCompositionError
+from memprimitive.utils.exceptions import IncompatibleCompositionError
 
 
 class ReflexionTrialOrganization(PlacementWithoutAppendOrganization):

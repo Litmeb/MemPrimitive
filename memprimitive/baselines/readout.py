@@ -9,9 +9,9 @@ from typing import Final
 from ..core import MemoryStore, ModuleSpec, Packet, Readout
 from ..interfaces import ReadoutModule
 
-from ._amem_family import DEFAULT_CATEGORY, DEFAULT_NOTE_NAMESPACE, note_payload_from_record
-from ._graph_family import graph_metadata_from_record
-from ._reflexion_family import (
+from ..utils._amem_family import DEFAULT_CATEGORY, DEFAULT_NOTE_NAMESPACE, note_payload_from_record
+from ..utils._graph_family import graph_metadata_from_record
+from ..utils._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
     DEFAULT_REFLECTION_LAYER,
     VALID_PROMPT_CONTEXT_STRATEGIES,
@@ -19,7 +19,7 @@ from ._reflexion_family import (
     last_attempt_from_query_metadata,
     strategy_from_query_metadata,
 )
-from ._trace import copy_trace
+from ..utils._trace import copy_trace
 
 
 class ConcatenateReadout(ReadoutModule):
