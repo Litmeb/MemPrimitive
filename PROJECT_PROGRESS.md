@@ -33,6 +33,20 @@ The clearest statement of this appears in [README.md](D:/Git/MemPrimitive-MemEng
 
 ## What has already been done
 
+### 0. Chinese documentation pass now matches the executable runtime more closely
+
+A substantial documentation refresh has now been completed in Chinese with the explicit goal of matching the current code rather than the older design-only prose:
+
+- Root [README.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/README.md) was rewritten from a concept-heavy introduction into a code-grounded project overview. It now explains the actual package structure, current runtime boundaries, slot order, topology/store concepts, baseline vs classic layers, and where to start in the examples.
+- A new lookup-style reference document [DSL_REFERENCE.zh-CN.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/DSL_REFERENCE.zh-CN.md) now documents the current DSL-like runtime surface as implemented: shared core objects, slot semantics, every baseline module family currently registered per slot, trigger-family composition, iterable-per-slot chaining, and dispatch-based fan-out.
+- A new tutorial-style document [TUTORIAL.zh-CN.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/TUTORIAL.zh-CN.md) now teaches the actual composition workflow through the runnable demonstrations, from minimal pipeline assembly to topology, trigger composition, dispatch, layered retrieval, graph baselines, Reflexion-like composition, and A-MEM-like graph-note composition.
+
+Practical impact:
+
+- The repository is now easier to approach as an executable framework instead of only as a research manifesto.
+- The new docs make the current stage-1 runtime legible for Chinese readers without requiring them to infer the real API surface from stale design notes.
+- The documentation center of gravity is now closer to "how the runtime actually composes today" than to "what a future full declarative DSL might eventually look like".
+
 ### 1. A usable stage-1 runtime exists
 
 The core package is not just a concept sketch. `memprimitive` already implements a concrete stage-1 runtime:
