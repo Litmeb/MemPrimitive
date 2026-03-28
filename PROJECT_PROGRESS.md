@@ -47,6 +47,22 @@ Practical impact:
 - The new docs make the current stage-1 runtime legible for Chinese readers without requiring them to infer the real API surface from stale design notes.
 - The documentation center of gravity is now closer to "how the runtime actually composes today" than to "what a future full declarative DSL might eventually look like".
 
+### 0.1 The Chinese tutorial has been repositioned as a showcase-first document for memory-module composition
+
+`TUTORIAL.zh-CN.md` has now been rewritten away from a broad "walk through every concept in order" style and toward a concise showcase document aimed at demonstrating project value quickly.
+
+The new tutorial now emphasizes:
+
+- how to assemble a minimal `MemoryPipeline` first
+- how flexibility comes from replacing slots, chaining modules per slot, and using dispatch
+- how convenience comes from declarative topology, reusable trigger composition, and progressive enhancement from simple to complex pipelines
+- how to demonstrate the project through a small sequence of runnable examples, ending in Reflexion-like and A-MEM-like compositions
+
+Practical impact:
+
+- The repo now has a more presentation-friendly Chinese entry point for demos, onboarding, and feature showcases.
+- The tutorial is better aligned with the project's strongest current message: building memory modules incrementally through explicit composition rather than selling an abstract future DSL alone.
+
 ### 1. A usable stage-1 runtime exists
 
 The core package is not just a concept sketch. `memprimitive` already implements a concrete stage-1 runtime:
