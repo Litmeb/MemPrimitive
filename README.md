@@ -259,6 +259,12 @@ memory primitive 之间并非完全自由组合。
 
 换言之，`MemPrimitive` 追求的不是“完全自由组合”，而是“在形式化约束下的可控组合”。
 
+当前实现处于一次约束机制重构过渡期：
+
+- `MemoryPipeline` 仍然会在构造期检查 slot 抽象类型与 `ModuleSpec.slot` 是否对齐
+- 旧的 baseline 侧 store/topology eager compatibility check 已移除，准备切换到后续以 `MemoryStore.check()` 为中心的组合合法性检验
+- `classic_modules` 内已有的兼容性约束暂时保留，不在这一轮重构清理范围内
+
 ---
 
 ## 这个项目希望覆盖哪些已有 memory 研究

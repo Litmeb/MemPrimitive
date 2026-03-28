@@ -5,7 +5,6 @@ import pytest
 from memprimitive import (
     DispatchOrganization,
     DispatchReadout,
-    IncompatibleCompositionError,
     Observation,
     Query,
     create_baseline_pipeline,
@@ -26,7 +25,6 @@ from memprimitive.baselines import (
 )
 from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
-    iter_baseline_pipeline_instances,
 )
 from memprimitive.core import MemoryStore, ModuleSpec, Packet, StoreLayerSpec, StoreTopology
 from memprimitive.interfaces import RetrievalModule
@@ -243,25 +241,10 @@ def test_default_ingest_writes_before_optional_evolution_runs() -> None:
     assert packet.trace["memory_evolution"]["effects"] == []
 
 
-def test_pipeline_iteration_surfaces_incompatible_graph_layer_compositions() -> None:
-    """Iteration remains strict and should expose composition errors distinctly."""
-    iterator = iter_baseline_pipeline_instances(top_k=2)
+def test_memory_pipeline_allows_graph_organization_without_eager_store_validation() -> None:
+    pipeline = MemoryPipeline(organization=GraphAppendOrganization())
 
-    successful_pipelines = 0
-    with pytest.raises(IncompatibleCompositionError, match=r"slot='(organization|retrieval|memory_evolution)'.*graph"):
-        for pipeline in iterator:
-            successful_pipelines += 1
-            pipeline.ingest(Observation(text="combinatorial ingest.", source="dialogue"))
-            readout = pipeline.recall(Query(text="combinatorial"))
-            assert isinstance(readout.text, str)
-            assert pipeline.store.count() >= 1
-
-    assert successful_pipelines >= 1
-
-
-def test_memory_pipeline_rejects_graph_organization_without_declared_graph_layer() -> None:
-    with pytest.raises(IncompatibleCompositionError, match=r"slot='organization'.*declared graph layer.*knowledge_graph"):
-        MemoryPipeline(organization=GraphAppendOrganization())
+    assert isinstance(pipeline.organization, GraphAppendOrganization)
 
 
 def test_memory_pipeline_accepts_graph_organization_with_compatible_store_topology() -> None:
@@ -323,9 +306,10 @@ def test_memory_pipeline_validates_each_module_inside_iterable_slot() -> None:
         MemoryPipeline(organization=[AppendOrganization(), object()])
 
 
-def test_memory_pipeline_checks_graph_compatibility_for_iterable_organization_slot() -> None:
-    with pytest.raises(IncompatibleCompositionError, match=r"slot='organization'.*declared graph layer.*knowledge_graph"):
-        MemoryPipeline(organization=[AppendOrganization(), GraphAppendOrganization()])
+def test_memory_pipeline_allows_iterable_organization_slot_without_eager_graph_validation() -> None:
+    pipeline = MemoryPipeline(organization=[AppendOrganization(), GraphAppendOrganization()])
+
+    assert len(pipeline.organization) == 2
 
 
 def test_dispatch_organization_fans_out_same_snapshot_and_keeps_primary_packet() -> None:
@@ -373,13 +357,14 @@ def test_dispatch_organization_validates_child_slots_and_graph_compatibility() -
     with pytest.raises(TypeError, match="OrganizationModule"):
         DispatchOrganization((AppendOrganization(), ConcatenateReadout()))
 
-    with pytest.raises(IncompatibleCompositionError, match=r"slot='organization'.*declared graph layer.*knowledge_graph"):
-        MemoryPipeline(
-            organization=DispatchOrganization(
-                (AppendOrganization(), GraphAppendOrganization()),
-                primary_index=0,
-            )
+    pipeline = MemoryPipeline(
+        organization=DispatchOrganization(
+            (AppendOrganization(), GraphAppendOrganization()),
+            primary_index=0,
         )
+    )
+
+    assert isinstance(pipeline.organization, DispatchOrganization)
 
 
 def test_pipeline_accepts_custom_topology_store_without_breaking_baseline_flow() -> None:

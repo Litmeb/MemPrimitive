@@ -41,19 +41,21 @@ def test_memgpt_requires_declared_budget_layers() -> None:
         MemoryPipeline(store=store, retrieval=MemGPTPagedRetrieval(target_layer=MEMGPT_RECALL_LAYER, tool_name="conversation_search"))
 
 
-def test_amem_requires_graph_shape_and_index() -> None:
+def test_amem_graph_modules_do_not_eagerly_validate_shape_and_index() -> None:
     bad_shape_store = MemoryStore(
         topology=StoreTopology.from_layers(
             [StoreLayerSpec(name="memory_graph", shape="Flat", indices=("graph", "vector", "keyword", "tag"))]
         )
     )
-    with pytest.raises(IncompatibleCompositionError, match="Graph"):
-        MemoryPipeline(store=bad_shape_store, organization=AMEMGraphOrganization())
+    pipeline = MemoryPipeline(store=bad_shape_store, organization=AMEMGraphOrganization())
+
+    assert isinstance(pipeline.organization, AMEMGraphOrganization)
 
     bad_index_store = MemoryStore(
         topology=StoreTopology.from_layers(
             [StoreLayerSpec(name="memory_graph", shape="Graph", indices=("vector", "keyword", "tag"))]
         )
     )
-    with pytest.raises(IncompatibleCompositionError, match="graph"):
-        MemoryPipeline(store=bad_index_store, retrieval=AMEMGraphHopRetrieval())
+    pipeline = MemoryPipeline(store=bad_index_store, retrieval=AMEMGraphHopRetrieval())
+
+    assert isinstance(pipeline.retrieval, AMEMGraphHopRetrieval)
