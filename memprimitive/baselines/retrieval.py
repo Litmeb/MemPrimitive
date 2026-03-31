@@ -10,6 +10,17 @@ from typing import Any, ClassVar, Final
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
+from ..contracts import (
+    RECORD_GRAPH_LINKS_CONTRACT,
+    RECORD_NOTE_PAYLOAD_CONTRACT,
+    TOPOLOGY_GRAPH_LAYER_CONTRACT,
+    TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
+    TOPOLOGY_TAG_INDEX_CONTRACT,
+    UNIT_EMBEDDING_CONTRACT,
+    UNIT_ENTITIES_CONTRACT,
+    UNIT_TAGS_CONTRACT,
+    normalize_contracts,
+)
 from ..core import MemoryStore, ModuleSpec, Packet, RetrievedSet
 from ..interfaces import RetrievalModule
 
@@ -241,6 +252,7 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         output_guarantees=("retrieved.items", "retrieved.scores"),
         store_requirements=("record.embedding",),
     )
+    requires_contracts = frozenset({UNIT_EMBEDDING_CONTRACT})
     _embedding_cache: ClassVar[dict[str, SentenceTransformer]] = {}
 
     def __init__(
@@ -332,6 +344,7 @@ class TagRetrieval(RetrievalModule):
         input_requirements=("query.text",),
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
+    requires_contracts = frozenset({UNIT_TAGS_CONTRACT, TOPOLOGY_TAG_INDEX_CONTRACT})
 
     def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
         if top_k <= 0:
@@ -388,6 +401,7 @@ class EntityRetrieval(RetrievalModule):
         input_requirements=("query.text",),
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
+    requires_contracts = frozenset({UNIT_ENTITIES_CONTRACT})
 
     def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
         if top_k <= 0:
@@ -550,6 +564,7 @@ class GraphNeighborRetrieval(RetrievalModule):
         store_requirements=("index:graph", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
     )
+    requires_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
 
     def __init__(self, top_k: int = 3, layer: str = "knowledge_graph", *, include_seed_records: bool = False) -> None:
         if top_k <= 0:
@@ -644,6 +659,7 @@ class GraphSeedAndExpandRetrieval(RetrievalModule):
         store_requirements=("index:graph", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
     )
+    requires_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
 
     def __init__(
         self,
@@ -825,6 +841,20 @@ class LayerAwareRetrieval(RetrievalModule):
             str(layer).strip(): float(value)
             for layer, value in ({} if merge_weight_by_layer is None else merge_weight_by_layer).items()
         }
+
+    def get_requires_contracts(self) -> frozenset[str]:
+        return normalize_contracts(
+            contract
+            for module in (self.default_retriever, *self.retriever_by_layer.values())
+            for contract in module.get_requires_contracts()
+        )
+
+    def get_produces_contracts(self) -> frozenset[str]:
+        return normalize_contracts(
+            contract
+            for module in (self.default_retriever, *self.retriever_by_layer.values())
+            for contract in module.get_produces_contracts()
+        )
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
@@ -1028,6 +1058,7 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
         store_requirements=("index:graph", "index:vector", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
     )
+    requires_contracts = frozenset({RECORD_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT})
 
     def __init__(
         self,

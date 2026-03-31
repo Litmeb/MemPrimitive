@@ -164,7 +164,15 @@
 
 ### 1. 重表达已有方法
 
-DSL 应该能把经典 memory 工作重新写成统一配置。只有这样，语言才不是空洞 taxonomy，而是真正具有解释力的研究工具。
+DSL 应该能把已有 memory 工作重新写成统一配置。对当前阶段而言，重点不再只是挑选少数经典工作做展示，而是尽可能把调研范围从经典代表方法扩展到更广泛、更多样的 agent memory 文献，并用统一语言持续吸纳这些方法。
+
+当前更具体的目标是：
+
+- 将调研覆盖面扩展到约 40 篇不同风格的 memory 工作，而不只停留在少数经典案例
+- 尽量让其中约 1/4 的方法可以被 **完全重表达** 为统一的 primitive 组合与配置
+- 对暂时还无法完全重表达的方法，也至少做到结构化拆解、定位缺失机制，并反过来推动 module 边界继续扩展
+
+只有这样，这套语言才不是空洞 taxonomy，而是真正具有解释力、扩展性和文献承载能力的研究工具。
 
 ### 2. 表达模块组合
 
@@ -262,14 +270,15 @@ memory primitive 之间并非完全自由组合。
 当前实现处于一次约束机制重构过渡期：
 
 - `MemoryPipeline` 仍然会在构造期检查 slot 抽象类型与 `ModuleSpec.slot` 是否对齐
-- 旧的 baseline 侧 store/topology eager compatibility check 已移除，准备切换到后续以 `MemoryStore.check()` 为中心的组合合法性检验
+- 旧的 baseline 侧 store/topology eager compatibility check 已移除
+- baseline/runtime 侧现已改为以 `MemoryStore.check()` 为中心的组合合法性检验：`MemoryPipeline` 负责把模块声明的 `requires_contracts` / `produces_contracts` 注册到共享 store，随后由调用方在需要时显式执行 `store.check()`
 - `classic_modules` 内已有的兼容性约束暂时保留，不在这一轮重构清理范围内
 
 ---
 
 ## 这个项目希望覆盖哪些已有 memory 研究
 
-这个项目的目标之一，是让不同风格的 agent memory 方法都能被放到一个统一框架中理解。包括但不限于：
+这个项目的目标之一，是让不同风格的 agent memory 方法都能被放到一个统一框架中理解。当前阶段会主动把文献池从经典工作扩展到尽可能多的代表性与异质性工作，目标规模约为 40 篇；其中会重点挑选约 1/4 作为完全重表达对象，其余工作也会纳入统一拆解与对照分析。覆盖范围包括但不限于：
 
 - 以 observation stream 为核心的 episodic memory
 - 以事实抽取、属性更新为核心的 semantic/profile memory
@@ -279,13 +288,13 @@ memory primitive 之间并非完全自由组合。
 - 以 agent 主动工具调用为核心的 self-managed memory
 - 以工作记忆、长期记忆、归档记忆分层为核心的 multi-store memory
 
-这些系统虽然表面形式不同，但都可以被还原为一组 primitive 的不同取值和不同组合方式。
+这些系统虽然表面形式不同，但理想状态下都应被还原为一组 primitive 的不同取值和不同组合方式。若现有模块还不足以承载某一类方法，那么扩展 module 本身就是当前阶段的重要研究工作，而不是例外情况。
 
 ---
 
 ## 这个项目最终想产出什么
 
-从研究目标上看，`MemPrimitive` 希望最终支持以下几类产出。
+从研究目标上看，`MemPrimitive` 希望最终支持以下几类产出。就当前阶段而言，最优先的中期目标是：把文献覆盖面扩展到约 40 篇，并尽量使其中约 1/4 能够被比较有说服力地声称为“完全重表达”；为此，项目会继续扩展 module families 与组合边界，让更多过去方法可以落到统一框架中。
 
 ### 1. 一套统一的 memory 描述语言
 
@@ -368,4 +377,4 @@ memory primitive 之间并非完全自由组合。
 
 `MemPrimitive` 想做的事是：
 
-**把 agent memory 从“方法集合”重构为“可组合、可搜索、可归纳的机制空间”，并用一套 compositional DSL 对这个空间进行统一描述与系统研究。**
+**把 agent memory 从“方法集合”重构为“可组合、可搜索、可归纳的机制空间”；而当前阶段最核心的目标，是把尽可能多的既有方法纳入统一重表达框架中，扩展到约 40 篇文献，并争取其中约 1/4 达到完全重表达。**

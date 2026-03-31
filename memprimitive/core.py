@@ -7,6 +7,16 @@ from datetime import UTC, datetime
 from typing import Any, Iterable
 from uuid import uuid4
 
+from .contracts import (
+    TOPOLOGY_GRAPH_LAYER_CONTRACT,
+    TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
+    TOPOLOGY_KEYWORD_INDEX_CONTRACT,
+    TOPOLOGY_TAG_INDEX_CONTRACT,
+    TOPOLOGY_VECTOR_INDEX_CONTRACT,
+    normalize_contracts,
+)
+from .utils.exceptions import IncompatibleCompositionError
+
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -374,13 +384,14 @@ class Packet:
 
 @dataclass(slots=True)
 class MemoryStore:
-    """Minimal in-memory layered store for stage 1."""
+    """Minimal in-memory layered store."""
 
     topology: StoreTopology = field(default_factory=StoreTopology.single_flat_default)
     layers: dict[str, list[MemoryRecord]] = field(default_factory=dict)
     allow_topology_extend: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     _next_sequence_id: int = 1
+    _composition_registry: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._synchronize_layers_with_topology()
@@ -404,6 +415,86 @@ class MemoryStore:
                 normalized_layers[layer_name] = list(self.layers[layer_name])
 
         self.layers = normalized_layers
+
+    @property
+    def topology_contracts(self) -> frozenset[str]:
+        contracts: list[str] = []
+        if self.has_graph_layer():
+            contracts.append(TOPOLOGY_GRAPH_LAYER_CONTRACT)
+        if self.has_vector_layer():
+            contracts.append(TOPOLOGY_VECTOR_INDEX_CONTRACT)
+        if self.has_keyword_layer():
+            contracts.append(TOPOLOGY_KEYWORD_INDEX_CONTRACT)
+        if self.topology.has_index("tag"):
+            contracts.append(TOPOLOGY_TAG_INDEX_CONTRACT)
+        if any(
+            layer.shape == "Graph" and "vector" in layer.indices
+            for layer in self.topology.layers
+        ):
+            contracts.append(TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT)
+        return normalize_contracts(contracts)
+
+    @property
+    def required_contracts(self) -> frozenset[str]:
+        contracts: list[str] = []
+        for entry in self._composition_registry:
+            contracts.extend(entry.get("requires_contracts", ()))
+        return normalize_contracts(contracts)
+
+    @property
+    def produced_contracts(self) -> frozenset[str]:
+        contracts: list[str] = list(self.topology_contracts)
+        for entry in self._composition_registry:
+            contracts.extend(entry.get("produces_contracts", ()))
+        return normalize_contracts(contracts)
+
+    @property
+    def registered_compositions(self) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {
+                "slot": entry["slot"],
+                "module": entry["module"],
+                "requires_contracts": tuple(entry["requires_contracts"]),
+                "produces_contracts": tuple(entry["produces_contracts"]),
+            }
+            for entry in self._composition_registry
+        )
+
+    def register_module_contracts(
+        self,
+        *,
+        slot: str,
+        module_name: str,
+        requires_contracts: Iterable[str] = (),
+        produces_contracts: Iterable[str] = (),
+    ) -> None:
+        slot_name = _require_non_empty_text(slot, "slot")
+        module = _require_non_empty_text(module_name, "module_name")
+        self._composition_registry.append(
+            {
+                "slot": slot_name,
+                "module": module,
+                "requires_contracts": tuple(sorted(normalize_contracts(requires_contracts))),
+                "produces_contracts": tuple(sorted(normalize_contracts(produces_contracts))),
+            }
+        )
+
+    def check(self) -> frozenset[str]:
+        missing = normalize_contracts(self.required_contracts - self.produced_contracts)
+        self.metadata["composition_contracts"] = {
+            "required": sorted(self.required_contracts),
+            "produced": sorted(self.produced_contracts),
+            "topology": sorted(self.topology_contracts),
+            "missing": sorted(missing),
+            "registered_modules": list(self.registered_compositions),
+        }
+        if missing:
+            missing_text = ", ".join(sorted(missing))
+            raise IncompatibleCompositionError(
+                "MemoryStore.check() found missing composition contracts: "
+                f"{missing_text}"
+            )
+        return missing
 
     def ensure_layer(self, layer: str, *, allow_create: bool | None = None, theme: str = "working") -> None:
         layer_name = _require_non_empty_text(layer, "layer")

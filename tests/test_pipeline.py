@@ -5,6 +5,7 @@ import pytest
 from memprimitive import (
     DispatchOrganization,
     DispatchReadout,
+    IncompatibleCompositionError,
     Observation,
     Query,
     create_baseline_pipeline,
@@ -16,12 +17,25 @@ from memprimitive.baselines import (
     BasicRepresentation,
     ConcatenateReadout,
     BulletListReadout,
+    EmbeddingSimilarityRetrieval,
     EntityRetrieval,
     GraphAppendOrganization,
+    GraphAppendLinkReadyOrganization,
+    GraphLinkEvolution,
+    GraphNeighborContextTraceEvolution,
+    GraphNeighborRetrieval,
+    GraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
+    LinkStrengtheningEvolution,
     NeverEvolutionTrigger,
+    NeighborContextUpdateEvolution,
     PassThroughUnitFormation,
+    KeywordRepresentation,
     RecencyRetrieval,
+    RetrievalOrientedEmbeddingRepresentation,
+    SemanticFieldEnrichmentRepresentation,
+    TagRetrieval,
+    VectorGraphSeedAndExpandRetrieval,
 )
 from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
@@ -386,3 +400,225 @@ def test_pipeline_accepts_custom_topology_store_without_breaking_baseline_flow()
     assert pipeline.store.topology.layer_count == 2
     assert pipeline.store.count("default") == 1
     assert pipeline.store.count("episodic") == 0
+
+
+def test_memory_pipeline_registers_leaf_module_contracts_on_store() -> None:
+    store = MemoryStore()
+
+    MemoryPipeline(
+        store=store,
+        representation=BasicRepresentation(elements=("text", "embedding", "entities", "tags")),
+        retrieval=EntityRetrieval(top_k=2),
+    )
+
+    assert "unit.embedding" in store.produced_contracts
+    assert "unit.entities" in store.produced_contracts
+    assert "unit.tags" in store.produced_contracts
+    assert "unit.entities" in store.required_contracts
+
+
+def test_store_check_fails_when_retrieval_requires_missing_embedding_contract() -> None:
+    store = MemoryStore()
+    MemoryPipeline(
+        store=store,
+        representation=KeywordRepresentation(),
+        retrieval=EmbeddingSimilarityRetrieval(top_k=2),
+    )
+
+    with pytest.raises(IncompatibleCompositionError, match="unit.embedding"):
+        store.check()
+
+
+def test_store_check_accepts_cross_pipeline_shared_store_contract_production() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "vector")),
+            ]
+        )
+    )
+
+    MemoryPipeline(
+        store=store,
+        representation=(SemanticFieldEnrichmentRepresentation(), RetrievalOrientedEmbeddingRepresentation()),
+        organization=GraphAppendLinkReadyOrganization(target_layer="knowledge_graph"),
+    )
+    MemoryPipeline(
+        store=store,
+        retrieval=VectorGraphSeedAndExpandRetrieval(layer="knowledge_graph"),
+    )
+
+    assert store.check() == frozenset()
+
+
+def test_store_check_reports_missing_graph_topology_contract() -> None:
+    store = MemoryStore()
+    MemoryPipeline(store=store, organization=GraphAppendOrganization())
+
+    with pytest.raises(IncompatibleCompositionError, match="topology.graph_layer"):
+        store.check()
+
+
+def test_dispatch_registers_child_contracts_without_double_counting() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="working"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "vector")),
+            ]
+        )
+    )
+
+    MemoryPipeline(
+        store=store,
+        organization=DispatchOrganization(
+            (
+                AppendOrganization(target_layer="working"),
+                GraphAppendOrganization(target_layer="knowledge_graph"),
+            )
+        ),
+    )
+
+    modules = [entry["module"] for entry in store.registered_compositions]
+    assert "dispatch_organization" not in modules
+    assert modules.count("append_organization") == 1
+    assert modules.count("graph_append_organization") == 1
+
+
+def _register_sparse_pipeline_for_check(
+    store: MemoryStore,
+    **overrides,
+) -> MemoryStore:
+    """Build a contract-sparse pipeline so unsupported consumers stay unsupported."""
+
+    kwargs = {
+        "unit_formation": PassThroughUnitFormation(),
+        "representation": BasicRepresentation(elements=("text",)),
+        "write_trigger": AlwaysWriteTrigger(),
+        "organization": AppendOrganization(),
+        "evolution_trigger": NeverEvolutionTrigger(),
+        "memory_evolution": AppendOnlyEvolution(),
+        "retrieval": RecencyRetrieval(top_k=2),
+        "readout": ConcatenateReadout(),
+    }
+    kwargs.update(overrides)
+    MemoryPipeline(store=store, **kwargs)
+    return store
+
+
+_OBVIOUSLY_INVALID_SINGLE_SLOT_PIPELINES = (
+    pytest.param(
+        {"retrieval": EmbeddingSimilarityRetrieval(top_k=2)},
+        id="embedding-retrieval-without-embedding-producer",
+    ),
+    pytest.param(
+        {"retrieval": EntityRetrieval(top_k=2)},
+        id="entity-retrieval-without-entity-producer",
+    ),
+    pytest.param(
+        {"retrieval": TagRetrieval(top_k=2)},
+        id="tag-retrieval-without-tags-or-tag-index",
+    ),
+    pytest.param(
+        {"organization": GraphAppendOrganization()},
+        id="graph-organization-without-graph-topology",
+    ),
+    pytest.param(
+        {"organization": GraphAppendLinkReadyOrganization(target_layer="knowledge_graph")},
+        id="graph-note-organization-without-note-payload-or-graph-vector-topology",
+    ),
+    pytest.param(
+        {"memory_evolution": GraphLinkEvolution(target_layer="knowledge_graph")},
+        id="graph-link-evolution-without-graph-topology",
+    ),
+    pytest.param(
+        {"memory_evolution": GraphNeighborContextTraceEvolution(target_layer="knowledge_graph")},
+        id="graph-neighbor-context-without-graph-topology",
+    ),
+    pytest.param(
+        {"memory_evolution": LinkStrengtheningEvolution(target_layer="knowledge_graph")},
+        id="link-strengthening-without-note-records-or-graph-vector-topology",
+    ),
+    pytest.param(
+        {"memory_evolution": NeighborContextUpdateEvolution(target_layer="knowledge_graph")},
+        id="neighbor-context-update-without-linked-note-records",
+    ),
+    pytest.param(
+        {"retrieval": GraphNeighborRetrieval(layer="knowledge_graph")},
+        id="graph-neighbor-retrieval-without-graph-records",
+    ),
+    pytest.param(
+        {"retrieval": GraphSeedAndExpandRetrieval(layer="knowledge_graph")},
+        id="graph-seed-expand-retrieval-without-graph-records",
+    ),
+    pytest.param(
+        {"retrieval": VectorGraphSeedAndExpandRetrieval(layer="knowledge_graph")},
+        id="vector-graph-retrieval-without-note-records-or-graph-vector-topology",
+    ),
+)
+
+
+@pytest.mark.parametrize("overrides", _OBVIOUSLY_INVALID_SINGLE_SLOT_PIPELINES)
+def test_store_check_rejects_many_obviously_invalid_single_slot_pipelines(overrides: dict[str, object]) -> None:
+    store = _register_sparse_pipeline_for_check(MemoryStore(), **overrides)
+
+    expected_missing = store.required_contracts - store.produced_contracts
+
+    assert expected_missing
+    with pytest.raises(IncompatibleCompositionError) as excinfo:
+        store.check()
+
+    message = str(excinfo.value)
+    for contract in sorted(expected_missing):
+        assert contract in message
+
+
+_OBVIOUSLY_INVALID_COMPOSITE_PIPELINES = (
+    pytest.param(
+        {
+            "organization": GraphAppendOrganization(),
+            "memory_evolution": GraphNeighborContextTraceEvolution(target_layer="knowledge_graph"),
+            "retrieval": GraphSeedAndExpandRetrieval(layer="knowledge_graph"),
+        },
+        id="stacked-graph-pipeline-without-graph-topology",
+    ),
+    pytest.param(
+        {
+            "organization": GraphAppendLinkReadyOrganization(target_layer="knowledge_graph"),
+            "memory_evolution": (
+                LinkStrengtheningEvolution(target_layer="knowledge_graph"),
+                NeighborContextUpdateEvolution(target_layer="knowledge_graph"),
+            ),
+            "retrieval": VectorGraphSeedAndExpandRetrieval(layer="knowledge_graph"),
+        },
+        id="graph-note-pipeline-without-note-representation-or-graph-vector-topology",
+    ),
+    pytest.param(
+        {
+            "retrieval": LayerAwareRetrieval(
+                default_retriever=EmbeddingSimilarityRetrieval(top_k=2),
+                retriever_by_layer={"default": TagRetrieval(top_k=2)},
+                top_k=2,
+            ),
+        },
+        id="layer-aware-retrieval-combines-multiple-missing-contracts",
+    ),
+)
+
+
+@pytest.mark.parametrize("overrides", _OBVIOUSLY_INVALID_COMPOSITE_PIPELINES)
+def test_store_check_rejects_many_obviously_invalid_composite_pipelines(overrides: dict[str, object]) -> None:
+    store = _register_sparse_pipeline_for_check(MemoryStore(), **overrides)
+
+    expected_missing = store.required_contracts - store.produced_contracts
+
+    assert expected_missing
+    with pytest.raises(IncompatibleCompositionError) as excinfo:
+        store.check()
+
+    contracts_meta = store.metadata.get("composition_contracts", {})
+    assert sorted(expected_missing) == contracts_meta.get("missing", [])
+    message = str(excinfo.value)
+    for contract in sorted(expected_missing):
+        assert contract in message

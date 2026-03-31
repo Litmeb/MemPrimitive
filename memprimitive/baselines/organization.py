@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Final
 
+from ..contracts import (
+    RECORD_GRAPH_LINKS_CONTRACT,
+    RECORD_NOTE_PAYLOAD_CONTRACT,
+    TOPOLOGY_GRAPH_LAYER_CONTRACT,
+    TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
+    UNIT_NOTE_PAYLOAD_CONTRACT,
+)
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
 
@@ -184,6 +191,8 @@ class GraphAppendOrganization(OrganizationModule):
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
         side_effects=("modify_store", "append_records"),
     )
+    requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
 
     def __init__(self, *, target_layer: str = "knowledge_graph") -> None:
         self.target_layer = target_layer
@@ -299,6 +308,8 @@ class GraphAppendLinkReadyOrganization(OrganizationModule):
         store_requirements=("index:graph", "index:vector", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
     )
+    requires_contracts = frozenset({UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, RECORD_NOTE_PAYLOAD_CONTRACT})
 
     def __init__(self, *, target_layer: str = "knowledge_graph", note_namespace: str = "note") -> None:
         self.target_layer = target_layer

@@ -65,6 +65,16 @@ def _iter_nested_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
     return tuple(flattened)
 
 
+def _iter_leaf_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
+    leaves: list[PrimitiveModule] = []
+    for module in _iter_slot_modules(module_or_modules):
+        if hasattr(module, "iter_child_modules"):
+            leaves.extend(_iter_leaf_modules(module.iter_child_modules()))
+            continue
+        leaves.append(module)
+    return tuple(leaves)
+
+
 class MemoryPipeline:
     """Coordinates the baseline memory pipeline using Packet-based IO.
 
@@ -115,6 +125,7 @@ class MemoryPipeline:
         self.readout = _materialize_slot_value(readout if readout is not None else _default_readout())
         self.store = store if store is not None else MemoryStore()
         self._validate_composition()
+        self._register_store_contracts()
 
     def _validate_composition(self) -> None:
         for kwarg, expected_slot, base in _INGEST_SLOT_CHECK + _RECALL_SLOT_CHECK:
@@ -136,6 +147,16 @@ class MemoryPipeline:
             for module in _iter_nested_modules(getattr(self, slot_name)):
                 if hasattr(module, "validate_store"):
                     module.validate_store(self.store)
+
+    def _register_store_contracts(self) -> None:
+        for slot_name, _, _ in _INGEST_SLOT_CHECK + _RECALL_SLOT_CHECK:
+            for module in _iter_leaf_modules(getattr(self, slot_name)):
+                self.store.register_module_contracts(
+                    slot=slot_name,
+                    module_name=module.spec.name,
+                    requires_contracts=module.get_requires_contracts(),
+                    produces_contracts=module.get_produces_contracts(),
+                )
 
     def ingest(self, observation: Observation) -> Packet:
         packet = Packet(observation=observation, trace={"ingest_started": True})

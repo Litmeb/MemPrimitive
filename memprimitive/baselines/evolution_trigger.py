@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Final
 
+from ..contracts import (
+    TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
+    UNIT_EMBEDDING_CONTRACT,
+    UNIT_PARTITION_KEY_CONTRACT,
+)
 from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import EvolutionTriggerModule
 
@@ -128,7 +133,7 @@ def compose_outcome_conditioned_evolution_trigger(
     -> threshold`` instead of becoming a family-specific black box.
     """
 
-    return compose_evolution_trigger(
+    module = compose_evolution_trigger(
         name=name,
         signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
         scorer=WeightedSumScorer(
@@ -142,6 +147,9 @@ def compose_outcome_conditioned_evolution_trigger(
         input_requirements=("units", "placements", "observation"),
         output_guarantees=("evolution_decisions",),
     )
+    module.requires_contracts = frozenset()
+    module.produces_contracts = frozenset()
+    return module
 
 
 class OutcomeConditionedEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
@@ -191,7 +199,7 @@ def compose_new_write_evolution_trigger(
     readiness are separate signals; allowed target layers stay in the gate.
     """
 
-    return compose_evolution_trigger(
+    module = compose_evolution_trigger(
         name=name,
         signal_providers=(
             UnitTypeSignal(expected_unit_type=expected_unit_type, signal_name="unit_type_ready"),
@@ -209,6 +217,9 @@ def compose_new_write_evolution_trigger(
         input_requirements=("units", "placements"),
         output_guarantees=("evolution_decisions",),
     )
+    module.requires_contracts = frozenset({UNIT_PARTITION_KEY_CONTRACT})
+    module.produces_contracts = frozenset()
+    return module
 
 
 class NewWriteEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
@@ -227,6 +238,7 @@ class NewWriteEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
         input_requirements=("units", "placements"),
         output_guarantees=("evolution_decisions",),
     )
+    requires_contracts = frozenset({UNIT_PARTITION_KEY_CONTRACT})
 
     def __init__(
         self,
@@ -298,7 +310,7 @@ def compose_graph_neighbor_evolution_trigger(
         gates.append(GraphLayerGate(layer=layer))
     gate: Gate = AllGate(tuple(gates)) if gates else AlwaysOpenGate()
 
-    return compose_evolution_trigger(
+    module = compose_evolution_trigger(
         name=name,
         signal_providers=tuple(signal_providers),
         scorer=IdentityScorer(source="neighbor_count"),
@@ -307,6 +319,12 @@ def compose_graph_neighbor_evolution_trigger(
         input_requirements=("units", "placements"),
         output_guarantees=("evolution_decisions",),
     )
+    required_contracts = {TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT}
+    if require_embedding:
+        required_contracts.add(UNIT_EMBEDDING_CONTRACT)
+    module.requires_contracts = frozenset(required_contracts)
+    module.produces_contracts = frozenset()
+    return module
 
 
 class NeighborExistsEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
@@ -330,6 +348,7 @@ class NeighborExistsEvolutionTrigger(_TriggerFamilyEvolutionAdapter):
         store_requirements=("shape:Graph", "index:graph", "index:vector"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:vector"),
     )
+    requires_contracts = frozenset({UNIT_EMBEDDING_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT})
 
     def __init__(
         self,

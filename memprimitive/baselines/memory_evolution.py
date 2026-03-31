@@ -7,6 +7,13 @@ import json
 from math import sqrt
 from typing import Any, Final
 
+from ..contracts import (
+    RECORD_GRAPH_LINKS_CONTRACT,
+    RECORD_NOTE_PAYLOAD_CONTRACT,
+    RECORD_REFLECTION_PAYLOAD_CONTRACT,
+    TOPOLOGY_GRAPH_LAYER_CONTRACT,
+    TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
+)
 from ..core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet
 from ..interfaces import MemoryEvolutionModule
 
@@ -370,6 +377,8 @@ class GraphLinkEvolution(MemoryEvolutionModule):
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
         side_effects=("modify_store", "rewrite_records"),
     )
+    requires_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
 
     def __init__(
         self,
@@ -561,6 +570,8 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
         side_effects=("modify_store", "rewrite_records"),
     )
+    requires_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
 
     def __init__(self, *, target_layer: str = "knowledge_graph", rewrite_metadata: bool = False) -> None:
         self.target_layer = target_layer
@@ -655,6 +666,8 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
         side_effects=("modify_store", "rewrite_records"),
     )
+    requires_contracts = frozenset({RECORD_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, RECORD_NOTE_PAYLOAD_CONTRACT})
 
     def __init__(
         self,
@@ -826,6 +839,8 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
         side_effects=("modify_store", "rewrite_records"),
     )
+    requires_contracts = frozenset({RECORD_NOTE_PAYLOAD_CONTRACT, RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_NOTE_PAYLOAD_CONTRACT})
 
     def __init__(
         self,
@@ -996,6 +1011,7 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
         output_guarantees=("trace.memory_evolution.effects",),
         side_effects=("modify_store", "append_records"),
     )
+    produces_contracts = frozenset({RECORD_REFLECTION_PAYLOAD_CONTRACT})
 
     def __init__(
         self,

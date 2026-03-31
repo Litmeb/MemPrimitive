@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
+from .contracts import normalize_contracts
 from .core import MemoryStore, ModuleSpec, Packet
 from .interfaces import (
     EvolutionTriggerModule,
@@ -62,6 +63,20 @@ class _DispatchMixin:
 
     def iter_child_modules(self) -> tuple[PrimitiveModule, ...]:
         return self.modules
+
+    def get_requires_contracts(self) -> frozenset[str]:
+        return normalize_contracts(
+            contract
+            for module in self.modules
+            for contract in module.get_requires_contracts()
+        )
+
+    def get_produces_contracts(self) -> frozenset[str]:
+        return normalize_contracts(
+            contract
+            for module in self.modules
+            for contract in module.get_produces_contracts()
+        )
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         snapshot = deepcopy(packet)
