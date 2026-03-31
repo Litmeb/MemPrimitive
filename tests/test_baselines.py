@@ -895,7 +895,7 @@ def test_readout_on_empty_retrieval_returns_valid_empty_output() -> None:
     assert packet_out.readout.source_ids == []
 
 
-def test_retrieval_prefers_keyword_matches_when_available() -> None:
+def test_retrieval_returns_latest_records_first_even_when_query_matches_older_records() -> None:
     from memprimitive.baselines import RecencyRetrieval
 
     store = MemoryStore()
@@ -906,10 +906,13 @@ def test_retrieval_prefers_keyword_matches_when_available() -> None:
 
     assert packet_out.retrieved is not None
     assert len(packet_out.retrieved.items) == 2
-    assert all("alice" in record.text.casefold() for record in packet_out.retrieved.items)
+    assert [record.text for record in packet_out.retrieved.items] == [
+        "Alice studies graphs",
+        "Bob prefers coffee",
+    ]
 
 
-def test_retrieval_returns_latest_records_first_when_falling_back_to_recency() -> None:
+def test_retrieval_returns_latest_records_first_regardless_of_query_text() -> None:
     from memprimitive.baselines import RecencyRetrieval
 
     store = MemoryStore()
