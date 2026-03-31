@@ -322,6 +322,7 @@ memory primitive 之间并非完全自由组合。
 
 - `memprimitive/baselines/README.md`
   说明阶段一 baseline 代码如何按 primitive slot 拆分到多个 `.py` 文件、`__init__.py` 与 `simple.py` 的导出关系，以及扩展新实现时的约定。
+  当前 `RecencyRetrieval` 语义已固定为“直接返回最新的 top-k 记录”，不再根据 query token 先做文本过滤。
   当前 trigger-family baseline 已覆盖 metadata-gated write、key-ready write、outcome-conditioned evolution trigger 与 new-write local-maintenance trigger 这类非 graph motif，可直接用稳定类名和 builder 表达 TiM、Reflexion、MemGPT 风格触发语义。
   同时，Reflexion-like back-half motif 现在也已有通用 baseline：`PlacementWithoutAppendOrganization`、`ReflectionGenerationEvolution`、`BufferRetrieval`、`PromptContextReadout`，classic Reflexion wrapper 直接复用这些 slot-level 实现。
 

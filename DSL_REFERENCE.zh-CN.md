@@ -788,7 +788,7 @@ ReflectionGenerationEvolution(target_layer="reflection_memory", memory_size=3)
 
 #### `RecencyRetrieval`
 
-- 功能：优先按 query token 过滤，否则按 recency 取最近记录。
+- 功能：直接按 recency 取最新的 `top_k` 条记录，不使用 query token 过滤。
 - 参数：
   - `top_k`
   - `layer`

@@ -145,6 +145,7 @@ The baseline layer is broad, not trivial. Per [memprimitive/baselines/README.md]
 - Several organization modules, including append, conditional routing, and graph append.
 - Multiple evolution implementations.
 - Multiple retrieval implementations, including recency, keyword count, BM25, tag/entity retrieval, embedding similarity, and layer-aware retrieval.
+- `RecencyRetrieval` now has a stricter baseline meaning: it always returns the latest `top_k` records in recency order and no longer performs query-token filtering before fallback. Query-aware lexical behavior remains in dedicated retrieval modules such as `KeywordCountRetrieval`, `BM25Retrieval`, `TagRetrieval`, and `EntityRetrieval`.
 - Multiple readout formats.
 - Baseline registry/auto-discovery for slot implementations.
 

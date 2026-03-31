@@ -104,17 +104,17 @@ def _score_graph_seed(query_text: str, record) -> float:
 
 
 class RecencyRetrieval(RetrievalModule):
-    """Retrieve up to ``top_k`` records: keyword filter when possible, else by recency.
+    """Retrieve up to ``top_k`` latest records by recency only.
 
     Constructor: ``top_k`` must be a positive integer. ``layer`` selects
     ``store.iter_records(layer)``; ``None`` means all layers (order follows
     ``MemoryStore.iter_records``).
 
-    ``run`` requires ``packet.query``. Tokenizes query text on whitespace; if any
-    token matches substring-wise in a record, keeps only matches (order: newest
-    first among candidates); otherwise takes the ``top_k`` newest records overall.
-    Does not mutate the store. Populates ``packet.retrieved`` and score dicts
-    (rank/strategy, not dense similarity scores).
+    ``run`` requires ``packet.query``. Returns the ``top_k`` newest records from
+    the selected layer scope. Query text is accepted for interface consistency
+    but does not affect ranking. Does not mutate the store. Populates
+    ``packet.retrieved`` and score dicts (rank/strategy, not dense similarity
+    scores).
     """
 
     spec = ModuleSpec(
@@ -135,27 +135,13 @@ class RecencyRetrieval(RetrievalModule):
             raise ValueError("RecencyRetrieval requires packet.query.")
 
         all_records = store.iter_records(self.layer)
-        query_tokens = _query_tokens(packet.query.text)
-
         ordered = list(reversed(all_records))
-        filtered_records = ordered
-        keyword_mode = False
-        if query_tokens:
-            matching_records = [
-                record
-                for record in ordered
-                if any(token in record.text.casefold() for token in query_tokens)
-            ]
-            if matching_records:
-                filtered_records = matching_records
-                keyword_mode = True
-
-        selected_records = filtered_records[: self.top_k]
+        selected_records = ordered[: self.top_k]
         scores = [
             {
                 "record_id": record.record_id,
                 "rank": rank,
-                "strategy": "keyword+recency" if keyword_mode else "recency",
+                "strategy": "recency",
             }
             for rank, record in enumerate(selected_records, start=1)
         ]
@@ -165,7 +151,6 @@ class RecencyRetrieval(RetrievalModule):
             trace={
                 "module": self.spec.name,
                 "top_k": self.top_k,
-                "matched_by_keyword": keyword_mode,
                 "candidate_count": len(all_records),
             },
         )
