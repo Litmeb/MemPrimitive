@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 from typing import Final
 
+from ..contracts import UNIT_NOTE_PAYLOAD_CONTRACT, UNIT_PARTITION_KEY_CONTRACT
 from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import WriteTriggerModule
 
@@ -124,7 +125,7 @@ def compose_metadata_gated_write_trigger(
     open gate -> threshold policy``.
     """
 
-    return compose_write_trigger(
+    module = compose_write_trigger(
         name=name,
         signal_providers=(
             UnitTypeSignal(expected_unit_type=expected_unit_type, signal_name="unit_type_ready"),
@@ -141,6 +142,9 @@ def compose_metadata_gated_write_trigger(
         input_requirements=("units",),
         output_guarantees=("decisions",),
     )
+    module.requires_contracts = frozenset()
+    module.produces_contracts = frozenset()
+    return module
 
 
 class MetadataGatedWriteTrigger(_TriggerFamilyWriteAdapter):
@@ -211,7 +215,7 @@ def compose_key_ready_write_trigger(
         )
         scorer = MinScorer(sources=("unit_type_ready", "key_ready"))
 
-    return compose_write_trigger(
+    module = compose_write_trigger(
         name=name,
         signal_providers=tuple(signal_providers),
         scorer=scorer,
@@ -220,6 +224,9 @@ def compose_key_ready_write_trigger(
         input_requirements=("units",),
         output_guarantees=("decisions",),
     )
+    module.requires_contracts = frozenset({UNIT_PARTITION_KEY_CONTRACT})
+    module.produces_contracts = frozenset()
+    return module
 
 
 class KeyReadyWriteTrigger(_TriggerFamilyWriteAdapter):
@@ -239,6 +246,7 @@ class KeyReadyWriteTrigger(_TriggerFamilyWriteAdapter):
         input_requirements=("units",),
         output_guarantees=("decisions",),
     )
+    requires_contracts = frozenset({UNIT_PARTITION_KEY_CONTRACT})
 
     def __init__(
         self,
@@ -277,6 +285,7 @@ class LLMJudgedWriteTrigger(WriteTriggerModule):
         input_requirements=("units",),
         output_guarantees=("decisions",),
     )
+    requires_contracts = frozenset({UNIT_NOTE_PAYLOAD_CONTRACT})
 
     def __init__(
         self,

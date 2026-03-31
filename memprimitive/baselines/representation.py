@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
+from ..contracts import (
+    UNIT_EMBEDDING_CONTRACT,
+    UNIT_ENTITIES_CONTRACT,
+    UNIT_NOTE_PAYLOAD_CONTRACT,
+    UNIT_TAGS_CONTRACT,
+    normalize_contracts,
+)
 from ..core import MemoryStore, MemoryUnit, ModuleSpec, Packet, _representation_summary_from_unit
 from ..interfaces import RepresentationModule
 
@@ -104,6 +111,7 @@ class BasicRepresentation(RepresentationModule):
         ),
     )
     _embedding_cache: ClassVar[dict[str, SentenceTransformer]] = {}
+    requires_contracts = frozenset()
 
     def __init__(
         self,
@@ -129,6 +137,14 @@ class BasicRepresentation(RepresentationModule):
         self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
         self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
         self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
+        produces: list[str] = []
+        if "embedding" in self.elements:
+            produces.append(UNIT_EMBEDDING_CONTRACT)
+        if "entities" in self.elements:
+            produces.append(UNIT_ENTITIES_CONTRACT)
+        if "tags" in self.elements:
+            produces.append(UNIT_TAGS_CONTRACT)
+        self.produces_contracts = normalize_contracts(produces)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
@@ -502,6 +518,9 @@ class KeywordRepresentation(BasicRepresentation):
             base_url=base_url,
             model=model,
         )
+        self.produces_contracts = normalize_contracts(
+            {*self.get_produces_contracts(), UNIT_TAGS_CONTRACT}
+        )
 
 
 class SemanticFieldEnrichmentRepresentation(RepresentationModule):
@@ -522,6 +541,8 @@ class SemanticFieldEnrichmentRepresentation(RepresentationModule):
         input_requirements=("units",),
         output_guarantees=("units.metadata.note", "units.metadata.representation"),
     )
+    requires_contracts = frozenset()
+    produces_contracts = frozenset({UNIT_NOTE_PAYLOAD_CONTRACT})
 
     def __init__(
         self,
@@ -622,6 +643,8 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
         input_requirements=("units",),
         output_guarantees=("units.embedding", "units.metadata.representation"),
     )
+    requires_contracts = frozenset({UNIT_NOTE_PAYLOAD_CONTRACT})
+    produces_contracts = frozenset({UNIT_EMBEDDING_CONTRACT, UNIT_NOTE_PAYLOAD_CONTRACT})
 
     def __init__(
         self,

@@ -1,5 +1,17 @@
 import pytest
 
+from memprimitive import IncompatibleCompositionError
+from memprimitive.contracts import (
+    RECORD_GRAPH_LINKS_CONTRACT,
+    RECORD_NOTE_PAYLOAD_CONTRACT,
+    TOPOLOGY_GRAPH_LAYER_CONTRACT,
+    TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
+    TOPOLOGY_TAG_INDEX_CONTRACT,
+    TOPOLOGY_VECTOR_INDEX_CONTRACT,
+    UNIT_EMBEDDING_CONTRACT,
+    UNIT_NOTE_PAYLOAD_CONTRACT,
+    UNIT_TAGS_CONTRACT,
+)
 from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Observation, Query, StoreLayerSpec, StoreTopology
 
 
@@ -210,3 +222,123 @@ def test_memory_record_from_unit_carries_embedding_vector_and_representation_dim
     assert record.metadata["representation"]["normalized_text"] == "alice likes tea."
     assert record.metadata["representation"]["entities"] == ["Alice"]
     assert record.metadata["representation"]["embedding"] == {"dim": 3}
+
+
+def test_memory_store_check_passes_without_registered_modules() -> None:
+    store = MemoryStore()
+
+    missing = store.check()
+
+    assert missing == frozenset()
+    assert store.required_contracts == frozenset()
+    assert TOPOLOGY_GRAPH_LAYER_CONTRACT not in store.produced_contracts
+
+
+def test_memory_store_check_reports_missing_contracts() -> None:
+    store = MemoryStore()
+    store.register_module_contracts(
+        slot="retrieval",
+        module_name="graph_neighbor_retrieval",
+        requires_contracts=("record.graph_links", "topology.graph_layer"),
+    )
+
+    with pytest.raises(IncompatibleCompositionError, match="record.graph_links"):
+        store.check()
+
+
+def test_memory_store_topology_contracts_surface_declared_capabilities() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default", indices=("keyword",)),
+                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "vector", "tag")),
+            ]
+        )
+    )
+
+    assert TOPOLOGY_GRAPH_LAYER_CONTRACT in store.topology_contracts
+    assert TOPOLOGY_VECTOR_INDEX_CONTRACT in store.topology_contracts
+    assert TOPOLOGY_TAG_INDEX_CONTRACT in store.topology_contracts
+    assert TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT in store.topology_contracts
+
+
+@pytest.mark.parametrize(
+    ("requires_contracts", "produces_contracts", "expected_missing"),
+    (
+        pytest.param(
+            (UNIT_EMBEDDING_CONTRACT,),
+            (),
+            {UNIT_EMBEDDING_CONTRACT},
+            id="missing-unit-embedding",
+        ),
+        pytest.param(
+            (UNIT_TAGS_CONTRACT, TOPOLOGY_TAG_INDEX_CONTRACT),
+            (),
+            {UNIT_TAGS_CONTRACT, TOPOLOGY_TAG_INDEX_CONTRACT},
+            id="missing-tags-and-tag-index",
+        ),
+        pytest.param(
+            (UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT),
+            (),
+            {UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT},
+            id="missing-note-payload-and-graph-vector-layer",
+        ),
+        pytest.param(
+            (RECORD_NOTE_PAYLOAD_CONTRACT, RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT),
+            (RECORD_NOTE_PAYLOAD_CONTRACT,),
+            {RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT},
+            id="partial-production-still-missing-linked-graph-contracts",
+        ),
+    ),
+)
+def test_memory_store_check_rejects_batched_invalid_contract_sets(
+    requires_contracts: tuple[str, ...],
+    produces_contracts: tuple[str, ...],
+    expected_missing: set[str],
+) -> None:
+    store = MemoryStore()
+    store.register_module_contracts(
+        slot="demo",
+        module_name="invalid_demo_module",
+        requires_contracts=requires_contracts,
+        produces_contracts=produces_contracts,
+    )
+
+    with pytest.raises(IncompatibleCompositionError) as excinfo:
+        store.check()
+
+    contracts_meta = store.metadata["composition_contracts"]
+    assert store.required_contracts == frozenset(requires_contracts)
+    assert frozenset(contracts_meta["missing"]) == frozenset(expected_missing)
+    for contract in sorted(expected_missing):
+        assert contract in str(excinfo.value)
+
+
+def test_memory_store_check_accepts_contracts_jointly_satisfied_by_modules_and_topology() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "vector")),
+            ]
+        )
+    )
+    store.register_module_contracts(
+        slot="representation",
+        module_name="semantic_field_enrichment_representation",
+        produces_contracts=(UNIT_NOTE_PAYLOAD_CONTRACT,),
+    )
+    store.register_module_contracts(
+        slot="organization",
+        module_name="graph_append_link_ready_organization",
+        requires_contracts=(UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT),
+        produces_contracts=(RECORD_NOTE_PAYLOAD_CONTRACT, RECORD_GRAPH_LINKS_CONTRACT),
+    )
+    store.register_module_contracts(
+        slot="retrieval",
+        module_name="vector_graph_seed_and_expand_retrieval",
+        requires_contracts=(RECORD_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT),
+    )
+
+    assert store.check() == frozenset()
+    assert store.metadata["composition_contracts"]["missing"] == []

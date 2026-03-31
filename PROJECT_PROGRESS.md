@@ -31,6 +31,16 @@ Based on the repository docs and code, the target is not merely "build a memory 
 
 The clearest statement of this appears in [README.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/README.md), with supporting detail in [DSLIO.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/DSLIO.md), [DSLgrammar.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/DSLgrammar.md), and [Primitives.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/Primitives.md).
 
+### Current near-term emphasis
+
+The current planning emphasis has now shifted from "show a few classic reconstructions" toward "push literature re-expression coverage as far as possible." The best current reading from the updated README is:
+
+- expand the literature pool from a handful of classic anchor papers to roughly 40 agent-memory works across styles
+- make a credible claim that about one quarter of that pool can be **fully re-expressed** inside the shared framework
+- treat module-family expansion as a first-class requirement for that goal rather than as optional cleanup, because incomplete coverage now directly signals missing primitives or missing composition boundaries
+
+This matters because the project's present success criterion is not only whether the DSL/runtime can explain a few canonical systems, but whether it can absorb a much broader slice of prior work without collapsing back into ad hoc paper-specific descriptions.
+
 ## What has already been done
 
 ### 0. Chinese documentation pass now matches the executable runtime more closely
@@ -73,6 +83,9 @@ The notebook currently turns the showcase flow into runnable cells covering:
 - topology-backed store declaration
 - trigger-family composition
 - dispatch-based multi-view memory organization
+- an embedding-based RAG baseline reproduction
+- graph-oriented memory-evolution demonstrations
+- `store.check()` failure demonstrations for invalid composition contracts
 - pointers to the larger runnable demonstrations
 
 Practical impact:
@@ -98,7 +111,9 @@ This remains one of the most important design areas because it turns the design 
 - `StoreTopology` and `StoreLayerSpec` encode layers, shapes, indices, capacities, and settings.
 - `ModuleSpec` carries requirement/guarantee metadata.
 - `MemoryPipeline` still validates primitive abstract types and `ModuleSpec.slot` alignment at construction time.
-- The earlier baseline-side eager store/layer compatibility precheck in `MemoryPipeline` has now been removed in preparation for a new `MemoryStore.check()`-style composition-contract pass.
+- The earlier baseline-side eager store/layer compatibility precheck in `MemoryPipeline` has now been replaced on the baseline/runtime side by an explicit `MemoryStore.check()` composition-contract pass.
+- Baseline/runtime modules now expose `requires_contracts` / `produces_contracts`; `MemoryPipeline` registers those contracts onto the shared `MemoryStore`, and `MemoryStore.check()` verifies that all required contracts are produced somewhere across the registered pipelines plus topology-provided capabilities.
+- Topology-backed contracts are now surfaced directly from `MemoryStore` (for example graph/vector/keyword/tag capabilities and graph+vector co-presence on one layer), while classic-family eager `validate_store()` checks remain intentionally untouched.
 - Classic-family compatibility checks still exist in `memprimitive/classic_modules/*` and were intentionally left untouched during this cleanup.
 
 This is evidence that the project has already moved beyond prose taxonomy into constrained composition, but the search-facing legality layer is being reworked away from the older hard-coded topology precheck path.
@@ -328,6 +343,8 @@ The test suite indicates meaningful implementation maturity:
 - baseline primitive tests
 - classic family tests
 - classic composition tests
+- pipeline/store composition-contract negative tests now also cover a broader batch of obviously invalid pipelines instead of only a few single-point examples; `tests/test_pipeline.py` includes a sparse-pipeline harness that programmatically checks graph / graph-note / embedding / entity / tag / layered-retrieval consumer modules and several stacked invalid pipeline skeletons all fail `MemoryStore.check()` with the expected missing-contract set
+- `tests/test_core.py` now complements that with lower-level batched contract-set checks over `MemoryStore.register_module_contracts()` directly, plus explicit topology-contract surfacing tests and a positive case where module-produced contracts combine with topology-provided contracts to satisfy a graph-note retrieval path
 
 This strongly suggests the repository is already in a serious prototyping phase rather than an idea-only phase.
 
@@ -422,12 +439,14 @@ The project seems to be in this phase:
 2. The stage-1 executable substrate is real and fairly strong.
 3. Baseline primitive coverage is already broad enough to support composition experiments.
 4. Several classic methods have been re-expressed as module families.
-5. Constraint-aware search has been recognized as the right direction.
-6. The missing jump is from "composable runtime + documented design space" to "fully explicit DSL + safe search + evaluation + motif mining".
+5. The immediate push is now to scale re-expression coverage from classic exemplars to a broader literature set of roughly 40 papers.
+6. Hitting that target likely requires continuing to expand module families so that roughly one quarter of the surveyed methods can be defended as fully re-expressed rather than only loosely mapped.
+7. Constraint-aware search is still the right later direction, but it is no longer the only near-term framing pressure.
+8. The missing jump is from "composable runtime + documented design space" to "broad literature coverage + fuller re-expression + fully explicit DSL + safe search + evaluation + motif mining".
 
 Short version:
 
-The project has already built the foundation and a meaningful prototype framework. It has not yet completed the full research program it describes in the README.
+The project has already built the foundation and a meaningful prototype framework. The immediate challenge is now to convert that foundation into broader prior-work coverage and stronger re-expression claims before the later search/evaluation agenda is complete.
 
 ## Highest-priority remaining work
 
@@ -532,3 +551,10 @@ At the time of writing, the worktree already contained unrelated in-progress cha
 - `tests/test_baselines.py`
 
 and several untracked files under `A-mem/` plus new demonstration scripts. Future agents should treat those as existing work and avoid overwriting them casually.
+
+## TODO
+
+### remove the heuristics in this repo. Replace them with real usable method (like llm or something)
+
+- triple extraction in representation
+- edge linking method in graph topology
