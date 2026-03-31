@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, ClassVar, Final
 
 from dotenv import load_dotenv
-from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 from ..contracts import (
@@ -373,17 +372,16 @@ class BasicRepresentation(RepresentationModule):
                 "(or pass api_key, base_url, model to the constructor). "
                 "Heuristic fallback is not supported."
             )
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-        response = client.chat.completions.create(
+        from ..utils._runtime import ClassicRuntime
+
+        runtime = ClassicRuntime(
+            api_key=self.api_key,
+            base_url=self.base_url,
             model=self.model,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            embedding_model=self.embedding_model,
         )
-        content = response.choices[0].message.content or ""
-        return content.strip()
+        runtime.require_llm(capability=f"BasicRepresentation element {element!r}")
+        return runtime.text(system=system, user=user, temperature=0.0).strip()
 
     def _build_summary(
         self,

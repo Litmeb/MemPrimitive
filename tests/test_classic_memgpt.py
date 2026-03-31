@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from memprimitive.utils import _runtime
 from memprimitive.classic_modules.memgpt import (
     MEMGPT_ARCHIVAL_LAYER,
@@ -16,20 +18,44 @@ from memprimitive.example.classics.memgpt import DEFAULT_WORKING_SUMMARY, MemGPT
 
 
 class FakeRuntime:
-    def __init__(self, responses: list[dict] | None = None) -> None:
+    def __init__(self, responses: list[str] | None = None) -> None:
         self.responses = list([] if responses is None else responses)
-        self.chat_calls: list[dict] = []
+        self.agent_calls: list[dict] = []
         self.summary_calls: list[dict] = []
         self.embed_calls: list[str] = []
 
-    def chat_with_tools(self, *, system: str, user: str, tools: list[dict], temperature: float = 0.0):
-        self.chat_calls.append({"system": system, "user": user, "tools": tools, "temperature": temperature})
-        if not self.responses:
-            return {
-                "assistant_message": "Acknowledged.",
-                "tool_calls": [],
+    def run_agent(
+        self,
+        *,
+        name: str,
+        instructions: str,
+        input_text: str,
+        temperature: float = 0.0,
+        tools: list[object] | None = None,
+        max_turns: int = 10,
+    ) -> str:
+        self.agent_calls.append(
+            {
+                "name": name,
+                "instructions": instructions,
+                "input_text": input_text,
+                "temperature": temperature,
+                "tools": tools,
+                "max_turns": max_turns,
             }
-        return self.responses.pop(0)
+        )
+        if not self.responses:
+            return "Acknowledged."
+        response = self.responses.pop(0)
+        if response.startswith("TOOL:"):
+            _, tool_name, payload = response.split(":", 2)
+            tool_map = {tool.name: tool for tool in tools or []}
+            tool_context = type("ToolContextStub", (), {"tool_name": tool_name})()
+            asyncio.run(tool_map[tool_name].on_invoke_tool(tool_context, payload))
+            if not self.responses:
+                return "Acknowledged."
+            return self.responses.pop(0)
+        return response
 
     def embed(self, text: str) -> list[float]:
         self.embed_calls.append(text)
@@ -85,14 +111,7 @@ def test_memgpt_agent_boots_five_region_store_and_required_blocks() -> None:
 
 
 def test_memgpt_run_turn_appends_user_and_assistant_events_to_recall_history() -> None:
-    fake_runtime = FakeRuntime(
-        responses=[
-            {
-                "assistant_message": "I will keep that in mind.",
-                "tool_calls": [],
-            }
-        ]
-    )
+    fake_runtime = FakeRuntime(responses=["I will keep that in mind."])
     _use_fake_runtime(fake_runtime)
     agent = MemGPTAgent(queue_token_budget=50)
 
@@ -109,14 +128,8 @@ def test_memgpt_run_turn_appends_user_and_assistant_events_to_recall_history() -
 def test_memgpt_overflow_emits_warning_then_flushes_queue_into_recursive_summary() -> None:
     fake_runtime = FakeRuntime(
         responses=[
-            {
-                "assistant_message": "First reply with several tokens to fill the queue quickly.",
-                "tool_calls": [],
-            },
-            {
-                "assistant_message": "Second reply after the warning.",
-                "tool_calls": [],
-            },
+            "First reply with several tokens to fill the queue quickly.",
+            "Second reply after the warning.",
         ]
     )
     _use_fake_runtime(fake_runtime)
@@ -198,19 +211,8 @@ def test_memgpt_core_memory_append_and_replace_update_keyed_blocks() -> None:
 def test_memgpt_heartbeat_loop_runs_tool_then_followup_model_call() -> None:
     fake_runtime = FakeRuntime(
         responses=[
-            {
-                "assistant_message": "",
-                "tool_calls": [
-                    {
-                        "name": "archival_memory_insert",
-                        "arguments": {"memory": "The project codename is Aurora."},
-                    }
-                ],
-            },
-            {
-                "assistant_message": "Stored the codename in archival memory.",
-                "tool_calls": [],
-            },
+            "TOOL:archival_memory_insert:{\"memory\": \"The project codename is Aurora.\"}",
+            "Stored the codename in archival memory.",
         ]
     )
     _use_fake_runtime(fake_runtime)
@@ -222,25 +224,14 @@ def test_memgpt_heartbeat_loop_runs_tool_then_followup_model_call() -> None:
     recall_event_types = [record.metadata["memgpt"]["event_type"] for record in agent.store.iter_records(MEMGPT_RECALL_LAYER)]
     assert "tool_result" in recall_event_types
     assert agent.store.count(MEMGPT_ARCHIVAL_LAYER) == 1
-    assert len(fake_runtime.chat_calls) == 2
+    assert len(fake_runtime.agent_calls) == 1
 
 
 def test_memgpt_main_runs_demo_path(capsys) -> None:
     fake_runtime = FakeRuntime(
         responses=[
-            {
-                "assistant_message": "",
-                "tool_calls": [
-                    {
-                        "name": "archival_memory_insert",
-                        "arguments": {"memory": "The user prefers concise status updates."},
-                    }
-                ],
-            },
-            {
-                "assistant_message": "I saved the durable preference.",
-                "tool_calls": [],
-            },
+            "TOOL:archival_memory_insert:{\"memory\": \"The user prefers concise status updates.\"}",
+            "I saved the durable preference.",
         ]
     )
     _use_fake_runtime(fake_runtime)
