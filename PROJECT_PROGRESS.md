@@ -22,6 +22,7 @@ The project is already beyond the concept stage.
 - Chinese-facing documentation has been refreshed and is now much closer to the actual runtime surface.
 - Several classic or near-classic families already have runnable support or decomposition work, including Reflexion, MemGPT, and A-MEM-like paths.
 - Literature coverage work is active. The repo is no longer focused only on a few showcase papers; it is trying to scale toward a broader set of memory papers and judge which are fully re-expressible versus only partially mappable.
+- The runtime migration toward `openai-agents` has now started in executable code: shared LLM/runtime access is no longer centered on raw `openai` chat-completions calls, and the MemGPT classic loop now uses real `openai-agents` function tools plus `Agent + Runner`.
 
 ## Best Current Reading
 
@@ -97,6 +98,12 @@ If continuing the current roadmap, the highest-value next steps are:
 
 - The repo may contain unrelated in-progress changes; do not overwrite them casually.
 - Full test runs can be slow. Prefer targeted tests for the area you changed.
+- `openai-agents` is now an active dependency and should be treated as part of the runtime direction rather than a speculative future option.
+- Current migration state:
+  - `memprimitive/utils/_runtime.py` now routes text / JSON / summarization / reranking calls through `openai-agents`
+  - `memprimitive/example/classics/memgpt.py` no longer hand-rolls tool-call JSON parsing; it uses `openai-agents` tools and keeps only MemPrimitive-specific memory logic
+  - primitive-layer LLM calls have been further unified: `memprimitive/baselines/representation.py` no longer creates a raw `OpenAI(...)` client for `summary` / `description`, and now uses the shared runtime path as well
+  - targeted regressions for the migrated surface passed: `tests/test_classic_memgpt.py`, `tests/test_classic_amem.py`, and `tests/test_baselines.py` for a total of 129 passing tests in that focused run
 
 ## TODO
 

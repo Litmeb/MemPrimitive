@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agents import Agent, AsyncOpenAI, ModelSettings, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
 from dotenv import load_dotenv
-from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 try:
@@ -57,6 +57,8 @@ class ClassicRuntime:
             "MEMPRIMITIVE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
         )
+        # Non-OpenAI-compatible providers often do not support the default tracing path.
+        set_tracing_disabled(disabled=True)
 
     def require_llm(self, *, capability: str) -> None:
         if self.api_key and self.base_url and self.model:
@@ -67,9 +69,32 @@ class ClassicRuntime:
             "Heuristic fallback is not supported."
         )
 
-    def _client(self) -> OpenAI:
+    def _client(self) -> AsyncOpenAI:
         self.require_llm(capability="Classic runtime LLM access")
-        return OpenAI(api_key=self.api_key, base_url=self.base_url)
+        return AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _model(self) -> OpenAIChatCompletionsModel:
+        return OpenAIChatCompletionsModel(model=self.model, openai_client=self._client())
+
+    def run_agent(
+        self,
+        *,
+        name: str,
+        instructions: str,
+        input_text: str,
+        temperature: float = 0.0,
+        tools: list[Any] | None = None,
+        max_turns: int = 10,
+    ) -> Any:
+        agent = Agent(
+            name=name,
+            instructions=instructions,
+            model=self._model(),
+            model_settings=ModelSettings(temperature=temperature),
+            tools=[] if tools is None else list(tools),
+        )
+        result = Runner.run_sync(agent, input=input_text, max_turns=max_turns)
+        return result.final_output
 
     def embed(self, text: str) -> list[float]:
         model = self._embedding_cache.get(self.embedding_model)
@@ -79,15 +104,14 @@ class ClassicRuntime:
         return [float(value) for value in model.encode(text, normalize_embeddings=True).tolist()]
 
     def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
-        response = self._client().chat.completions.create(
-            model=self.model,
+        output = self.run_agent(
+            name="MemPrimitiveTextAgent",
+            instructions=system,
+            input_text=user,
             temperature=temperature,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            max_turns=1,
         )
-        return (response.choices[0].message.content or "").strip()
+        return str(output or "").strip()
 
     def json(self, *, system: str, user: str) -> Any:
         content = self.text(
@@ -96,48 +120,6 @@ class ClassicRuntime:
             temperature=0.0,
         )
         return _coerce_json(content)
-
-    def chat_with_tools(
-        self,
-        *,
-        system: str,
-        user: str,
-        tools: list[dict[str, Any]],
-        temperature: float = 0.0,
-    ) -> dict[str, Any]:
-        response = self._client().chat.completions.create(
-            model=self.model,
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            tools=tools,
-            tool_choice="auto",
-        )
-        message = response.choices[0].message
-        tool_calls = []
-        for tool_call in message.tool_calls or []:
-            if tool_call.type != "function":
-                continue
-            arguments = tool_call.function.arguments or "{}"
-            try:
-                parsed_arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                parsed_arguments = _coerce_json(arguments)
-            if not isinstance(parsed_arguments, dict):
-                parsed_arguments = {}
-            tool_calls.append(
-                {
-                    "id": tool_call.id,
-                    "name": tool_call.function.name,
-                    "arguments": parsed_arguments,
-                }
-            )
-        return {
-            "assistant_message": (message.content or "").strip(),
-            "tool_calls": tool_calls,
-        }
 
     def count_tokens(self, text: str) -> int:
         cleaned = str(text)

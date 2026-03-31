@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from agents import function_tool
+
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
@@ -49,90 +51,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "Use conversation_search for full episodic recall, archival_memory_search "
     "for explicit long-term memory, archival_memory_insert to store durable "
     "facts, and core_memory_append/core_memory_replace to edit the persona/human "
-    "blocks. Return strict JSON only."
+    "blocks."
 )
 MAX_AGENT_STEPS = 8
-TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "conversation_search",
-            "description": "Search the full episodic recall history using semantic similarity.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "page": {"type": "integer", "minimum": 1},
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "archival_memory_search",
-            "description": "Search explicit archival memory using semantic similarity.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "page": {"type": "integer", "minimum": 1},
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "archival_memory_insert",
-            "description": "Insert a durable fact into archival memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "memory": {"type": "string"},
-                },
-                "required": ["memory"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "core_memory_append",
-            "description": "Append text to one core memory block.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "block": {"type": "string", "enum": list(MEMGPT_REQUIRED_CORE_BLOCKS)},
-                    "value": {"type": "string"},
-                },
-                "required": ["block", "value"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "core_memory_replace",
-            "description": "Replace one core memory block completely.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "block": {"type": "string", "enum": list(MEMGPT_REQUIRED_CORE_BLOCKS)},
-                    "value": {"type": "string"},
-                },
-                "required": ["block", "value"],
-                "additionalProperties": False,
-            },
-        },
-    },
-]
 
 
 def _clean_text(value: Any) -> str:
@@ -311,10 +232,9 @@ class MemGPTAgent:
             self._warning_active = True
 
         final_assistant = ""
+        pending_input = _clean_text(user_text)
         for step_index in range(MAX_AGENT_STEPS):
-            response = self._call_model(step_index=step_index)
-
-            assistant_message = _clean_text(response.get("assistant_message", ""))
+            assistant_message = self._call_model(step_index=step_index, user_input=pending_input)
             if assistant_message:
                 final_assistant = assistant_message
                 self._record_event(
@@ -323,28 +243,23 @@ class MemGPTAgent:
                     source="assistant",
                 )
 
-            tool_calls = self._normalize_tool_calls(response.get("tool_calls", []))
-            for tool_call in tool_calls:
-                result = self.run_tool(tool_call["name"], tool_call["arguments"])
-                self._record_event(
-                    text=json.dumps(result, ensure_ascii=False),
-                    event_type="tool_result",
-                    source="tool",
-                )
-
             if self._queue_over_budget():
                 if self._warning_active:
                     self._flush_conversation_queue()
                     self._warning_active = False
+                    pending_input = "Continue after the memory flush using the updated state."
                 else:
                     self._append_memory_warning()
-                    self._warning_active = True
-                    continue
-            else:
-                self._warning_active = False
-
-            if tool_calls:
+                    if self._queue_over_budget():
+                        self._flush_conversation_queue()
+                        self._warning_active = False
+                        pending_input = "Continue after the memory flush using the updated state."
+                    else:
+                        self._warning_active = True
+                        pending_input = "Continue after the memory warning using the updated state."
                 continue
+
+            self._warning_active = False
             return final_assistant
 
         raise RuntimeError("MemGPTAgent exceeded the maximum agent-loop steps.")
@@ -423,52 +338,72 @@ class MemGPTAgent:
 
         raise ValueError(f"Unsupported MemGPT tool: {tool_name!r}")
 
-    def _call_model(self, *, step_index: int) -> dict[str, Any]:
-        return self._normalize_model_response(
-            self.runtime.chat_with_tools(
-                system=(
-                    "You are the control loop for a MemGPT-style agent. "
-                    "Use function calls when you need memory operations. "
-                    "If no tool is needed, answer directly with plain assistant text."
-                ),
-                user=json.dumps(
-                    {
-                        "step_index": step_index,
-                        "context": self.render_context(),
-                    },
-                    ensure_ascii=False,
-                ),
-                tools=TOOL_SCHEMAS,
-                temperature=0.0,
-            )
+    def _build_tools(self) -> list[Any]:
+        @function_tool(name_override="conversation_search")
+        def conversation_search(query: str, page: int = 1) -> str:
+            """Search the full episodic recall history using semantic similarity."""
+
+            return self._run_tool_for_agent("conversation_search", {"query": query, "page": page})
+
+        @function_tool(name_override="archival_memory_search")
+        def archival_memory_search(query: str, page: int = 1) -> str:
+            """Search explicit archival memory using semantic similarity."""
+
+            return self._run_tool_for_agent("archival_memory_search", {"query": query, "page": page})
+
+        @function_tool(name_override="archival_memory_insert")
+        def archival_memory_insert(memory: str) -> str:
+            """Insert a durable fact into archival memory."""
+
+            return self._run_tool_for_agent("archival_memory_insert", {"memory": memory})
+
+        @function_tool(name_override="core_memory_append")
+        def core_memory_append(block: str, value: str) -> str:
+            """Append text to one core memory block."""
+
+            return self._run_tool_for_agent("core_memory_append", {"block": block, "value": value})
+
+        @function_tool(name_override="core_memory_replace")
+        def core_memory_replace(block: str, value: str) -> str:
+            """Replace one core memory block completely."""
+
+            return self._run_tool_for_agent("core_memory_replace", {"block": block, "value": value})
+
+        return [
+            conversation_search,
+            archival_memory_search,
+            archival_memory_insert,
+            core_memory_append,
+            core_memory_replace,
+        ]
+
+    def _run_tool_for_agent(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        result = self.run_tool(tool_name, arguments)
+        self._record_event(
+            text=json.dumps(result, ensure_ascii=False),
+            event_type="tool_result",
+            source="tool",
         )
+        return json.dumps(result, ensure_ascii=False)
 
-    def _normalize_model_response(self, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise ValueError("MemGPTAgent model response must be a JSON object.")
-        return {
-            "assistant_message": _clean_text(payload.get("assistant_message", "")),
-            "tool_calls": payload.get("tool_calls", []),
-        }
-
-    def _normalize_tool_calls(self, payload: Any) -> list[dict[str, Any]]:
-        if not isinstance(payload, list):
-            return []
-        normalized: list[dict[str, Any]] = []
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            name = _clean_text(item.get("name", ""))
-            if not name:
-                continue
-            arguments = item.get("arguments", {})
-            normalized.append(
-                {
-                    "name": name,
-                    "arguments": dict(arguments) if isinstance(arguments, dict) else {},
-                }
-            )
-        return normalized
+    def _call_model(self, *, step_index: int, user_input: str) -> str:
+        instructions = (
+            "You are the control loop for a MemGPT-style agent.\n"
+            "Use tools whenever memory operations are needed.\n"
+            "If no tool is needed, answer directly.\n"
+            "Keep the final answer concise.\n\n"
+            f"[step_index]\n{step_index}\n\n"
+            f"[memory_state]\n{self.render_context()}\n"
+        )
+        output = self.runtime.run_agent(
+            name="MemGPTController",
+            instructions=instructions,
+            input_text=user_input,
+            tools=self._build_tools(),
+            temperature=0.0,
+            max_turns=MAX_AGENT_STEPS,
+        )
+        return _clean_text(output)
 
     def _record_event(
         self,
