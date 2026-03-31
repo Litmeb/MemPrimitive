@@ -28,6 +28,7 @@ from memprimitive.baselines import (
     GraphAppendOrganization,
     LayerAwareRetrieval,
     RecencyRetrieval,
+    TripleRepresentation,
 )
 
 
@@ -54,7 +55,11 @@ def main() -> None:
     working_writer.ingest(Observation(text="The current task is to explain graph-backed recall.", source="dialogue"))
 
     graph_writer = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags",)),
+        ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         store=store,
     )

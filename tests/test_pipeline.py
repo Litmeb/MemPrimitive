@@ -35,6 +35,7 @@ from memprimitive.baselines import (
     RetrievalOrientedEmbeddingRepresentation,
     SemanticFieldEnrichmentRepresentation,
     TagRetrieval,
+    TripleRepresentation,
     VectorGraphSeedAndExpandRetrieval,
 )
 from memprimitive.baselines.registry import (
@@ -288,7 +289,11 @@ def test_memory_pipeline_accepts_iterable_slot_modules_and_runs_them_in_order() 
         )
     )
     pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags",)),
+        ),
         organization=(
             AppendOrganization(target_layer="working"),
             GraphAppendOrganization(target_layer="knowledge_graph"),
@@ -336,7 +341,11 @@ def test_dispatch_organization_fans_out_same_snapshot_and_keeps_primary_packet()
         )
     )
     pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags",)),
+        ),
         organization=DispatchOrganization(
             (
                 AppendOrganization(target_layer="working"),

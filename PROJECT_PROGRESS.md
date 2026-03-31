@@ -23,6 +23,7 @@ The project is already beyond the concept stage.
 - Several classic or near-classic families already have runnable support or decomposition work, including Reflexion, MemGPT, and A-MEM-like paths.
 - Literature coverage work is active. The repo is no longer focused only on a few showcase papers; it is trying to scale toward a broader set of memory papers and judge which are fully re-expressible versus only partially mappable.
 - The runtime migration toward `openai-agents` has now started in executable code: shared LLM/runtime access is no longer centered on raw `openai` chat-completions calls, and the MemGPT classic loop now uses real `openai-agents` function tools plus `Agent + Runner`.
+- Representation-time triple extraction is no longer heuristic-only: a dedicated `TripleRepresentation` now owns triple extraction with real LLM-backed direct and two-stage modes, and graph-style pipelines have been migrated away from `BasicRepresentation(..., "triple", ...)`.
 
 ## Best Current Reading
 
@@ -103,10 +104,10 @@ If continuing the current roadmap, the highest-value next steps are:
   - `memprimitive/utils/_runtime.py` now routes text / JSON / summarization / reranking calls through `openai-agents`
   - `memprimitive/example/classics/memgpt.py` no longer hand-rolls tool-call JSON parsing; it uses `openai-agents` tools and keeps only MemPrimitive-specific memory logic
   - primitive-layer LLM calls have been further unified: `memprimitive/baselines/representation.py` no longer creates a raw `OpenAI(...)` client for `summary` / `description`, and now uses the shared runtime path as well
+  - triple extraction has been split out of `BasicRepresentation` into dedicated `TripleRepresentation`, with strict structured outputs and direct / two-stage extraction modes
   - targeted regressions for the migrated surface passed: `tests/test_classic_memgpt.py`, `tests/test_classic_amem.py`, and `tests/test_baselines.py` for a total of 129 passing tests in that focused run
 
 ## TODO
 
 - Replace remaining heuristic implementations with more realistic model-backed methods where appropriate.
-- Improve representation-time triple extraction.
 - Improve graph edge linking / graph construction quality.

@@ -20,7 +20,7 @@ if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, StoreLayerSpec, StoreTopology
-from memprimitive.baselines import BasicRepresentation, ConditionalLayerOrganization
+from memprimitive.baselines import BasicRepresentation, ConditionalLayerOrganization, TripleRepresentation
 
 
 def main() -> None:
@@ -39,7 +39,11 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags", "keywords", "summary")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags", "keywords", "summary")),
+        ),
         organization=ConditionalLayerOrganization(
             default_layer="working",
             rules=(
