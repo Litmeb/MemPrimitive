@@ -26,6 +26,7 @@ from memprimitive.baselines import (
     GraphReadout,
     GraphSeedAndExpandRetrieval,
     ThresholdEvolutionTrigger,
+    TripleRepresentation,
 )
 
 
@@ -44,7 +45,11 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     graph_pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags", "keywords")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags", "keywords")),
+        ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         evolution_trigger=ThresholdEvolutionTrigger(threshold=0.5, constant=1.0),
         memory_evolution=GraphNeighborAppendEvolution(target_layer="knowledge_graph", neighbor_limit=2),

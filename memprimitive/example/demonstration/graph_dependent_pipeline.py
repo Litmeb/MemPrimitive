@@ -27,6 +27,7 @@ from memprimitive.baselines import (
     GraphReadout,
     GraphSeedAndExpandRetrieval,
     NeighborExistsEvolutionTrigger,
+    TripleRepresentation,
 )
 
 
@@ -45,7 +46,11 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "triple", "tags", "keywords")),
+        representation=(
+            BasicRepresentation(elements=("text", "embedding")),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags", "keywords")),
+        ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         evolution_trigger=NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2),
         memory_evolution=(

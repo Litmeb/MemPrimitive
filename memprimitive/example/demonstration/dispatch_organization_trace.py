@@ -37,6 +37,7 @@ from memprimitive.baselines import (
     GraphAppendOrganization,
     LayerAwareRetrieval,
     RecencyRetrieval,
+    TripleRepresentation,
 )
 
 
@@ -55,7 +56,11 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags",)),
+        ),
         organization=DispatchOrganization(
             (
                 AppendOrganization(target_layer="working"),

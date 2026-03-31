@@ -85,6 +85,7 @@ class ClassicRuntime:
         temperature: float = 0.0,
         tools: list[Any] | None = None,
         max_turns: int = 10,
+        output_type: type[Any] | None = None,
     ) -> Any:
         agent = Agent(
             name=name,
@@ -92,6 +93,7 @@ class ClassicRuntime:
             model=self._model(),
             model_settings=ModelSettings(temperature=temperature),
             tools=[] if tools is None else list(tools),
+            output_type=output_type,
         )
         result = Runner.run_sync(agent, input=input_text, max_turns=max_turns)
         return result.final_output

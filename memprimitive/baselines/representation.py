@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Final
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 from ..contracts import (
@@ -35,7 +36,6 @@ from ..utils._trace import copy_trace
 _VALID_ELEMENTS: Final[tuple[str, ...]] = (
     "text",
     "embedding",
-    "triple",
     "kv",
     "entities",
     "tags",
@@ -88,6 +88,43 @@ _STOPWORDS: Final[frozenset[str]] = frozenset(
     }
 )
 _MEMPRIMITIVE_ENV_PATH: Final[Path] = Path(__file__).resolve().parents[1] / ".env"
+
+
+class _TripleRelationship(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+
+
+class _TripleDirectOutput(BaseModel):
+    entities: list[str] = Field(default_factory=list)
+    relationships: list[_TripleRelationship] = Field(default_factory=list)
+
+
+class _TripleEntityOutput(BaseModel):
+    entities: list[str] = Field(default_factory=list)
+
+
+class _TripleRelationshipOutput(BaseModel):
+    relationships: list[_TripleRelationship] = Field(default_factory=list)
+
+
+def _dedupe_non_empty_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+def _normalize_hinted_triples(value: Any) -> list[tuple[str, str, str]]:
+    triples: list[tuple[str, str, str]] = []
+    if not isinstance(value, list):
+        return triples
+    for item in value:
+        if isinstance(item, (list, tuple)) and len(item) == 3:
+            subject = str(item[0]).strip()
+            predicate = str(item[1]).strip()
+            obj = str(item[2]).strip()
+            if subject and predicate and obj:
+                triples.append((subject, predicate, obj))
+    return list(dict.fromkeys(triples))
 
 class BasicRepresentation(RepresentationModule):
     """Build a configurable representation-element set for each unit.
@@ -189,10 +226,6 @@ class BasicRepresentation(RepresentationModule):
         if "embedding" in self.elements:
             embedding = self._embed_text(normalized_text)
             elements.add("embedding")
-        if "triple" in self.elements:
-            triples = self._extract_triples(unit, normalized_text)
-            if triples:
-                elements.add("triple")
         if "kv" in self.elements:
             kv = self._extract_kv(unit, normalized_text)
             if kv:
@@ -271,25 +304,6 @@ class BasicRepresentation(RepresentationModule):
             model = SentenceTransformer(self.embedding_model)
             self._embedding_cache[self.embedding_model] = model
         return [float(value) for value in model.encode(text, normalize_embeddings=True).tolist()]
-
-    def _extract_triples(self, unit: MemoryUnit, text: str) -> list[tuple[str, str, str]]:
-        hinted = unit.metadata.get("triples")
-        if isinstance(hinted, list):
-            triples = []
-            for item in hinted:
-                if isinstance(item, (list, tuple)) and len(item) == 3:
-                    triples.append((str(item[0]), str(item[1]), str(item[2])))
-            if triples:
-                return triples
-
-        triples: list[tuple[str, str, str]] = []
-        for match in _LIKES_PATTERN.finditer(text):
-            subject, predicate, obj = match.groups()
-            triples.append((subject.strip(), predicate.lower().strip(), obj.strip()))
-        for match in _IS_PATTERN.finditer(text):
-            subject, obj = match.groups()
-            triples.append((subject.strip(), "is", obj.strip()))
-        return triples
 
     def _extract_kv(self, unit: MemoryUnit, text: str) -> dict[str, str]:
         hinted = unit.metadata.get("kv")
@@ -480,6 +494,222 @@ class BasicRepresentation(RepresentationModule):
             system="You produce short factual descriptions for memory representations.",
             user=prompt,
         )
+
+
+class TripleRepresentation(RepresentationModule):
+    """LLM-backed triple extraction with direct and two-stage modes."""
+
+    spec = ModuleSpec(
+        name="triple_representation",
+        slot="representation",
+        input_requirements=("units",),
+        output_guarantees=(
+            "units.triples",
+            "units.entities",
+            "units.representation_elements",
+            "units.metadata.representation",
+        ),
+    )
+    requires_contracts = frozenset()
+    produces_contracts = frozenset({UNIT_ENTITIES_CONTRACT})
+    _VALID_METHODS: ClassVar[frozenset[str]] = frozenset({"direct", "two_stage"})
+
+    def __init__(
+        self,
+        *,
+        method: str = "direct",
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        embedding_model: str | None = None,
+    ) -> None:
+        load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
+        env = os.environ
+        normalized_method = str(method).strip().lower()
+        if normalized_method not in self._VALID_METHODS:
+            raise ValueError(f"TripleRepresentation method must be one of: {sorted(self._VALID_METHODS)}.")
+        self.method = normalized_method
+        self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
+        self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
+        self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
+        self.embedding_model = embedding_model or env.get(
+            "MEMPRIMITIVE_EMBEDDING_MODEL",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        )
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("TripleRepresentation requires packet.units.")
+
+        represented_units: list[MemoryUnit] = []
+        per_unit_trace: list[dict[str, Any]] = []
+        for unit in packet.units:
+            represented_unit, extraction_trace = self._represent_unit(unit)
+            represented_units.append(represented_unit)
+            per_unit_trace.append(
+                {
+                    "unit_id": represented_unit.unit_id,
+                    "method": self.method,
+                    **extraction_trace,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["representation"] = {
+            "module": self.spec.name,
+            "method": self.method,
+            "unit_ids": [unit.unit_id for unit in represented_units],
+            "per_unit": per_unit_trace,
+        }
+        return replace(packet, units=represented_units, trace=trace), store
+
+    def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+        normalized_text = unit.text.strip()
+        normalized_casefold = normalized_text.casefold()
+        hinted_triples = _normalize_hinted_triples(unit.metadata.get("triples"))
+        hinted_entities = unit.metadata.get("entities")
+        if hinted_triples:
+            hinted_entity_values = [str(item) for item in hinted_entities] if isinstance(hinted_entities, list) else []
+            entities = _dedupe_non_empty_strings(
+                [
+                    *hinted_entity_values,
+                    *(subject for subject, _, _ in hinted_triples),
+                    *(obj for _, _, obj in hinted_triples),
+                ]
+            )
+            extraction_trace = {
+                "source": "metadata_hint",
+                "entities": entities,
+                "triple_count": len(hinted_triples),
+            }
+            return self._replace_unit(unit, normalized_text, normalized_casefold, entities, hinted_triples), extraction_trace
+
+        runtime = self._runtime()
+        runtime.require_llm(capability=f"TripleRepresentation method {self.method!r}")
+
+        if self.method == "direct":
+            payload = self._extract_direct(runtime=runtime, text=normalized_text)
+            extraction_trace = {"source": "llm_direct", "entities": payload["entities"], "triple_count": len(payload["triples"])}
+        else:
+            payload = self._extract_two_stage(runtime=runtime, text=normalized_text)
+            extraction_trace = {"source": "llm_two_stage", "entities": payload["entities"], "triple_count": len(payload["triples"])}
+        return (
+            self._replace_unit(unit, normalized_text, normalized_casefold, payload["entities"], payload["triples"]),
+            extraction_trace,
+        )
+
+    def _replace_unit(
+        self,
+        unit: MemoryUnit,
+        normalized_text: str,
+        normalized_casefold: str,
+        entities: list[str],
+        triples: list[tuple[str, str, str]],
+    ) -> MemoryUnit:
+        elements = set(unit.representation_elements)
+        if triples:
+            elements.add("triple")
+        if entities:
+            elements.add("entities")
+        represented = replace(
+            unit,
+            text=normalized_text,
+            normalized_text=normalized_casefold,
+            entities=entities,
+            triples=triples,
+            representation_elements=tuple(sorted(elements)),
+        )
+        return replace(
+            represented,
+            metadata={
+                **represented.metadata,
+                "representation": _representation_summary_from_unit(represented),
+            },
+        )
+
+    def _runtime(self):
+        from ..utils._runtime import ClassicRuntime
+
+        return ClassicRuntime(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            embedding_model=self.embedding_model,
+        )
+
+    def _extract_direct(self, *, runtime, text: str) -> dict[str, list[Any]]:
+        output = runtime.run_agent(
+            name="MemPrimitiveTripleDirectAgent",
+            instructions=(
+                "Extract a clean knowledge-graph representation from the text. "
+                "Return only entities explicitly grounded in the text and relationships that can be expressed as triples. "
+                "Each relationship must have non-empty subject, predicate, and object."
+            ),
+            input_text=json.dumps({"text": text}, ensure_ascii=False),
+            temperature=0.0,
+            max_turns=1,
+            output_type=_TripleDirectOutput,
+        )
+        return self._normalize_triple_output(output)
+
+    def _extract_two_stage(self, *, runtime, text: str) -> dict[str, list[Any]]:
+        entity_output = runtime.run_agent(
+            name="MemPrimitiveTripleEntityAgent",
+            instructions=(
+                "Extract the canonical entities explicitly mentioned in the text. "
+                "Return only grounded entities and avoid duplicates."
+            ),
+            input_text=json.dumps({"text": text}, ensure_ascii=False),
+            temperature=0.0,
+            max_turns=1,
+            output_type=_TripleEntityOutput,
+        )
+        entities = _dedupe_non_empty_strings(list(getattr(entity_output, "entities", [])))
+        relationship_output = runtime.run_agent(
+            name="MemPrimitiveTripleRelationAgent",
+            instructions=(
+                "Extract relationships from the text using the provided entities as anchors. "
+                "Only emit relationships that are directly supported by the text and can be written as triples. "
+                "Prefer the provided canonical entity strings for subject/object values."
+            ),
+            input_text=json.dumps({"text": text, "entities": entities}, ensure_ascii=False),
+            temperature=0.0,
+            max_turns=1,
+            output_type=_TripleRelationshipOutput,
+        )
+        normalized = self._normalize_triple_output(relationship_output)
+        normalized["entities"] = _dedupe_non_empty_strings([*entities, *normalized["entities"]])
+        return normalized
+
+    def _normalize_triple_output(self, output: Any) -> dict[str, Any]:
+        if isinstance(output, BaseModel):
+            payload = output.model_dump()
+        elif isinstance(output, dict):
+            payload = dict(output)
+        else:
+            raise ValueError("TripleRepresentation requires structured model output.")
+
+        raw_relationships = payload.get("relationships", [])
+        triples: list[tuple[str, str, str]] = []
+        for item in raw_relationships if isinstance(raw_relationships, list) else []:
+            if not isinstance(item, dict):
+                continue
+            subject = str(item.get("subject", "")).strip()
+            predicate = str(item.get("predicate", "")).strip()
+            obj = str(item.get("object", "")).strip()
+            if subject and predicate and obj:
+                triples.append((subject, predicate, obj))
+        triples = list(dict.fromkeys(triples))
+        raw_entities = payload.get("entities", [])
+        raw_entity_values = [str(item) for item in raw_entities] if isinstance(raw_entities, list) else []
+        entities = _dedupe_non_empty_strings(
+            [
+                *raw_entity_values,
+                *(subject for subject, _, _ in triples),
+                *(obj for _, _, obj in triples),
+            ]
+        )
+        return {"entities": entities, "triples": triples}
 
 
 class KeywordRepresentation(BasicRepresentation):
@@ -748,6 +978,7 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
 BASELINE_SLOT: Final[str] = "representation"
 BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
     BasicRepresentation,
+    TripleRepresentation,
     KeywordRepresentation,
     SemanticFieldEnrichmentRepresentation,
     RetrievalOrientedEmbeddingRepresentation,

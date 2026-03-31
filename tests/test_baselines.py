@@ -114,50 +114,63 @@ def test_representation_preserves_identity_and_adds_normalized_text() -> None:
     assert packet_out.units[0].metadata["representation"]["embedding"]["dim"] == len(packet_out.units[0].embedding)
 
 
-def test_representation_can_build_structured_element_sets() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+def test_basic_representation_rejects_legacy_triple_element() -> None:
+    from memprimitive.baselines import BasicRepresentation
+
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "triple"))
+
+
+def test_triple_representation_direct_uses_real_llm(require_real_classic_runtime: None) -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
 
     unit_packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice likes tea. role: engineer", source="dialogue")),
+        Packet(
+            observation=Observation(
+                text="Alice works at OpenAI in San Francisco and collaborates with Bob on graph memory systems.",
+                source="notes",
+            )
+        ),
         MemoryStore(),
     )
 
-    packet_out, _ = BasicRepresentation(elements=("text", "triple", "kv", "entities", "tags")).run(unit_packet, store)
+    packet_out, _ = TripleRepresentation(method="direct").run(unit_packet, store)
 
     unit = packet_out.units[0]
-    assert ("Alice", "likes", "tea") in unit.triples
-    assert unit.kv["role"] == "engineer"
-    assert "Alice" in unit.entities
-    assert "structured_triple" in unit.tags
-    assert "structured_kv" in unit.tags
-    assert unit.metadata["representation"]["triples"]
-    assert unit.metadata["representation"]["kv"]["role"] == "engineer"
-    assert unit.metadata["representation"]["entities"] == unit.entities
-    assert unit.metadata["representation"]["tags"] == unit.tags
-
-
-def test_representation_can_build_hybrid_element_set() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
-
-    unit_packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Graph memory helps Alice study code.", source="notes")),
-        MemoryStore(),
-    )
-
-    packet_out, _ = BasicRepresentation(elements=("text", "embedding", "triple", "tags", "entities")).run(
-        unit_packet,
-        store,
-    )
-
-    unit = packet_out.units[0]
-    assert unit.embedding is not None
-    assert "embedding" in unit.representation_elements
-    assert "text" in unit.representation_elements
+    assert unit.triples
+    assert unit.metadata["representation"]["triples"] == unit.triples
+    assert unit.entities
+    assert len(unit.entities) >= 2
+    assert "triple" in unit.representation_elements
     assert "entities" in unit.representation_elements
-    assert "tags" in unit.representation_elements
-    assert "Alice" in unit.entities
-    assert "graph" in unit.tags
-    assert "memory" in unit.tags
+    assert all(len(triple) == 3 for triple in unit.triples)
+    flattened = " ".join(" ".join(part for part in triple) for triple in unit.triples).casefold()
+    assert "alice" in flattened or "openai" in flattened or "bob" in flattened
+
+
+def test_triple_representation_two_stage_uses_real_llm(require_real_classic_runtime: None) -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="Alice mentors Bob at OpenAI, and Bob researches retrieval graphs with Carol.",
+                source="notes",
+            )
+        ),
+        MemoryStore(),
+    )
+
+    packet_out, _ = TripleRepresentation(method="two_stage").run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.triples
+    assert unit.entities
+    assert unit.metadata["representation"]["triples"] == unit.triples
+    entity_set = {entity.casefold() for entity in unit.entities}
+    assert any(subject.casefold() in entity_set for subject, _, _ in unit.triples)
+    assert any(obj.casefold() in entity_set for _, _, obj in unit.triples)
+    assert all(subject and predicate and obj for subject, predicate, obj in unit.triples)
 
 
 def test_representation_description_requires_openai_config() -> None:
@@ -2192,14 +2205,21 @@ def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -
 
 
 def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadata() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, GraphAppendOrganization, PassThroughUnitFormation
+    from memprimitive.baselines import AlwaysWriteTrigger, GraphAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            triples = [("Alice", "likes", "tea")]
+            entities = ["Alice", "tea"]
+            represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
 
     store = _graph_store()
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice likes tea.", source="notes")),
         store,
     )
-    packet, store = BasicRepresentation(elements=("text", "entities", "triple")).run(packet, store)
+    packet, store = SeededTripleRepresentation().run(packet, store)
     packet, store = AlwaysWriteTrigger().run(packet, store)
     packet, store = GraphAppendOrganization(target_layer="knowledge_graph").run(packet, store)
 
@@ -2472,12 +2492,32 @@ def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieva
         GraphSeedAndExpandRetrieval,
         NeighborExistsEvolutionTrigger,
         PassThroughUnitFormation,
+        TripleRepresentation,
     )
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        _TRIPLES_BY_TEXT = {
+            "Alice likes jasmine tea.": ([("Alice", "likes", "jasmine tea")], ["Alice", "jasmine tea"]),
+            "Alice studies graph memory systems.": (
+                [("Alice", "studies", "graph memory systems")],
+                ["Alice", "graph memory systems"],
+            ),
+            "Bob builds retrieval tools.": ([("Bob", "builds", "retrieval tools")], ["Bob", "retrieval tools"]),
+        }
+
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            triples, entities = self._TRIPLES_BY_TEXT[unit.text.strip()]
+            represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
 
     store = _graph_vector_store()
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "triple", "tags", "keywords")),
+        representation=(
+            BasicRepresentation(elements=("text", "embedding")),
+            SeededTripleRepresentation(),
+            BasicRepresentation(elements=("tags", "keywords")),
+        ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         evolution_trigger=NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2),
         memory_evolution=(

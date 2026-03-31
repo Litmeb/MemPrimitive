@@ -25,6 +25,7 @@ from memprimitive.baselines import (
     ConcatenateReadout,
     EntityRetrieval,
     GraphAppendOrganization,
+    TripleRepresentation,
 )
 
 
@@ -43,7 +44,11 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     graph_writer = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "entities", "triple", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            TripleRepresentation(method="direct"),
+            BasicRepresentation(elements=("tags",)),
+        ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         store=store,
     )
