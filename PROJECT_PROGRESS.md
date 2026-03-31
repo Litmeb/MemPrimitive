@@ -22,6 +22,11 @@ The project is already beyond the concept stage.
 - Chinese-facing documentation has been refreshed and is now much closer to the actual runtime surface.
 - Several classic or near-classic families already have runnable support or decomposition work, including Reflexion, MemGPT, and A-MEM-like paths.
 - Literature coverage work is active. The repo is no longer focused only on a few showcase papers; it is trying to scale toward a broader set of memory papers and judge which are fully re-expressible versus only partially mappable.
+- A trigger-focused literature pass now suggests the trigger subsystem is probably over-modeled relative to the literature: only a small minority of candidate papers appear genuinely trigger-centric, while most heterogeneity sits in representation, organization, maintenance, and retrieval.
+- `TRIGGERS.md` has now been expanded from coarse `core/secondary/generic` labels into a 40-paper trigger mapping pass grounded in original-paper reading: each candidate is mapped to concrete trigger prototypes (`failure`, `capacity`, `scheduled`, `type-routing`, `subgoal`, `threshold`, `boolean gate`, `always`) plus named signals where relevant.
+- Trigger redesign groundwork is now stronger than a qualitative survey: `TRIGGERS.md` also includes prototype occurrence counts plus per-paper provenance, and argues that `always` should remain a default behavior while `new-write conditioned` should likely be treated as an event hook rather than a heavyweight first-class trigger family.
+- The trigger survey has been refined again: the old coarse `scheduled/offline` bucket was too broad and has now been split into `PeriodicTrigger`, `SessionEndTrigger`, and `IdleTrigger`, with a second pass over all 40 papers. That pass also downgraded several previously over-eager `scheduled/offline` assignments to explicit "not representable by the current trigger vocabulary" notes when the source only described a background or offline phase rather than a real trigger.
+- A follow-up pass on `subgoal-completion conditioned` made the category stricter as well: after re-checking the previously listed papers, `HiAgent` remains the clearest true fit, while several others were better reclassified as session-boundary or event-boundary triggers instead of subgoal completion.
 - The runtime migration toward `openai-agents` has now started in executable code: shared LLM/runtime access is no longer centered on raw `openai` chat-completions calls, and the MemGPT classic loop now uses real `openai-agents` function tools plus `Agent + Runner`.
 - Representation-time triple extraction is no longer heuristic-only: a dedicated `TripleRepresentation` now owns triple extraction with real LLM-backed direct and two-stage modes, and graph-style pipelines have been migrated away from `BasicRepresentation(..., "triple", ...)`.
 
@@ -65,6 +70,7 @@ This is the most immediate research-facing gap. Current decomposition work sugge
 - some papers are already close to the runtime
 - others expose missing primitive families
 - broader claims about coverage will require targeted module additions rather than only better prose
+- trigger complexity should be treated carefully during this work: current survey notes suggest simplification is likely low-risk as long as the runtime still covers a few high-value motifs such as failure-triggered reflection, capacity/batch maintenance, subgoal completion, and type-routing writes
 
 ### 4. Evaluation / benchmark infrastructure is incomplete
 
@@ -83,6 +89,12 @@ Current decomposition work suggests several useful boundary papers:
 - **AriGraph**: only partially mappable; highlights semantic + episodic graph maintenance gaps
 - **HiAgent**: only partially mappable; highlights hierarchical working-memory management gaps
 - **LightMem**: only partially mappable; highlights staged/offline memory maintenance gaps
+- Trigger survey status:
+  - `TRIGGERS.md` now records a candidate-pool pass over trigger heterogeneity
+  - it no longer stops at coarse labels; it now includes per-paper prototype/signal mappings and more detailed trigger summaries
+  - provisional conclusion: only a small minority of papers are truly trigger-centric
+  - practical implication: future trigger refactors should bias toward simplification unless a paper specifically depends on richer trigger semantics
+  - more specifically, only a handful of surveyed papers clearly require explicit periodic / session-end / idle semantics; many other "offline" cases are better modeled outside the trigger layer
 
 Practical interpretation: the framework is expressive enough to analyze these systems, but not yet broad enough to claim faithful coverage of all of them.
 
