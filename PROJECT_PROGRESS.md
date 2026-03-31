@@ -93,6 +93,23 @@ Practical impact:
 - Users can now learn the framework by editing and executing cells instead of only reading prose.
 - The Chinese tutorial path now supports both static reading (`.md`) and hands-on experimentation (`.ipynb`).
 
+### 0.3 A first literature-candidate document now exists for the project's "roughly 40 papers" coverage goal
+
+A new root document, [LITERATURE_CANDIDATES.zh-CN.md](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/LITERATURE_CANDIDATES.zh-CN.md), now captures a first-pass candidate pool for the repository's current literature-expansion phase.
+
+What it currently does:
+
+- distills the most usable survey framing from `Memory in the Age of AI Agents` (arXiv:2512.13564) and the earlier 2024 LLM-agent memory survey into a MemPrimitive-oriented screening lens
+- proposes a first batch of roughly 40 candidate works rather than only a handful of classic anchor papers
+- separates papers into near-term re-expression priorities versus boundary/extender papers
+- identifies an initial top-10 set that looks most promising for fully re-expressed or nearly fully re-expressed treatment
+
+Practical impact:
+
+- The repository now has an explicit literature-tracking artifact for the near-term "expand to ~40 papers" milestone instead of keeping that target only in README/project-memory prose.
+- Future agents can refine the list by doing slot-level decompositions rather than re-starting from a blank survey pass.
+- The current list should still be treated as a framework-fit-first shortlist, not as a final bibliography; some 2025-2026 items are included because they are highly relevant to the primitive design space even where long-run influence is still forming.
+
 ### 1. A usable stage-1 runtime exists
 
 The core package is not just a concept sketch. `memprimitive` already implements a concrete stage-1 runtime:
