@@ -300,7 +300,6 @@ MetadataHintUnitFormation()
   - `units.representation_elements`
   - `units.normalized_text`
   - `units.embedding`
-  - `units.triples`
   - `units.kv`
   - `units.entities`
   - `units.tags`
@@ -309,7 +308,6 @@ MetadataHintUnitFormation()
 - 可选 elements：
   - `text`
   - `embedding`
-  - `triple`
   - `kv`
   - `entities`
   - `tags`
@@ -332,6 +330,42 @@ MetadataHintUnitFormation()
 
 ```python
 BasicRepresentation(elements=("text", "embedding", "entities", "tags", "keywords"))
+```
+
+#### `TripleRepresentation`
+
+- 功能：专门为 unit 执行 LLM-backed triple 抽取。
+- 输入：`units`
+- 输出：
+  - `units.triples`
+  - `units.entities`
+  - `units.representation_elements`
+  - `units.metadata["representation"]`
+- 参数：
+  - `method`
+  - `api_key`
+  - `base_url`
+  - `model`
+  - `embedding_model`
+- `method` 当前支持：
+  - `direct`
+    - 一次性让 LLM 输出 `entities + relationships`
+  - `two_stage`
+    - 先抽 `entities`
+    - 再基于实体抽 `relationships`
+- 说明：
+  - 两种模式都使用结构化输出约束，关系字段必须能稳定拼成 `(subject, predicate, object)` triple
+  - 默认复用 classic runtime 的 `MEMPRIMITIVE_API_KEY`、`MEMPRIMITIVE_BASE_URL`、`MEMPRIMITIVE_MODEL`
+  - 如果需要抽 triple 且没有可用 LLM 配置，会严格报错
+  - 如果 `unit.metadata["triples"]` 已显式提供合法 triples，会直接透传这些 hints
+- 写法：
+
+```python
+TripleRepresentation(method="direct")
+```
+
+```python
+TripleRepresentation(method="two_stage")
 ```
 
 #### `KeywordRepresentation`
@@ -1526,8 +1560,9 @@ pipeline = MemoryPipeline(
 ```python
 pipeline = MemoryPipeline(
     representation=(
-        BasicRepresentation(elements=("text", "entities")),
-        BasicRepresentation(elements=("text", "entities", "tags", "keywords")),
+        BasicRepresentation(elements=("text",)),
+        TripleRepresentation(method="direct"),
+        BasicRepresentation(elements=("tags", "keywords")),
     ),
 )
 ```
@@ -1537,6 +1572,7 @@ pipeline = MemoryPipeline(
 - 必须是同一 slot 的模块
 - 空 iterable 会报错
 - 后一个模块读前一个模块的 `Packet` 输出
+- graph / triple 场景推荐把 `TripleRepresentation` 放在中间，再由后续 `BasicRepresentation` 补 `tags` / `keywords` / `summary`
 
 ### 8.3 Dispatch：同 slot fan-out
 
@@ -1659,6 +1695,11 @@ MemoryPipeline(
 
 ```python
 MemoryPipeline(
+    representation=(
+        BasicRepresentation(elements=("text",)),
+        TripleRepresentation(method="direct"),
+        BasicRepresentation(elements=("tags", "keywords")),
+    ),
     organization=GraphAppendOrganization(target_layer="knowledge_graph"),
     evolution_trigger=ThresholdEvolutionTrigger(...),
     memory_evolution=GraphNeighborAppendEvolution(target_layer="knowledge_graph"),

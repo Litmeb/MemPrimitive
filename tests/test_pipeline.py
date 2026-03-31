@@ -54,7 +54,8 @@ def test_ingesting_observations_then_recalling_query_produces_non_empty_readout(
     readout = pipeline.recall(Query(text="Alice"))
 
     assert readout.text
-    assert len(readout.source_ids) == 1
+    assert "Alice likes tea." in readout.text
+    assert len(readout.source_ids) == 2
 
 
 def test_full_baseline_pipeline_preserves_trace_fields_across_ingest_stages() -> None:
