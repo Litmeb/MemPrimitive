@@ -258,6 +258,58 @@ def test_default_ingest_writes_before_optional_evolution_runs() -> None:
     assert packet.trace["memory_evolution"]["effects"] == []
 
 
+def test_pipeline_supports_unified_trigger_classes_across_write_and_evolution_slots() -> None:
+    from memprimitive.baselines import BoundaryEventTrigger, SummaryRewriteEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=BoundaryEventTrigger(accepted_events=("session_end",)),
+        evolution_trigger=BoundaryEventTrigger(slot="evolution_trigger", accepted_events=("session_end",)),
+        memory_evolution=SummaryRewriteEvolution(target_layer="semantic"),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Alice likes jasmine tea.",
+            source="dialogue",
+            metadata={"trigger": {"events": ["session_end"]}},
+        )
+    )
+
+    assert packet.trace["write_trigger"]["module"] == "boundary_event_write_trigger"
+    assert packet.trace["evolution_trigger"]["module"] == "boundary_event_evolution_trigger"
+    assert packet.decisions == [True]
+    assert pipeline.store.count("default") == 1
+    assert pipeline.store.count("semantic") == 1
+
+
+def test_pipeline_supports_runtime_and_scalar_trigger_combinations() -> None:
+    from memprimitive.baselines import RuntimeEventTrigger, ScalarRuleTrigger
+
+    pipeline = MemoryPipeline(
+        write_trigger=ScalarRuleTrigger(signal_key="importance", threshold=0.7),
+        evolution_trigger=RuntimeEventTrigger(accepted_events=("task_failed",)),
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Alice likes tea.",
+            source="dialogue",
+            metadata={"trigger": {"signals": {"importance": 0.9}, "events": ["task_failed"]}},
+        )
+    )
+
+    assert packet.trace["write_trigger"]["module"] == "scalar_rule_write_trigger"
+    assert packet.trace["write_trigger"]["decisions"] == [True]
+    assert packet.trace["evolution_trigger"]["module"] == "runtime_event_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["decisions"] == [True]
+
+
 def test_memory_pipeline_allows_graph_organization_without_eager_store_validation() -> None:
     pipeline = MemoryPipeline(organization=GraphAppendOrganization())
 

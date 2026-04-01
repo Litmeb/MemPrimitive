@@ -30,6 +30,7 @@ The project is already beyond the concept stage.
 - The follow-up trigger note has now been rewritten again at a more implementation-oriented level: `TRIGGER_SCORE_BOOLEAN_GATE_SURVEY.md` no longer primarily groups triggers by semantic labels like `threshold(score)` or `boolean gate`, but instead by concrete trigger implementation families for write/evolution (`PassThroughHook`, `StructuralBoundaryHook`, `RuntimeCallback`, `ExplicitScalarRule`, `LLMJudge`, `BackgroundScheduler`, `ControllerOrchestrator`) across the same 40-paper corpus.
 - The code-aligned trigger rewrite plan in `TRIGGER_REWRITE_IMPLEMENTATION_PLAN.md` has now been updated again to match the current baseline runtime more closely: it no longer assumes separate write/evolution trigger class hierarchies, and instead treats richer trigger families as additions to the existing unified `TriggerModule` + `slot=` pattern in `memprimitive/baselines/trigger.py`, while still recording that true periodic/idle background maintenance likely needs a future dedicated maintenance entrypoint.
 - The public baseline trigger surface has now been intentionally simplified again: the old trigger-family decomposition (`signal / scorer / gate / policy`) and compose-style trigger builders have been removed from the baseline API, and the repo now only exposes basic slot triggers (`AlwaysTrigger`, `ThresholdTrigger`, `NeverTrigger`) on that layer.
+- That minimal trigger surface has now been expanded again in code, but still without reviving the removed heavy trigger framework: `memprimitive/baselines/trigger.py` now keeps a unified `TriggerModule + slot=` design and adds direct trigger families such as `OnInputTrigger`, `BoundaryEventTrigger`, `RuntimeEventTrigger`, `ScalarRuleTrigger`, `ModelJudgeTrigger`, `PeriodicMaintenanceTrigger`, and `IdleMaintenanceTrigger` while preserving the stable downstream contract of `packet.decisions` plus `trace["write_trigger"]` / `trace["evolution_trigger"]`.
 - The runtime migration toward `openai-agents` has now started in executable code: shared LLM/runtime access is no longer centered on raw `openai` chat-completions calls, and the MemGPT classic loop now uses real `openai-agents` function tools plus `Agent + Runner`.
 - Representation-time triple extraction is no longer heuristic-only: a dedicated `TripleRepresentation` now owns triple extraction with real LLM-backed direct and two-stage modes, and graph-style pipelines have been migrated away from `BasicRepresentation(..., "triple", ...)`.
 
@@ -117,10 +118,10 @@ If continuing the current roadmap, the highest-value next steps are:
 - Full test runs can be slow. Prefer targeted tests for the area you changed.
 - `openai-agents` is now an active dependency and should be treated as part of the runtime direction rather than a speculative future option.
 - Trigger status note:
-  - public baseline trigger API is now minimal
-  - trigger-family infrastructure and compose helpers have been removed
-  - baseline trigger design should be treated as the current source of truth
-  - forward trigger expansion should remain code-shaped rather than ontology-heavy: the new plan keeps `packet.decisions` as the stable downstream contract, with write-stage decisions retained in `trace["write_trigger"]` and treats richer trigger families as additive slot implementations, not a return to the removed heavy trigger stack
+  - public baseline trigger API is no longer only the three constant baselines; it now includes code-shaped richer trigger classes on the same unified surface
+  - trigger-family infrastructure and compose helpers remain removed
+  - baseline trigger design should still be treated as the current source of truth
+  - the implemented direction matches the rewrite plan: `packet.decisions` stays the stable downstream contract, write-stage decisions remain in `trace["write_trigger"]`, and richer trigger families are additive slot implementations rather than a return to the removed heavy trigger stack
 - Current migration state:
   - `memprimitive/utils/_runtime.py` now routes text / JSON / summarization / reranking calls through `openai-agents`
   - primitive-layer LLM calls have been further unified: `memprimitive/baselines/representation.py` no longer creates a raw `OpenAI(...)` client for `summary` / `description`, and now uses the shared runtime path as well

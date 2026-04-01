@@ -38,7 +38,18 @@ def _default_factory_for_class(cls: type[PrimitiveModule], slot: str, *, top_k: 
 def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
     """Merge ``BASELINE_CLASSES`` from each slot module (imported via pkgutil)."""
     import memprimitive.baselines as pkg
-    from .trigger import AlwaysTrigger, NeverTrigger, ThresholdTrigger
+    from .trigger import (
+        AlwaysTrigger,
+        BoundaryEventTrigger,
+        IdleMaintenanceTrigger,
+        ModelJudgeTrigger,
+        NeverTrigger,
+        OnInputTrigger,
+        PeriodicMaintenanceTrigger,
+        RuntimeEventTrigger,
+        ScalarRuleTrigger,
+        ThresholdTrigger,
+    )
 
     by_slot: dict[str, list[type[PrimitiveModule]]] = defaultdict(list)
 
@@ -62,8 +73,26 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
                 )
             by_slot[slot].append(cls)
 
-    by_slot["write_trigger"] = [AlwaysTrigger, ThresholdTrigger]
-    by_slot["evolution_trigger"] = [NeverTrigger, ThresholdTrigger]
+    by_slot["write_trigger"] = [
+        AlwaysTrigger,
+        OnInputTrigger,
+        BoundaryEventTrigger,
+        RuntimeEventTrigger,
+        ScalarRuleTrigger,
+        ModelJudgeTrigger,
+        ThresholdTrigger,
+    ]
+    by_slot["evolution_trigger"] = [
+        NeverTrigger,
+        OnInputTrigger,
+        BoundaryEventTrigger,
+        RuntimeEventTrigger,
+        ScalarRuleTrigger,
+        ModelJudgeTrigger,
+        PeriodicMaintenanceTrigger,
+        IdleMaintenanceTrigger,
+        ThresholdTrigger,
+    ]
 
     missing = [s for s in ALL_PIPELINE_SLOTS if s not in by_slot or not by_slot[s]]
     if missing:
