@@ -38,11 +38,7 @@ class RepresentationModule(PrimitiveModule):
     pass
 
 
-class WriteTriggerModule(PrimitiveModule):
-    pass
-
-
-class EvolutionTriggerModule(PrimitiveModule):
+class TriggerModule(PrimitiveModule):
     pass
 
 

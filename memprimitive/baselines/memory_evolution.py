@@ -49,7 +49,7 @@ class AppendOnlyEvolution(MemoryEvolutionModule):
     """Run an optional extra evolution pass over already-organized memory.
 
     ``run`` requires ``packet.units`` and ``packet.placements``. It prefers
-    ``packet.evolution_decisions`` as the extra-evolution mask. The active mask
+    ``packet.decisions`` as the extra-evolution mask. The active mask
     must align with ``units`` and ``placements``. Stage-1 baseline behavior is a
     no-op extra pass: it records which units would participate in extra evolution
     but does not modify the store.
@@ -58,7 +58,7 @@ class AppendOnlyEvolution(MemoryEvolutionModule):
     spec = ModuleSpec(
         name="append_only_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
     )
 
@@ -67,23 +67,23 @@ class AppendOnlyEvolution(MemoryEvolutionModule):
             raise ValueError("AppendOnlyEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("AppendOnlyEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("AppendOnlyEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
+        if packet.decisions is None:
+            raise ValueError("AppendOnlyEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.decisions) == len(packet.placements)):
             raise ValueError(
-                "AppendOnlyEvolution requires aligned units, evolution decisions, and placements."
+                "AppendOnlyEvolution requires aligned units, decisions, and placements."
             )
 
         active_unit_ids = [
             unit.unit_id
-            for unit, decision in zip(packet.units, packet.evolution_decisions, strict=True)
+            for unit, decision in zip(packet.units, packet.decisions, strict=True)
             if decision
         ]
 
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": [],
         }
@@ -94,13 +94,13 @@ class TraceOnlyEvolution(MemoryEvolutionModule):
     """No-op evolution that records explicit effect placeholders for active units.
 
     ``run`` requires ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions`` aligned by index. The store is not mutated.
+    ``packet.decisions`` aligned by index. The store is not mutated.
     """
 
     spec = ModuleSpec(
         name="trace_only_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
     )
 
@@ -109,10 +109,10 @@ class TraceOnlyEvolution(MemoryEvolutionModule):
             raise ValueError("TraceOnlyEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("TraceOnlyEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("TraceOnlyEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
-            raise ValueError("TraceOnlyEvolution requires aligned units, evolution decisions, and placements.")
+        if packet.decisions is None:
+            raise ValueError("TraceOnlyEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.decisions) == len(packet.placements)):
+            raise ValueError("TraceOnlyEvolution requires aligned units, decisions, and placements.")
 
         effects = [
             {
@@ -120,13 +120,13 @@ class TraceOnlyEvolution(MemoryEvolutionModule):
                 "unit_id": unit.unit_id,
                 "target_layer": placement.target_layer,
             }
-            for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True)
+            for unit, decision, placement in zip(packet.units, packet.decisions, packet.placements, strict=True)
             if decision
         ]
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": [effect["unit_id"] for effect in effects],
             "effects": effects,
         }
@@ -137,14 +137,14 @@ class SummaryRewriteEvolution(MemoryEvolutionModule):
     """Append summary records for evolution-active units into a target layer.
 
     ``run`` requires ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions`` aligned by index. Active units are summarized
+    ``packet.decisions`` aligned by index. Active units are summarized
     into new append-only records; original records remain unchanged.
     """
 
     spec = ModuleSpec(
         name="summary_rewrite_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         side_effects=("modify_store", "append_records"),
     )
@@ -157,14 +157,14 @@ class SummaryRewriteEvolution(MemoryEvolutionModule):
             raise ValueError("SummaryRewriteEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("SummaryRewriteEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("SummaryRewriteEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
-            raise ValueError("SummaryRewriteEvolution requires aligned units, evolution decisions, and placements.")
+        if packet.decisions is None:
+            raise ValueError("SummaryRewriteEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.decisions) == len(packet.placements)):
+            raise ValueError("SummaryRewriteEvolution requires aligned units, decisions, and placements.")
 
         effects = []
         active_unit_ids = []
-        for unit, decision in zip(packet.units, packet.evolution_decisions, strict=True):
+        for unit, decision in zip(packet.units, packet.decisions, strict=True):
             if not decision:
                 continue
             active_unit_ids.append(unit.unit_id)
@@ -184,7 +184,7 @@ class SummaryRewriteEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
         }
@@ -215,14 +215,14 @@ class LayerMoveEvolution(MemoryEvolutionModule):
     """Copy-append evolution-active units into another layer.
 
     ``run`` requires ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions`` aligned by index. Active units are copied into
+    ``packet.decisions`` aligned by index. Active units are copied into
     ``target_layer`` as new records without deleting originals.
     """
 
     spec = ModuleSpec(
         name="layer_move_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         side_effects=("modify_store", "append_records"),
     )
@@ -235,14 +235,14 @@ class LayerMoveEvolution(MemoryEvolutionModule):
             raise ValueError("LayerMoveEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("LayerMoveEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("LayerMoveEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
-            raise ValueError("LayerMoveEvolution requires aligned units, evolution decisions, and placements.")
+        if packet.decisions is None:
+            raise ValueError("LayerMoveEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.decisions) == len(packet.placements)):
+            raise ValueError("LayerMoveEvolution requires aligned units, decisions, and placements.")
 
         effects = []
         active_unit_ids = []
-        for unit, decision in zip(packet.units, packet.evolution_decisions, strict=True):
+        for unit, decision in zip(packet.units, packet.decisions, strict=True):
             if not decision:
                 continue
             active_unit_ids.append(unit.unit_id)
@@ -270,7 +270,7 @@ class LayerMoveEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
         }
@@ -362,7 +362,7 @@ class GraphLinkEvolution(MemoryEvolutionModule):
     ``metadata["graph"]["neighbor_context"]`` on the evolved target record only.
 
     ``run`` requires aligned ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions``. Only units placed into ``target_layer`` are
+    ``packet.decisions``. Only units placed into ``target_layer`` are
     processed, and only records in that graph layer are rewritten. This is an
     inferred engineering decomposition of graph-link evolution rather than a
     paper-faithful A-MEM controller.
@@ -371,7 +371,7 @@ class GraphLinkEvolution(MemoryEvolutionModule):
     spec = ModuleSpec(
         name="graph_link_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         store_requirements=("index:graph", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
@@ -402,17 +402,17 @@ class GraphLinkEvolution(MemoryEvolutionModule):
             raise ValueError("GraphLinkEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("GraphLinkEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("GraphLinkEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
-            raise ValueError("GraphLinkEvolution requires aligned units, evolution decisions, and placements.")
+        if packet.decisions is None:
+            raise ValueError("GraphLinkEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.decisions) == len(packet.placements)):
+            raise ValueError("GraphLinkEvolution requires aligned units, decisions, and placements.")
         if store.layer_shape(self.target_layer) != "Graph":
             raise ValueError(f"GraphLinkEvolution requires target layer {self.target_layer!r} to be Graph.")
 
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
 
-        for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True):
+        for unit, decision, placement in zip(packet.units, packet.decisions, packet.placements, strict=True):
             if not decision or placement.target_layer != self.target_layer:
                 continue
             target_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
@@ -510,7 +510,7 @@ class GraphLinkEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
             "target_layer": self.target_layer,
@@ -529,7 +529,7 @@ class GraphNeighborAppendEvolution(GraphLinkEvolution):
     spec = ModuleSpec(
         name="graph_neighbor_append_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         store_requirements=("index:graph", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
@@ -556,7 +556,7 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
     rewriting arbitrary record metadata.
 
     ``run`` requires aligned ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions``. Only records in ``target_layer`` are read or
+    ``packet.decisions``. Only records in ``target_layer`` are read or
     rewritten, making this a simplified rule-based stand-in for richer
     neighbor-context evolution.
     """
@@ -564,7 +564,7 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
     spec = ModuleSpec(
         name="graph_neighbor_context_trace_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         store_requirements=("index:graph", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
@@ -582,11 +582,11 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
             raise ValueError("GraphNeighborContextTraceEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("GraphNeighborContextTraceEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("GraphNeighborContextTraceEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.evolution_decisions) == len(packet.placements)):
+        if packet.decisions is None:
+            raise ValueError("GraphNeighborContextTraceEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.decisions) == len(packet.placements)):
             raise ValueError(
-                "GraphNeighborContextTraceEvolution requires aligned units, evolution decisions, and placements."
+                "GraphNeighborContextTraceEvolution requires aligned units, decisions, and placements."
             )
         if store.layer_shape(self.target_layer) != "Graph":
             raise ValueError(
@@ -596,7 +596,7 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
 
-        for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True):
+        for unit, decision, placement in zip(packet.units, packet.decisions, packet.placements, strict=True):
             if not decision or placement.target_layer != self.target_layer:
                 continue
             target_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
@@ -636,7 +636,7 @@ class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
             "target_layer": self.target_layer,
@@ -653,14 +653,14 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
     target record plus its graph namespace.
 
     ``run`` requires aligned ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions``. The store is mutated by rewriting the target
+    ``packet.decisions``. The store is mutated by rewriting the target
     record and appending graph links for the selected neighbor set.
     """
 
     spec = ModuleSpec(
         name="link_strengthening_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         store_requirements=("index:graph", "index:vector", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph", "target_layer_index:vector"),
@@ -699,10 +699,10 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
             raise ValueError("LinkStrengtheningEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("LinkStrengtheningEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("LinkStrengtheningEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
-            raise ValueError("LinkStrengtheningEvolution requires aligned units, placements, and evolution decisions.")
+        if packet.decisions is None:
+            raise ValueError("LinkStrengtheningEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.placements) == len(packet.decisions)):
+            raise ValueError("LinkStrengtheningEvolution requires aligned units, placements, and decisions.")
 
         from ..utils._runtime import get_runtime
 
@@ -711,7 +711,7 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
 
-        for unit, placement, decision in zip(packet.units, packet.placements, packet.evolution_decisions, strict=True):
+        for unit, placement, decision in zip(packet.units, packet.placements, packet.decisions, strict=True):
             if not decision or placement.target_layer != self.target_layer:
                 continue
             current_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
@@ -809,7 +809,7 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
             "target_layer": self.target_layer,
@@ -826,14 +826,14 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
     available; when no links exist, it falls back to nearest-neighbor candidates.
 
     ``run`` requires aligned ``packet.units``, ``packet.placements``, and
-    ``packet.evolution_decisions``. The store is mutated only by rewriting
+    ``packet.decisions``. The store is mutated only by rewriting
     neighbor records under the configured note namespace.
     """
 
     spec = ModuleSpec(
         name="neighbor_context_update_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions"),
+        input_requirements=("units", "placements", "decisions"),
         output_guarantees=("trace.memory_evolution.effects",),
         store_requirements=("index:graph", "shape:Graph"),
         layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
@@ -868,10 +868,10 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
             raise ValueError("NeighborContextUpdateEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("NeighborContextUpdateEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("NeighborContextUpdateEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
-            raise ValueError("NeighborContextUpdateEvolution requires aligned units, placements, and evolution decisions.")
+        if packet.decisions is None:
+            raise ValueError("NeighborContextUpdateEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.placements) == len(packet.decisions)):
+            raise ValueError("NeighborContextUpdateEvolution requires aligned units, placements, and decisions.")
 
         from ..utils._runtime import get_runtime
 
@@ -880,7 +880,7 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
 
-        for unit, placement, decision in zip(packet.units, packet.placements, packet.evolution_decisions, strict=True):
+        for unit, placement, decision in zip(packet.units, packet.placements, packet.decisions, strict=True):
             if not decision or placement.target_layer != self.target_layer:
                 continue
             current_record = _latest_record_for_unit(store, layer=self.target_layer, unit_id=unit.unit_id)
@@ -980,7 +980,7 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
             "target_layer": self.target_layer,
@@ -999,7 +999,7 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
     residual while preserving the generic evolution skeleton.
 
     ``run`` requires aligned ``packet.units``, ``packet.placements``,
-    ``packet.evolution_decisions``, and ``packet.observation``. The store is
+    ``packet.decisions``, and ``packet.observation``. The store is
     mutated by appending generated records and pruning the target layer to the
     configured window.
     """
@@ -1007,7 +1007,7 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
     spec = ModuleSpec(
         name="reflection_generation_evolution",
         slot="memory_evolution",
-        input_requirements=("units", "placements", "evolution_decisions", "observation"),
+        input_requirements=("units", "placements", "decisions", "observation"),
         output_guarantees=("trace.memory_evolution.effects",),
         side_effects=("modify_store", "append_records"),
     )
@@ -1037,11 +1037,11 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
             raise ValueError("ReflectionGenerationEvolution requires packet.units.")
         if packet.placements is None:
             raise ValueError("ReflectionGenerationEvolution requires packet.placements.")
-        if packet.evolution_decisions is None:
-            raise ValueError("ReflectionGenerationEvolution requires packet.evolution_decisions.")
-        if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
+        if packet.decisions is None:
+            raise ValueError("ReflectionGenerationEvolution requires packet.decisions.")
+        if not (len(packet.units) == len(packet.placements) == len(packet.decisions)):
             raise ValueError(
-                "ReflectionGenerationEvolution requires aligned units, placements, and evolution decisions."
+                "ReflectionGenerationEvolution requires aligned units, placements, and decisions."
             )
 
         if not store.has_layer(self.target_layer):
@@ -1061,7 +1061,7 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
         effects: list[dict[str, Any]] = []
         trial_index = reflexion_controls(packet.observation.metadata).get("trial_index", 0)
 
-        for unit, decision, placement in zip(packet.units, packet.evolution_decisions, packet.placements, strict=True):
+        for unit, decision, placement in zip(packet.units, packet.decisions, packet.placements, strict=True):
             if not decision:
                 continue
             active_unit_ids.append(unit.unit_id)
@@ -1129,7 +1129,7 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
-            "decision_source": "evolution_decisions",
+            "decision_source": "decisions",
             "active_unit_ids": active_unit_ids,
             "effects": effects,
             "record_ids": record_ids,

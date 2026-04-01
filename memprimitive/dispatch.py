@@ -9,15 +9,14 @@ from typing import Any
 from .contracts import normalize_contracts
 from .core import MemoryStore, ModuleSpec, Packet
 from .interfaces import (
-    EvolutionTriggerModule,
     MemoryEvolutionModule,
     OrganizationModule,
     PrimitiveModule,
     ReadoutModule,
     RepresentationModule,
     RetrievalModule,
+    TriggerModule,
     UnitFormationModule,
-    WriteTriggerModule,
 )
 
 
@@ -115,8 +114,8 @@ class DispatchRepresentation(_DispatchMixin, RepresentationModule):
     spec = ModuleSpec(name="dispatch_representation", slot="representation")
 
 
-class DispatchWriteTrigger(_DispatchMixin, WriteTriggerModule):
-    child_base = WriteTriggerModule
+class DispatchWriteTrigger(_DispatchMixin, TriggerModule):
+    child_base = TriggerModule
     spec = ModuleSpec(name="dispatch_write_trigger", slot="write_trigger")
 
 
@@ -125,8 +124,8 @@ class DispatchOrganization(_DispatchMixin, OrganizationModule):
     spec = ModuleSpec(name="dispatch_organization", slot="organization")
 
 
-class DispatchEvolutionTrigger(_DispatchMixin, EvolutionTriggerModule):
-    child_base = EvolutionTriggerModule
+class DispatchEvolutionTrigger(_DispatchMixin, TriggerModule):
+    child_base = TriggerModule
     spec = ModuleSpec(name="dispatch_evolution_trigger", slot="evolution_trigger")
 
 

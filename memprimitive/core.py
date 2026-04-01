@@ -357,18 +357,15 @@ class StoreTopology:
 class Packet:
     """Shared pipeline IR. Each stage reads and fills specific fields.
 
-    ``decisions`` is the write-side gating mask used before organization.
-    ``evolution_decisions`` is the extra-evolution gating mask used by
-    ``memory_evolution`` after normal ingest-time placement/write planning
-    (``organization``). :class:`~memprimitive.pipeline.MemoryPipeline` may defer
-    physical ``MemoryStore.append`` until after evolution stages so ingest stays
-    atomic with respect to the store when later stages fail.
+    ``decisions`` is the active gating mask used by both trigger stages.
+    ``write_trigger`` first fills it before organization; later
+    ``evolution_trigger`` may overwrite it before ``memory_evolution`` runs.
+    Earlier write-side decisions remain available in ``trace["write_trigger"]``.
     """
 
     observation: Observation | None = None
     units: list[MemoryUnit] | None = None
     decisions: list[bool] | None = None
-    evolution_decisions: list[bool] | None = None
     placements: list[Placement] | None = None
     query: Query | None = None
     retrieved: RetrievedSet | None = None

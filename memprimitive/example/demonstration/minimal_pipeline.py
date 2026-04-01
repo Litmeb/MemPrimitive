@@ -20,7 +20,7 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import (
-    AlwaysWriteTrigger,
+    AlwaysTrigger,
     AppendOrganization,
     BasicRepresentation,
     ConcatenateReadout,
@@ -30,11 +30,11 @@ from memprimitive.baselines import (
 
 
 def main() -> None:
-    # One instance per primitive slot, in pipeline order (ingest → recall).
+    # One instance per primitive slot, in pipeline order (ingest 鈫?recall).
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=BasicRepresentation(),
-        write_trigger=AlwaysWriteTrigger(),
+        write_trigger=AlwaysTrigger(),
         organization=AppendOrganization(),
         retrieval=RecencyRetrieval(top_k=2),
         readout=ConcatenateReadout(),
@@ -44,7 +44,7 @@ def main() -> None:
     pipeline.ingest(Observation(text="The user likes concise examples.", source="dialogue"))
     pipeline.ingest(Observation(text="The user works on compositional memory.", source="notes"))
 
-    # Read path: query → retrieval → readout for the agent.
+    # Read path: query 鈫?retrieval 鈫?readout for the agent.
     readout = pipeline.recall(Query(text="What does the user like?"))
 
     print(readout.text)

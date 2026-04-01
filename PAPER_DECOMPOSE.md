@@ -4,1489 +4,590 @@
 
 ## HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models
 
-论文链接: <https://arxiv.org/abs/2405.14831>
+璁烘枃閾炬帴: <https://arxiv.org/abs/2405.14831>
 
-官方 repo: <https://github.com/OSU-NLP-Group/HippoRAG>
+瀹樻柟 repo: <https://github.com/OSU-NLP-Group/HippoRAG>
 
-### 论文侧 memory 机制速写
+### 璁烘枃渚?memory 鏈哄埗閫熷啓
 
-HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启发的长期记忆系统。其 memory 核心不是“把 passage 向量化后直接查库”，而是先把 passage 处理成开放式知识图谱，再在查询时把 query 中的关键实体链接到图节点，随后用 Personalized PageRank 在图上做一次受查询偏置的扩散，最后把节点激活分数聚合回 passage 排序。
-
-从 MemPrimitive slot 角度看，它的主链路可以概括为：
-
-- `unit_formation`: 以 passage 为基本写入单元。
-- `representation`: 对每个 passage 先做 named entity extraction，再做 NER-conditioned OpenIE triple extraction，并为 noun phrase / entity 节点建立 embedding。
-- `write_trigger`: 默认离线全量写入。
-- `organization`: 把 passage、noun phrase / entity、triple 关系组织成可检索的图式索引，并保留 node-to-passage 归属关系。
-- `evolution_trigger`: 论文主体没有单独强调在线演化触发；索引构建阶段的图增强更像写入时/写后处理。
-- `memory_evolution`: 增补 similarity/synonymy edges，使相近但不完全相同的 noun phrases 互联。
-- `retrieval`: query 先抽 named entities，再链接到 KG 节点，做 node specificity 加权和 PPR 扩散，最后把节点分数聚合成 passage 分数。
-- `readout`: 输出 top-k passages 给下游 reader/QA。
-
-### 按 MemPrimitive slot 的拆解
-
+HippoRAG 鎶婂閮ㄦ枃妗ｈ蹇嗗缓妯℃垚涓€涓彈 hippocampal indexing theory 鍚彂鐨勯暱鏈熻蹇嗙郴缁熴€傚叾 memory 鏍稿績涓嶆槸鈥滄妸 passage 鍚戦噺鍖栧悗鐩存帴鏌ュ簱鈥濓紝鑰屾槸鍏堟妸 passage 澶勭悊鎴愬紑鏀惧紡鐭ヨ瘑鍥捐氨锛屽啀鍦ㄦ煡璇㈡椂鎶?query 涓殑鍏抽敭瀹炰綋閾炬帴鍒板浘鑺傜偣锛岄殢鍚庣敤 Personalized PageRank 鍦ㄥ浘涓婂仛涓€娆″彈鏌ヨ鍋忕疆鐨勬墿鏁ｏ紝鏈€鍚庢妸鑺傜偣婵€娲诲垎鏁拌仛鍚堝洖 passage 鎺掑簭銆?
+浠?MemPrimitive slot 瑙掑害鐪嬶紝瀹冪殑涓婚摼璺彲浠ユ鎷负锛?
+- `unit_formation`: 浠?passage 涓哄熀鏈啓鍏ュ崟鍏冦€?- `representation`: 瀵规瘡涓?passage 鍏堝仛 named entity extraction锛屽啀鍋?NER-conditioned OpenIE triple extraction锛屽苟涓?noun phrase / entity 鑺傜偣寤虹珛 embedding銆?- `write_trigger`: 榛樿绂荤嚎鍏ㄩ噺鍐欏叆銆?- `organization`: 鎶?passage銆乶oun phrase / entity銆乼riple 鍏崇郴缁勭粐鎴愬彲妫€绱㈢殑鍥惧紡绱㈠紩锛屽苟淇濈暀 node-to-passage 褰掑睘鍏崇郴銆?- `evolution_trigger`: 璁烘枃涓讳綋娌℃湁鍗曠嫭寮鸿皟鍦ㄧ嚎婕斿寲瑙﹀彂锛涚储寮曟瀯寤洪樁娈电殑鍥惧寮烘洿鍍忓啓鍏ユ椂/鍐欏悗澶勭悊銆?- `memory_evolution`: 澧炶ˉ similarity/synonymy edges锛屼娇鐩歌繎浣嗕笉瀹屽叏鐩稿悓鐨?noun phrases 浜掕仈銆?- `retrieval`: query 鍏堟娊 named entities锛屽啀閾炬帴鍒?KG 鑺傜偣锛屽仛 node specificity 鍔犳潈鍜?PPR 鎵╂暎锛屾渶鍚庢妸鑺傜偣鍒嗘暟鑱氬悎鎴?passage 鍒嗘暟銆?- `readout`: 杈撳嚭 top-k passages 缁欎笅娓?reader/QA銆?
+### 鎸?MemPrimitive slot 鐨勬媶瑙?
 #### unit_formation
 
-- 论文里做了什么
-  - 基本以 retrieval corpus 中的单个 passage 为索引单位，图谱构建是逐 passage 执行 OpenIE。
-- MemPrimitive 现有哪些模块可直接复用
-  - `PassThroughUnitFormation`：如果上游已经把输入准备为单 passage observation，可直接表达“一条输入对应一个写入单元”。
-- 哪些模块只能部分复用
-  - `SentenceSplitUnitFormation`、`LineSplitUnitFormation`、`WindowedUnitFormation`：它们能做切分，但 HippoRAG 论文核心并不依赖这些切分策略。
-- 当前缺失什么能力
-  - 无关键缺口。该 slot 不是 HippoRAG 的机制瓶颈。
-- 你的判断依据是什么
-  - 论文明说：offline indexing 是对 retrieval corpus 逐 passage 处理并抽取 triples。
-  - repo 实现可确认：`HippoRAG.index(docs)` 接收 `List[str]` 文档/段落并逐条做 OpenIE。
-  - 推断：在 MemPrimitive 中把每个 passage 视为一个 `Observation`/`MemoryUnit` 已足够承载该 slot。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍩烘湰浠?retrieval corpus 涓殑鍗曚釜 passage 涓虹储寮曞崟浣嶏紝鍥捐氨鏋勫缓鏄€?passage 鎵ц OpenIE銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `PassThroughUnitFormation`锛氬鏋滀笂娓稿凡缁忔妸杈撳叆鍑嗗涓哄崟 passage observation锛屽彲鐩存帴琛ㄨ揪鈥滀竴鏉¤緭鍏ュ搴斾竴涓啓鍏ュ崟鍏冣€濄€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `SentenceSplitUnitFormation`銆乣LineSplitUnitFormation`銆乣WindowedUnitFormation`锛氬畠浠兘鍋氬垏鍒嗭紝浣?HippoRAG 璁烘枃鏍稿績骞朵笉渚濊禆杩欎簺鍒囧垎绛栫暐銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€傝 slot 涓嶆槸 HippoRAG 鐨勬満鍒剁摱棰堛€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歰ffline indexing 鏄 retrieval corpus 閫?passage 澶勭悊骞舵娊鍙?triples銆?  - repo 瀹炵幇鍙‘璁わ細`HippoRAG.index(docs)` 鎺ユ敹 `List[str]` 鏂囨。/娈佃惤骞堕€愭潯鍋?OpenIE銆?  - 鎺ㄦ柇锛氬湪 MemPrimitive 涓妸姣忎釜 passage 瑙嗕负涓€涓?`Observation`/`MemoryUnit` 宸茶冻澶熸壙杞借 slot銆?
 #### representation
 
-- 论文里做了什么
-  - 对每个 passage 先抽 named entities，再把 named entities 放回 prompt 里做 NER-conditioned triple extraction。
-  - 同时为 entity / noun phrase 建 embedding，用于后续 query linking 和 synonymy edge 构造。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。当前没有一个现有 representation 能一次性产出“query-independent 的 passage OpenIE 图节点 + 图边 + 专用于节点链接的 embedding 载体”。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 瀵规瘡涓?passage 鍏堟娊 named entities锛屽啀鎶?named entities 鏀惧洖 prompt 閲屽仛 NER-conditioned triple extraction銆?  - 鍚屾椂涓?entity / noun phrase 寤?embedding锛岀敤浜庡悗缁?query linking 鍜?synonymy edge 鏋勯€犮€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆傚綋鍓嶆病鏈変竴涓幇鏈?representation 鑳戒竴娆℃€т骇鍑衡€渜uery-independent 鐨?passage OpenIE 鍥捐妭鐐?+ 鍥捐竟 + 涓撶敤浜庤妭鐐归摼鎺ョ殑 embedding 杞戒綋鈥濄€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BasicRepresentation(elements=("text", "embedding", "entities", "triple"))`
-    - 能覆盖“抽实体、抽三元组、做 embedding”这一外观，但当前语义更像把结果附着在单个 `MemoryUnit` 上，不等于 HippoRAG 所需的 NER-conditioned OpenIE 索引表示。
-  - `KeywordRepresentation`
-    - 只能覆盖 lexical side information，与论文核心表示不足够匹配。
-- 当前缺失什么能力
-  - 缺少“先 NER、再用 NER 约束 triple extraction”的两阶段表示模块。
-  - 缺少把 noun phrase / entity 作为图节点级对象稳定输出的表示边界。
-  - 缺少“passage-node incidence 信息”在表示阶段的明确产物。
-  - 缺少 query 侧 named entity extraction 的对称机制；当前 recall 路径没有单独的 query representation slot，只能落到 retrieval 内部实现。
-- 你的判断依据是什么
-  - 论文明说：先 extract named entities，再把 named entities 加入 OpenIE prompt 以抽 triples。
-  - repo 实现可确认：`prompts/templates/ner.py` 与 `prompts/templates/triple_extraction.py` 显示确有 NER 与 NER-conditioned triple extraction 两阶段 prompt；`openie_vllm_offline.py` 也按该顺序批量执行。
-  - 推断：MemPrimitive 当前 `BasicRepresentation` 虽然有 `entities` 和 `triple`，但没有稳定暴露“图节点对象化 + 后续链接专用表示”的能力边界，因此只能部分复用。
-
+    - 鑳借鐩栤€滄娊瀹炰綋銆佹娊涓夊厓缁勩€佸仛 embedding鈥濊繖涓€澶栬锛屼絾褰撳墠璇箟鏇村儚鎶婄粨鏋滈檮鐫€鍦ㄥ崟涓?`MemoryUnit` 涓婏紝涓嶇瓑浜?HippoRAG 鎵€闇€鐨?NER-conditioned OpenIE 绱㈠紩琛ㄧず銆?  - `KeywordRepresentation`
+    - 鍙兘瑕嗙洊 lexical side information锛屼笌璁烘枃鏍稿績琛ㄧず涓嶈冻澶熷尮閰嶃€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥滃厛 NER銆佸啀鐢?NER 绾︽潫 triple extraction鈥濈殑涓ら樁娈佃〃绀烘ā鍧椼€?  - 缂哄皯鎶?noun phrase / entity 浣滀负鍥捐妭鐐圭骇瀵硅薄绋冲畾杈撳嚭鐨勮〃绀鸿竟鐣屻€?  - 缂哄皯鈥減assage-node incidence 淇℃伅鈥濆湪琛ㄧず闃舵鐨勬槑纭骇鐗┿€?  - 缂哄皯 query 渚?named entity extraction 鐨勫绉版満鍒讹紱褰撳墠 recall 璺緞娌℃湁鍗曠嫭鐨?query representation slot锛屽彧鑳借惤鍒?retrieval 鍐呴儴瀹炵幇銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氬厛 extract named entities锛屽啀鎶?named entities 鍔犲叆 OpenIE prompt 浠ユ娊 triples銆?  - repo 瀹炵幇鍙‘璁わ細`prompts/templates/ner.py` 涓?`prompts/templates/triple_extraction.py` 鏄剧ず纭湁 NER 涓?NER-conditioned triple extraction 涓ら樁娈?prompt锛沗openie_vllm_offline.py` 涔熸寜璇ラ『搴忔壒閲忔墽琛屻€?  - 鎺ㄦ柇锛歁emPrimitive 褰撳墠 `BasicRepresentation` 铏界劧鏈?`entities` 鍜?`triple`锛屼絾娌℃湁绋冲畾鏆撮湶鈥滃浘鑺傜偣瀵硅薄鍖?+ 鍚庣画閾炬帴涓撶敤琛ㄧず鈥濈殑鑳藉姏杈圭晫锛屽洜姝ゅ彧鑳介儴鍒嗗鐢ㄣ€?
 #### write_trigger
 
-- 论文里做了什么
-  - 论文主体把 indexing 视为离线全量构建过程，没有复杂的 selective write 机制；新 passage 通常直接纳入索引。
-- MemPrimitive 现有哪些模块可直接复用
-  - `AlwaysWriteTrigger`：可直接表达“所有 passage 均进入索引”。
-- 哪些模块只能部分复用
-  - `ThresholdWriteTrigger`：技术上能用，但不是论文核心机制。
-- 当前缺失什么能力
-  - 无关键缺口。HippoRAG 的创新点不在 write gating。
-- 你的判断依据是什么
-  - 论文明说：offline indexing 处理整个 retrieval corpus。
-  - repo 实现可确认：`index(docs)` 对输入 docs 批量执行 OpenIE 和图构建，没有单独的 selective write 判定阶段。
-  - 推断：该 slot 可直接用最简单的全写入表达。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 璁烘枃涓讳綋鎶?indexing 瑙嗕负绂荤嚎鍏ㄩ噺鏋勫缓杩囩▼锛屾病鏈夊鏉傜殑 selective write 鏈哄埗锛涙柊 passage 閫氬父鐩存帴绾冲叆绱㈠紩銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `AlwaysTrigger`锛氬彲鐩存帴琛ㄨ揪鈥滄墍鏈?passage 鍧囪繘鍏ョ储寮曗€濄€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`锛氭妧鏈笂鑳界敤锛屼絾涓嶆槸璁烘枃鏍稿績鏈哄埗銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€侶ippoRAG 鐨勫垱鏂扮偣涓嶅湪 write gating銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歰ffline indexing 澶勭悊鏁翠釜 retrieval corpus銆?  - repo 瀹炵幇鍙‘璁わ細`index(docs)` 瀵硅緭鍏?docs 鎵归噺鎵ц OpenIE 鍜屽浘鏋勫缓锛屾病鏈夊崟鐙殑 selective write 鍒ゅ畾闃舵銆?  - 鎺ㄦ柇锛氳 slot 鍙洿鎺ョ敤鏈€绠€鍗曠殑鍏ㄥ啓鍏ヨ〃杈俱€?
 #### organization
 
-- 论文里做了什么
-  - 组织成一个开放式 KG / hippocampal index。
-  - 图里至少包含 noun phrase / entity 层面的节点、triple 诱导的关系边，以及 node-to-passage 的归属统计；论文还显式提到一个记录 noun phrase 在各 passage 中出现次数的矩阵，用于把节点激活聚合回 passage。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 缁勭粐鎴愪竴涓紑鏀惧紡 KG / hippocampal index銆?  - 鍥鹃噷鑷冲皯鍖呭惈 noun phrase / entity 灞傞潰鐨勮妭鐐广€乼riple 璇卞鐨勫叧绯昏竟锛屼互鍙?node-to-passage 鐨勫綊灞炵粺璁★紱璁烘枃杩樻樉寮忔彁鍒颁竴涓褰?noun phrase 鍦ㄥ悇 passage 涓嚭鐜版鏁扮殑鐭╅樀锛岀敤浜庢妸鑺傜偣婵€娲昏仛鍚堝洖 passage銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphAppendOrganization`
-    - 能把记录放进 graph layer，并写一些 graph metadata。
-    - 但它的“图”仍然是 record-centric metadata graph，不是 HippoRAG 那种显式 node/edge/index 结构。
-  - `GraphAppendLinkReadyOrganization`
-    - 能准备图层 + link-ready metadata，但设计目标是 note graph/A-MEM 风格，不是 passage-entity-triple 异构索引。
-- 当前缺失什么能力
-  - 缺少异构图组织能力：需要同时表示 passage 节点、entity/noun phrase 节点、relation/fact 边，且这些对象不是同一种普通 `MemoryRecord` 就能自然表达。
-  - 缺少 node-to-passage incidence matrix 或等价统计结构。
-  - 缺少“图节点级 embedding store”与 record store 的明确分离。
-  - 缺少 synonymy edge 将加入何处、如何与原始 triple edges 并存的正式组织边界。
-- 你的判断依据是什么
-  - 论文明说：HippoRAG builds an open KG and defines a matrix containing the number of times each noun phrase appears in each original passage。
-  - repo 实现可确认：`EmbeddingStore` 分别维护 chunk/entity/fact 三套存储；`HippoRAG.index()` 明确构建图并单独维护实体、事实、passage 的 embedding 与图连接。
-  - 推断：MemPrimitive 现有 graph organization 只够表达“记录之间有图链接”，不足以直接表达 HippoRAG 的异构图索引。
-
+    - 鑳芥妸璁板綍鏀捐繘 graph layer锛屽苟鍐欎竴浜?graph metadata銆?    - 浣嗗畠鐨勨€滃浘鈥濅粛鐒舵槸 record-centric metadata graph锛屼笉鏄?HippoRAG 閭ｇ鏄惧紡 node/edge/index 缁撴瀯銆?  - `GraphAppendLinkReadyOrganization`
+    - 鑳藉噯澶囧浘灞?+ link-ready metadata锛屼絾璁捐鐩爣鏄?note graph/A-MEM 椋庢牸锛屼笉鏄?passage-entity-triple 寮傛瀯绱㈠紩銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯寮傛瀯鍥剧粍缁囪兘鍔涳細闇€瑕佸悓鏃惰〃绀?passage 鑺傜偣銆乪ntity/noun phrase 鑺傜偣銆乺elation/fact 杈癸紝涓旇繖浜涘璞′笉鏄悓涓€绉嶆櫘閫?`MemoryRecord` 灏辫兘鑷劧琛ㄨ揪銆?  - 缂哄皯 node-to-passage incidence matrix 鎴栫瓑浠风粺璁＄粨鏋勩€?  - 缂哄皯鈥滃浘鑺傜偣绾?embedding store鈥濅笌 record store 鐨勬槑纭垎绂汇€?  - 缂哄皯 synonymy edge 灏嗗姞鍏ヤ綍澶勩€佸浣曚笌鍘熷 triple edges 骞跺瓨鐨勬寮忕粍缁囪竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欻ippoRAG builds an open KG and defines a matrix containing the number of times each noun phrase appears in each original passage銆?  - repo 瀹炵幇鍙‘璁わ細`EmbeddingStore` 鍒嗗埆缁存姢 chunk/entity/fact 涓夊瀛樺偍锛沗HippoRAG.index()` 鏄庣‘鏋勫缓鍥惧苟鍗曠嫭缁存姢瀹炰綋銆佷簨瀹炪€乸assage 鐨?embedding 涓庡浘杩炴帴銆?  - 鎺ㄦ柇锛歁emPrimitive 鐜版湁 graph organization 鍙琛ㄨ揪鈥滆褰曚箣闂存湁鍥鹃摼鎺モ€濓紝涓嶈冻浠ョ洿鎺ヨ〃杈?HippoRAG 鐨勫紓鏋勫浘绱㈠紩銆?
 #### evolution_trigger
 
-- 论文里做了什么
-  - 论文没有把“何时做额外演化”单独当成一个在线控制问题来讲；同义/相似节点连边更像索引构建流水线中的固定步骤。
-- MemPrimitive 现有哪些模块可直接复用
-  - `NeverEvolutionTrigger`：如果把图增强视为 organization 内部完成，则可以直接不使用额外 evolution trigger。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 璁烘枃娌℃湁鎶娾€滀綍鏃跺仛棰濆婕斿寲鈥濆崟鐙綋鎴愪竴涓湪绾挎帶鍒堕棶棰樻潵璁诧紱鍚屼箟/鐩镐技鑺傜偣杩炶竟鏇村儚绱㈠紩鏋勫缓娴佹按绾夸腑鐨勫浐瀹氭楠ゃ€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `NeverTrigger`锛氬鏋滄妸鍥惧寮鸿涓?organization 鍐呴儴瀹屾垚锛屽垯鍙互鐩存帴涓嶄娇鐢ㄩ澶?evolution trigger銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `NeighborExistsEvolutionTrigger`
-    - 语义上像“已有图邻居时再做额外图维护”，但 HippoRAG 的 synonymy edge augmentation 不是由现成邻居存在触发，而是由 embedding similarity 规则触发。
-  - `ThresholdEvolutionTrigger`
-    - 只能充当占位控制，不是论文语义。
-- 当前缺失什么能力
-  - 若坚持把 synonymy augmentation 放入 `memory_evolution` slot，则缺少一个“新 passage / 新节点写入后，对候选 entity 节点做 similarity linking”的专用触发器。
-- 你的判断依据是什么
-  - 论文明说：synonymy relations 是 indexing process 的组成部分。
-  - repo 实现可确认：`index()` 在图构建后调用 `add_synonymy_edges()`，并非单独的在线检索期触发。
-  - 推断：该 slot 在 HippoRAG 中较弱，但若要在 MemPrimitive 内干净落位，最好补一个 graph augmentation trigger。
-
+    - 璇箟涓婂儚鈥滃凡鏈夊浘閭诲眳鏃跺啀鍋氶澶栧浘缁存姢鈥濓紝浣?HippoRAG 鐨?synonymy edge augmentation 涓嶆槸鐢辩幇鎴愰偦灞呭瓨鍦ㄨЕ鍙戯紝鑰屾槸鐢?embedding similarity 瑙勫垯瑙﹀彂銆?  - `ThresholdTrigger`
+    - 鍙兘鍏呭綋鍗犱綅鎺у埗锛屼笉鏄鏂囪涔夈€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鑻ュ潥鎸佹妸 synonymy augmentation 鏀惧叆 `memory_evolution` slot锛屽垯缂哄皯涓€涓€滄柊 passage / 鏂拌妭鐐瑰啓鍏ュ悗锛屽鍊欓€?entity 鑺傜偣鍋?similarity linking鈥濈殑涓撶敤瑙﹀彂鍣ㄣ€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歴ynonymy relations 鏄?indexing process 鐨勭粍鎴愰儴鍒嗐€?  - repo 瀹炵幇鍙‘璁わ細`index()` 鍦ㄥ浘鏋勫缓鍚庤皟鐢?`add_synonymy_edges()`锛屽苟闈炲崟鐙殑鍦ㄧ嚎妫€绱㈡湡瑙﹀彂銆?  - 鎺ㄦ柇锛氳 slot 鍦?HippoRAG 涓緝寮憋紝浣嗚嫢瑕佸湪 MemPrimitive 鍐呭共鍑€钀戒綅锛屾渶濂借ˉ涓€涓?graph augmentation trigger銆?
 #### memory_evolution
 
-- 论文里做了什么
-  - 在基础 OpenIE 图之上，用 retrieval encoder 为相似但不完全相同的 noun phrases/entity 增补 synonymy/similarity edges，帮助 pattern completion。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍦ㄥ熀纭€ OpenIE 鍥句箣涓婏紝鐢?retrieval encoder 涓虹浉浼间絾涓嶅畬鍏ㄧ浉鍚岀殑 noun phrases/entity 澧炶ˉ synonymy/similarity edges锛屽府鍔?pattern completion銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphLinkEvolution`
-    - 能在 graph layer 里补 link，但当前假设是 record-to-record 邻接，不是 entity-node embedding 相似驱动的节点级 augmentation。
-  - `GraphNeighborAppendEvolution`
-    - 只是 `GraphLinkEvolution` 的兼容包装，能力边界相同。
-  - `LinkStrengtheningEvolution`
-    - 能做图链接强化，但设计前提是 note graph + LLM judge，不是 HippoRAG 的 retrieval-encoder synonymy edge。
-- 当前缺失什么能力
-  - 缺少“基于节点 embedding 相似度阈值批量建立 synonymy edges”的显式演化模块。
-  - 缺少对异构图节点级别而非 record 级别的边写回。
-  - 缺少把 node specificity 所需的 local support statistics 作为图演化副产物持久化。
-- 你的判断依据是什么
-  - 论文明说：额外边来自 retrieval encoders，在 entity representations cosine similarity 超过阈值时加入。
-  - repo 实现可确认：`index()` 在 `add_fact_edges` / `add_passage_edges` 之后调用 `add_synonymy_edges()`。
-  - 推断：当前 MemPrimitive 图演化家族更接近 record graph 或 note graph，不足以无新增模块表达 HippoRAG 的 synonymy augmentation。
-
+    - 鑳藉湪 graph layer 閲岃ˉ link锛屼絾褰撳墠鍋囪鏄?record-to-record 閭绘帴锛屼笉鏄?entity-node embedding 鐩镐技椹卞姩鐨勮妭鐐圭骇 augmentation銆?  - `GraphNeighborAppendEvolution`
+    - 鍙槸 `GraphLinkEvolution` 鐨勫吋瀹瑰寘瑁咃紝鑳藉姏杈圭晫鐩稿悓銆?  - `LinkStrengtheningEvolution`
+    - 鑳藉仛鍥鹃摼鎺ュ己鍖栵紝浣嗚璁″墠鎻愭槸 note graph + LLM judge锛屼笉鏄?HippoRAG 鐨?retrieval-encoder synonymy edge銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥滃熀浜庤妭鐐?embedding 鐩镐技搴﹂槇鍊兼壒閲忓缓绔?synonymy edges鈥濈殑鏄惧紡婕斿寲妯″潡銆?  - 缂哄皯瀵瑰紓鏋勫浘鑺傜偣绾у埆鑰岄潪 record 绾у埆鐨勮竟鍐欏洖銆?  - 缂哄皯鎶?node specificity 鎵€闇€鐨?local support statistics 浣滀负鍥炬紨鍖栧壇浜х墿鎸佷箙鍖栥€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氶澶栬竟鏉ヨ嚜 retrieval encoders锛屽湪 entity representations cosine similarity 瓒呰繃闃堝€兼椂鍔犲叆銆?  - repo 瀹炵幇鍙‘璁わ細`index()` 鍦?`add_fact_edges` / `add_passage_edges` 涔嬪悗璋冪敤 `add_synonymy_edges()`銆?  - 鎺ㄦ柇锛氬綋鍓?MemPrimitive 鍥炬紨鍖栧鏃忔洿鎺ヨ繎 record graph 鎴?note graph锛屼笉瓒充互鏃犳柊澧炴ā鍧楄〃杈?HippoRAG 鐨?synonymy augmentation銆?
 #### retrieval
 
-- 论文里做了什么
-  - query 先抽 named entities。
-  - 把 query named entities 链接到 KG 节点，形成 query nodes。
-  - 用 query nodes 作为 Personalized PageRank 种子，并做 node specificity 加权。
-  - 将 PPR 后的节点概率聚合到 passage 分数，输出 top passages。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - query 鍏堟娊 named entities銆?  - 鎶?query named entities 閾炬帴鍒?KG 鑺傜偣锛屽舰鎴?query nodes銆?  - 鐢?query nodes 浣滀负 Personalized PageRank 绉嶅瓙锛屽苟鍋?node specificity 鍔犳潈銆?  - 灏?PPR 鍚庣殑鑺傜偣姒傜巼鑱氬悎鍒?passage 鍒嗘暟锛岃緭鍑?top passages銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphSeedAndExpandRetrieval`
-    - 覆盖了“从 query 找 graph seed 再做一跳扩散”的粗轮廓，但当前是 token/entity overlap + one-hop expansion，不是 query entity linking + PPR。
-  - `VectorGraphSeedAndExpandRetrieval`
-    - 覆盖了“vector seed + graph expansion”的粗轮廓，但服务对象是 enriched note graph，不是 HippoRAG 的 noun phrase/entity KG。
-  - `EmbeddingSimilarityRetrieval`
-    - 可复用其中的 embedding 相似度计算直觉，但它只做向量检索，不做图上传播和 passage 聚合。
-  - `LayerAwareRetrieval`
-    - 只是在层间分发结果，不触及 HippoRAG 的核心检索算法。
-- 当前缺失什么能力
-  - 缺少 query named entity extraction + entity-to-node linking 的 retrieval 前半段。
-  - 缺少 Personalized PageRank 检索器。
-  - 缺少 node specificity / local support statistics 加权。
-  - 缺少 node-to-passage incidence 聚合，把节点激活分数映射回 passage 排序。
-  - 缺少与原论文一致的“单步多跳”图扩散检索语义。
-- 你的判断依据是什么
-  - 论文明说：query named entities -> query nodes -> PPR -> multiply by passage incidence matrix 得 passage ranking。
-  - repo 实现可确认：`HippoRAG.retrieve()` 与 `run_ppr()` 表明 repo 确实有 PPR 检索主干；同时当前主分支还引入了 fact scoring、DSPy rerank、passage node weight 等更偏 HippoRAG 2 的控制逻辑。
-  - 依据论文与 repo 做出的合理推断：即使不照搬 repo 的新细节，MemPrimitive 仍缺少 original HippoRAG 所需的 PPR retrieval primitive。
-
+    - 瑕嗙洊浜嗏€滀粠 query 鎵?graph seed 鍐嶅仛涓€璺虫墿鏁ｂ€濈殑绮楄疆寤擄紝浣嗗綋鍓嶆槸 token/entity overlap + one-hop expansion锛屼笉鏄?query entity linking + PPR銆?  - `VectorGraphSeedAndExpandRetrieval`
+    - 瑕嗙洊浜嗏€渧ector seed + graph expansion鈥濈殑绮楄疆寤擄紝浣嗘湇鍔″璞℃槸 enriched note graph锛屼笉鏄?HippoRAG 鐨?noun phrase/entity KG銆?  - `EmbeddingSimilarityRetrieval`
+    - 鍙鐢ㄥ叾涓殑 embedding 鐩镐技搴﹁绠楃洿瑙夛紝浣嗗畠鍙仛鍚戦噺妫€绱紝涓嶅仛鍥句笂浼犳挱鍜?passage 鑱氬悎銆?  - `LayerAwareRetrieval`
+    - 鍙槸鍦ㄥ眰闂村垎鍙戠粨鏋滐紝涓嶈Е鍙?HippoRAG 鐨勬牳蹇冩绱㈢畻娉曘€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 query named entity extraction + entity-to-node linking 鐨?retrieval 鍓嶅崐娈点€?  - 缂哄皯 Personalized PageRank 妫€绱㈠櫒銆?  - 缂哄皯 node specificity / local support statistics 鍔犳潈銆?  - 缂哄皯 node-to-passage incidence 鑱氬悎锛屾妸鑺傜偣婵€娲诲垎鏁版槧灏勫洖 passage 鎺掑簭銆?  - 缂哄皯涓庡師璁烘枃涓€鑷寸殑鈥滃崟姝ュ璺斥€濆浘鎵╂暎妫€绱㈣涔夈€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歲uery named entities -> query nodes -> PPR -> multiply by passage incidence matrix 寰?passage ranking銆?  - repo 瀹炵幇鍙‘璁わ細`HippoRAG.retrieve()` 涓?`run_ppr()` 琛ㄦ槑 repo 纭疄鏈?PPR 妫€绱富骞诧紱鍚屾椂褰撳墠涓诲垎鏀繕寮曞叆浜?fact scoring銆丏SPy rerank銆乸assage node weight 绛夋洿鍋?HippoRAG 2 鐨勬帶鍒堕€昏緫銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍗充娇涓嶇収鎼?repo 鐨勬柊缁嗚妭锛孧emPrimitive 浠嶇己灏?original HippoRAG 鎵€闇€鐨?PPR retrieval primitive銆?
 #### readout
 
-- 论文里做了什么
-  - 把 top-ranked passages 返回给 reader/QA 模块；readout 本身不是论文创新点。
-- MemPrimitive 现有哪些模块可直接复用
-  - `ConcatenateReadout`
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鎶?top-ranked passages 杩斿洖缁?reader/QA 妯″潡锛況eadout 鏈韩涓嶆槸璁烘枃鍒涙柊鐐广€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `ConcatenateReadout`
   - `BulletListReadout`
   - `GroupedByLayerReadout`
-  - 这些都足以把检索出的 passages 线性整理给下游。
-- 哪些模块只能部分复用
+  - 杩欎簺閮借冻浠ユ妸妫€绱㈠嚭鐨?passages 绾挎€ф暣鐞嗙粰涓嬫父銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphReadout`
-    - 适合调试图结构，但不是 HippoRAG 论文默认的 passage readout。
-- 当前缺失什么能力
-  - 无关键缺口。只要 retrieval 已经产出正确的 passage ranking，readout 用现有模块即可。
-- 你的判断依据是什么
-  - 论文明说：PPR 最终用于 rank passages for retrieval。
-  - repo 实现可确认：`retrieve()` 返回 top_k docs 文本列表。
-  - 推断：HippoRAG 的 readout 可以由 MemPrimitive 现有通用文本 readout 直接承担。
-
-### 与 MemPrimitive 现有组件的对照结论
-
-| slot | 结论 | 说明 |
+    - 閫傚悎璋冭瘯鍥剧粨鏋勶紝浣嗕笉鏄?HippoRAG 璁烘枃榛樿鐨?passage readout銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€傚彧瑕?retrieval 宸茬粡浜у嚭姝ｇ‘鐨?passage ranking锛宺eadout 鐢ㄧ幇鏈夋ā鍧楀嵆鍙€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歅PR 鏈€缁堢敤浜?rank passages for retrieval銆?  - repo 瀹炵幇鍙‘璁わ細`retrieve()` 杩斿洖 top_k docs 鏂囨湰鍒楄〃銆?  - 鎺ㄦ柇锛欻ippoRAG 鐨?readout 鍙互鐢?MemPrimitive 鐜版湁閫氱敤鏂囨湰 readout 鐩存帴鎵挎媴銆?
+### 涓?MemPrimitive 鐜版湁缁勪欢鐨勫鐓х粨璁?
+| slot | 缁撹 | 璇存槑 |
 | --- | --- | --- |
-| `unit_formation` | 直接复用 | passage 级写入单元可由 `PassThroughUnitFormation` 直接表达 |
-| `representation` | 部分复用 | 有 entities/triples/embedding，但缺 NER-conditioned OpenIE 与节点级表示边界 |
-| `write_trigger` | 直接复用 | `AlwaysWriteTrigger` 足够 |
-| `organization` | 部分复用 | 有 graph layer，但不是 HippoRAG 所需异构图索引 |
-| `evolution_trigger` | 部分复用 | 论文弱化该 slot，但若单列 synonymy augmentation 触发，现有触发器不贴合 |
-| `memory_evolution` | 部分复用 | 有 graph link evolution，但没有节点 embedding 相似驱动的 synonymy augmentation |
-| `retrieval` | 部分复用 | 有 seed-and-expand 雏形，但缺 query linking、PPR、node specificity、passage 聚合 |
-| `readout` | 直接复用 | 通用 passage readout 即可 |
+| `unit_formation` | 鐩存帴澶嶇敤 | passage 绾у啓鍏ュ崟鍏冨彲鐢?`PassThroughUnitFormation` 鐩存帴琛ㄨ揪 |
+| `representation` | 閮ㄥ垎澶嶇敤 | 鏈?entities/triples/embedding锛屼絾缂?NER-conditioned OpenIE 涓庤妭鐐圭骇琛ㄧず杈圭晫 |
+| `write_trigger` | 鐩存帴澶嶇敤 | `AlwaysTrigger` 瓒冲 |
+| `organization` | 閮ㄥ垎澶嶇敤 | 鏈?graph layer锛屼絾涓嶆槸 HippoRAG 鎵€闇€寮傛瀯鍥剧储寮?|
+| `evolution_trigger` | 閮ㄥ垎澶嶇敤 | 璁烘枃寮卞寲璇?slot锛屼絾鑻ュ崟鍒?synonymy augmentation 瑙﹀彂锛岀幇鏈夎Е鍙戝櫒涓嶈创鍚?|
+| `memory_evolution` | 閮ㄥ垎澶嶇敤 | 鏈?graph link evolution锛屼絾娌℃湁鑺傜偣 embedding 鐩镐技椹卞姩鐨?synonymy augmentation |
+| `retrieval` | 閮ㄥ垎澶嶇敤 | 鏈?seed-and-expand 闆忓舰锛屼絾缂?query linking銆丳PR銆乶ode specificity銆乸assage 鑱氬悎 |
+| `readout` | 鐩存帴澶嶇敤 | 閫氱敤 passage readout 鍗冲彲 |
 
-### 重表达判断
+### 閲嶈〃杈惧垽鏂?
+鍙兘閮ㄥ垎鏄犲皠銆?
+鍘熷洜涓嶆槸 slot 鏁伴噺涓嶅锛岃€屾槸褰撳墠缂虹殑姝ｅソ鏄?HippoRAG 鏈€鏍稿績鐨勫嚑娈垫満鍒讹細
 
-只能部分映射。
+- 寮傛瀯鍥剧储寮曡€岄潪鏅€?record graph
+- query 瀹炰綋鎶藉彇涓庤妭鐐归摼鎺?- Personalized PageRank 妫€绱?- 鑺傜偣婵€娲诲埌 passage 鎺掑悕鐨勮仛鍚堢煩闃?缁熻缁撴瀯
 
-原因不是 slot 数量不够，而是当前缺的正好是 HippoRAG 最核心的几段机制：
-
-- 异构图索引而非普通 record graph
-- query 实体抽取与节点链接
-- Personalized PageRank 检索
-- 节点激活到 passage 排名的聚合矩阵/统计结构
-
-如果只用现有模块强行拼装，最多能做出“有 triples、有 graph、有 seed-expand”的近似版，但很难把 HippoRAG 最关键的单步多跳 pattern completion 检索语义表达准确。
-
-### 备注与证据边界
-
-- 论文明说
-  - 离线阶段: passage -> named entities -> NER-conditioned OpenIE triples -> open KG。
-  - 额外用 retrieval encoders 添加 synonymy relations。
-  - 在线阶段: query named entities -> query nodes -> Personalized PageRank -> passage ranking。
-  - node specificity 用于调节 query node 概率。
-- repo 实现可确认
-  - repo 主分支保留了 OpenIE、独立的 entity/fact/passage embedding stores、图构建与 `run_ppr()`。
-  - `prompts/templates/ner.py` 与 `prompts/templates/triple_extraction.py` 证实了两阶段 NER + triple extraction。
-  - `HippoRAG.retrieve()` 证实当前实现仍以图检索和 PPR 为骨架。
-- 依据论文与 repo 做出的合理推断
-  - 需要在 MemPrimitive 中新增的，不只是一个 `PPRRetrieval`，还包括与之配套的异构图组织与 node-to-passage 聚合结构。
-  - query entity extraction 在当前 slot 体系下更适合落入 retrieval module 内部，而不是强行塞进 ingest-side representation。
-- 当前证据不足、不能下结论的点
-  - 官方 repo 当前主分支已明显带有 HippoRAG 2 演化痕迹，包含 fact scoring、DSPy rerank、passage node weight 等逻辑；这些不应直接当成 2024 原论文的严格机制。
-  - 论文没有把所有工程性图数据结构完全形式化到可一一映射 MemPrimitive contract 的粒度，因此某些“矩阵是 organization 产物还是 retrieval 辅助索引”只能做合理落位，不能声称唯一正确。
-
+濡傛灉鍙敤鐜版湁妯″潡寮鸿鎷艰锛屾渶澶氳兘鍋氬嚭鈥滄湁 triples銆佹湁 graph銆佹湁 seed-expand鈥濈殑杩戜技鐗堬紝浣嗗緢闅炬妸 HippoRAG 鏈€鍏抽敭鐨勫崟姝ュ璺?pattern completion 妫€绱㈣涔夎〃杈惧噯纭€?
+### 澶囨敞涓庤瘉鎹竟鐣?
+- 璁烘枃鏄庤
+  - 绂荤嚎闃舵: passage -> named entities -> NER-conditioned OpenIE triples -> open KG銆?  - 棰濆鐢?retrieval encoders 娣诲姞 synonymy relations銆?  - 鍦ㄧ嚎闃舵: query named entities -> query nodes -> Personalized PageRank -> passage ranking銆?  - node specificity 鐢ㄤ簬璋冭妭 query node 姒傜巼銆?- repo 瀹炵幇鍙‘璁?  - repo 涓诲垎鏀繚鐣欎簡 OpenIE銆佺嫭绔嬬殑 entity/fact/passage embedding stores銆佸浘鏋勫缓涓?`run_ppr()`銆?  - `prompts/templates/ner.py` 涓?`prompts/templates/triple_extraction.py` 璇佸疄浜嗕袱闃舵 NER + triple extraction銆?  - `HippoRAG.retrieve()` 璇佸疄褰撳墠瀹炵幇浠嶄互鍥炬绱㈠拰 PPR 涓洪鏋躲€?- 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂?  - 闇€瑕佸湪 MemPrimitive 涓柊澧炵殑锛屼笉鍙槸涓€涓?`PPRRetrieval`锛岃繕鍖呮嫭涓庝箣閰嶅鐨勫紓鏋勫浘缁勭粐涓?node-to-passage 鑱氬悎缁撴瀯銆?  - query entity extraction 鍦ㄥ綋鍓?slot 浣撶郴涓嬫洿閫傚悎钀藉叆 retrieval module 鍐呴儴锛岃€屼笉鏄己琛屽杩?ingest-side representation銆?- 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+  - 瀹樻柟 repo 褰撳墠涓诲垎鏀凡鏄庢樉甯︽湁 HippoRAG 2 婕斿寲鐥曡抗锛屽寘鍚?fact scoring銆丏SPy rerank銆乸assage node weight 绛夐€昏緫锛涜繖浜涗笉搴旂洿鎺ュ綋鎴?2024 鍘熻鏂囩殑涓ユ牸鏈哄埗銆?  - 璁烘枃娌℃湁鎶婃墍鏈夊伐绋嬫€у浘鏁版嵁缁撴瀯瀹屽叏褰㈠紡鍖栧埌鍙竴涓€鏄犲皠 MemPrimitive contract 鐨勭矑搴︼紝鍥犳鏌愪簺鈥滅煩闃垫槸 organization 浜х墿杩樻槸 retrieval 杈呭姪绱㈠紩鈥濆彧鑳藉仛鍚堢悊钀戒綅锛屼笉鑳藉０绉板敮涓€姝ｇ‘銆?
 ## AriGraph: Learning Knowledge Graph World Models with Episodic Memory for LLM Agents
 
-论文链接: <https://arxiv.org/abs/2407.04363>
+璁烘枃閾炬帴: <https://arxiv.org/abs/2407.04363>
 
-官方 repo: <https://github.com/AIRI-Institute/AriGraph>
+瀹樻柟 repo: <https://github.com/AIRI-Institute/AriGraph>
 
-### 论文侧 memory 机制速写
+### 璁烘枃渚?memory 鏈哄埗閫熷啓
 
-AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 world model memory。其核心是把每一步 observation 同时写进两套相互连接的记忆：
+AriGraph 涓嶆槸绂荤嚎鏂囨。绱㈠紩鍨?memory锛岃€屾槸闈㈠悜浜や簰寮忕幆澧冪殑 world model memory銆傚叾鏍稿績鏄妸姣忎竴姝?observation 鍚屾椂鍐欒繘涓ゅ鐩镐簰杩炴帴鐨勮蹇嗭細
 
-- semantic memory：把 observation 中抽取出的 triplet `(object1, relation, object2)` 并入语义图。
-- episodic memory：把该步 observation 本身作为 episodic vertex 保存，并用 episodic edge 把“这一步同时出现的语义 triplets”与该 observation 连接起来。
+- semantic memory锛氭妸 observation 涓娊鍙栧嚭鐨?triplet `(object1, relation, object2)` 骞跺叆璇箟鍥俱€?- episodic memory锛氭妸璇ユ observation 鏈韩浣滀负 episodic vertex 淇濆瓨锛屽苟鐢?episodic edge 鎶娾€滆繖涓€姝ュ悓鏃跺嚭鐜扮殑璇箟 triplets鈥濅笌璇?observation 杩炴帴璧锋潵銆?
+鍦ㄥ啓鍏ユ椂锛孉riGraph 涓嶅彧鏄?append 鏂?triplets锛岃繕浼氬厛瀹氫綅涓庡綋鍓?observation 鎻愬埌瀵硅薄鐩稿叧鐨勬棦鏈?semantic edges锛岃瘑鍒叾涓凡杩囨椂鐨勪簨瀹炲苟鍒犻櫎锛屽啀鎶婃柊 triplets 鍐欏叆銆? 
+鍦ㄦ绱㈡椂锛岃鏂囬噰鐢ㄤ袱闃舵杩囩▼锛?
+1. semantic search锛氬厛鎸?query 鎵剧浉鍏?triplets锛屽啀娌?semantic graph 鍋氬彈娣卞害/瀹藉害鎺у埗鐨勬墿灞曘€?2. episodic search锛氬啀鏍规嵁杩欎簺 triplets 鍙嶆煡鐩稿叧 episodic observations锛岃緭鍑烘渶鐩稿叧鐨?past experiences銆?
+浠?MemPrimitive 鐨?slot 瑙嗚鐪嬶紝瀹冩洿鍍忥細
 
-在写入时，AriGraph 不只是 append 新 triplets，还会先定位与当前 observation 提到对象相关的既有 semantic edges，识别其中已过时的事实并删除，再把新 triplets 写入。  
-在检索时，论文采用两阶段过程：
-
-1. semantic search：先按 query 找相关 triplets，再沿 semantic graph 做受深度/宽度控制的扩展。
-2. episodic search：再根据这些 triplets 反查相关 episodic observations，输出最相关的 past experiences。
-
-从 MemPrimitive 的 slot 视角看，它更像：
-
-- `unit_formation`：每步 observation 作为写入单元。
-- `representation`：把 observation 解析成 semantic triplets。
-- `write_trigger`：每步 observation 默认都写入。
-- `organization`：同时维护 semantic graph 与 episodic observation linkage。
-- `evolution_trigger`：每步 observation 都触发对已有 semantic memory 的更新。
-- `memory_evolution`：删除与新 observation 冲突或已过时的旧 triplets。
-- `retrieval`：先 semantic graph retrieval，再 episodic memory retrieval。
-- `readout`：把检索出的语义 facts 与 episodic observations 整理给规划/决策模块。
-
-### 按 MemPrimitive slot 的拆解
-
+- `unit_formation`锛氭瘡姝?observation 浣滀负鍐欏叆鍗曞厓銆?- `representation`锛氭妸 observation 瑙ｆ瀽鎴?semantic triplets銆?- `write_trigger`锛氭瘡姝?observation 榛樿閮藉啓鍏ャ€?- `organization`锛氬悓鏃剁淮鎶?semantic graph 涓?episodic observation linkage銆?- `evolution_trigger`锛氭瘡姝?observation 閮借Е鍙戝宸叉湁 semantic memory 鐨勬洿鏂般€?- `memory_evolution`锛氬垹闄や笌鏂?observation 鍐茬獊鎴栧凡杩囨椂鐨勬棫 triplets銆?- `retrieval`锛氬厛 semantic graph retrieval锛屽啀 episodic memory retrieval銆?- `readout`锛氭妸妫€绱㈠嚭鐨勮涔?facts 涓?episodic observations 鏁寸悊缁欒鍒?鍐崇瓥妯″潡銆?
+### 鎸?MemPrimitive slot 鐨勬媶瑙?
 #### unit_formation
 
-- 论文里做了什么
-  - 每个时间步输入是一条新的环境 observation；该 observation 既会成为一个新的 episodic memory entry，也会触发 semantic triplet 抽取。
-- MemPrimitive 现有哪些模块可直接复用
-  - `PassThroughUnitFormation`
-    - 如果把每步 observation 作为一个 `Observation` 输入，则可直接表达“一步 observation -> 一个 memory unit”。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 姣忎釜鏃堕棿姝ヨ緭鍏ユ槸涓€鏉℃柊鐨勭幆澧?observation锛涜 observation 鏃細鎴愪负涓€涓柊鐨?episodic memory entry锛屼篃浼氳Е鍙?semantic triplet 鎶藉彇銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `PassThroughUnitFormation`
+    - 濡傛灉鎶婃瘡姝?observation 浣滀负涓€涓?`Observation` 杈撳叆锛屽垯鍙洿鎺ヨ〃杈锯€滀竴姝?observation -> 涓€涓?memory unit鈥濄€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `SentenceSplitUnitFormation`
   - `LineSplitUnitFormation`
   - `WindowedUnitFormation`
-    - 这些模块能做切分，但 AriGraph 的核心写入粒度不是 observation 内分句，而是 step-level observation。
-- 当前缺失什么能力
-  - 无关键缺口。该 slot 不是 AriGraph 的机制瓶颈。
-- 你的判断依据是什么
-  - 论文明说：每一步 agent 接收 observation `o_t`，并基于它更新 semantic 与 episodic memory。
-  - repo 实现可确认：`pipeline_arigraph.py` 中每一步都调用 `graph.update(observation, ...)`。
-  - 推断：把 step-level observation 作为单个 `MemoryUnit` 足以承载该 slot。
-
+    - 杩欎簺妯″潡鑳藉仛鍒囧垎锛屼絾 AriGraph 鐨勬牳蹇冨啓鍏ョ矑搴︿笉鏄?observation 鍐呭垎鍙ワ紝鑰屾槸 step-level observation銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€傝 slot 涓嶆槸 AriGraph 鐨勬満鍒剁摱棰堛€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氭瘡涓€姝?agent 鎺ユ敹 observation `o_t`锛屽苟鍩轰簬瀹冩洿鏂?semantic 涓?episodic memory銆?  - repo 瀹炵幇鍙‘璁わ細`pipeline_arigraph.py` 涓瘡涓€姝ラ兘璋冪敤 `graph.update(observation, ...)`銆?  - 鎺ㄦ柇锛氭妸 step-level observation 浣滀负鍗曚釜 `MemoryUnit` 瓒充互鎵胯浇璇?slot銆?
 #### representation
 
-- 论文里做了什么
-  - 从 observation 中抽取 semantic triplets `(object1, relation, object2)`，这些 triplets 会成为 semantic memory 的增量。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 浠?observation 涓娊鍙?semantic triplets `(object1, relation, object2)`锛岃繖浜?triplets 浼氭垚涓?semantic memory 鐨勫閲忋€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BasicRepresentation(elements=("text", "triple"))`
-    - 外观上最接近“把 observation 变成 triples”。
-    - 但当前 MemPrimitive 中的 `triple` 表示能力并不等价于 AriGraph 论文里的 observation-conditioned world-fact extraction，而且项目进展文档已明确把 triple extraction 仍偏 heuristic 视为待改进项。
-  - `KeywordRepresentation`
-    - 只能提供 lexical side information，不覆盖 AriGraph 的核心 triplet representation。
-- 当前缺失什么能力
-  - 缺少一个面向 observation 的、显式输出 world-fact triplets 的表示模块。
-  - 缺少把 triplets 作为后续 semantic graph 写入契约稳定暴露出来的表示边界。
-- 你的判断依据是什么
-  - 论文明说：AriGraph continuously learns world model by extracting semantic triplets from textual observations。
-  - repo 实现可确认：`prompts/prompts.py` 中 `prompt_extraction_current` 明确要求从 observation 抽取 `"subject, relation, object"` 序列；`graphs/contriever_graph.py` 的 `update()` 调用该 prompt 并解析 triplets。
-  - 推断：MemPrimitive 当前虽然有 `triple` 元素，但还不足以视为已落地了与 AriGraph 同语义的 observation-triplet extraction primitive。
-
+    - 澶栬涓婃渶鎺ヨ繎鈥滄妸 observation 鍙樻垚 triples鈥濄€?    - 浣嗗綋鍓?MemPrimitive 涓殑 `triple` 琛ㄧず鑳藉姏骞朵笉绛変环浜?AriGraph 璁烘枃閲岀殑 observation-conditioned world-fact extraction锛岃€屼笖椤圭洰杩涘睍鏂囨。宸叉槑纭妸 triple extraction 浠嶅亸 heuristic 瑙嗕负寰呮敼杩涢」銆?  - `KeywordRepresentation`
+    - 鍙兘鎻愪緵 lexical side information锛屼笉瑕嗙洊 AriGraph 鐨勬牳蹇?triplet representation銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯涓€涓潰鍚?observation 鐨勩€佹樉寮忚緭鍑?world-fact triplets 鐨勮〃绀烘ā鍧椼€?  - 缂哄皯鎶?triplets 浣滀负鍚庣画 semantic graph 鍐欏叆濂戠害绋冲畾鏆撮湶鍑烘潵鐨勮〃绀鸿竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欰riGraph continuously learns world model by extracting semantic triplets from textual observations銆?  - repo 瀹炵幇鍙‘璁わ細`prompts/prompts.py` 涓?`prompt_extraction_current` 鏄庣‘瑕佹眰浠?observation 鎶藉彇 `"subject, relation, object"` 搴忓垪锛沗graphs/contriever_graph.py` 鐨?`update()` 璋冪敤璇?prompt 骞惰В鏋?triplets銆?  - 鎺ㄦ柇锛歁emPrimitive 褰撳墠铏界劧鏈?`triple` 鍏冪礌锛屼絾杩樹笉瓒充互瑙嗕负宸茶惤鍦颁簡涓?AriGraph 鍚岃涔夌殑 observation-triplet extraction primitive銆?
 #### write_trigger
 
-- 论文里做了什么
-  - 每一步 observation 都触发 memory learning；论文没有设计额外的 selective write gate。
-- MemPrimitive 现有哪些模块可直接复用
-  - `AlwaysWriteTrigger`
-- 哪些模块只能部分复用
-  - `ThresholdWriteTrigger`
-    - 可以通过常量阈值模拟“总是写入”，但这只是绕写，不是最直接表达。
-- 当前缺失什么能力
-  - 无关键缺口。
-- 你的判断依据是什么
-  - 论文明说：Every observation triggers learning that updates agent’s world model。
-  - repo 实现可确认：`pipeline_arigraph.py` 在每个 step 都无条件调用 `graph.update(...)`。
-  - 推断：该 slot 可由现有“全写入”模块直接表达。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 姣忎竴姝?observation 閮借Е鍙?memory learning锛涜鏂囨病鏈夎璁￠澶栫殑 selective write gate銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `AlwaysTrigger`
+- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`
+    - 鍙互閫氳繃甯搁噺闃堝€兼ā鎷熲€滄€绘槸鍐欏叆鈥濓紝浣嗚繖鍙槸缁曞啓锛屼笉鏄渶鐩存帴琛ㄨ揪銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欵very observation triggers learning that updates agent鈥檚 world model銆?  - repo 瀹炵幇鍙‘璁わ細`pipeline_arigraph.py` 鍦ㄦ瘡涓?step 閮芥棤鏉′欢璋冪敤 `graph.update(...)`銆?  - 鎺ㄦ柇锛氳 slot 鍙敱鐜版湁鈥滃叏鍐欏叆鈥濇ā鍧楃洿鎺ヨ〃杈俱€?
 #### organization
 
-- 论文里做了什么
-  - 组织一个混合 memory graph `G = (V_s, E_s, V_e, E_e)`：
-    - semantic vertices / edges 承载 object-level facts；
-    - episodic vertices 存 observation 文本；
-    - episodic edges 把“同一步 observation 提取出的 semantic triplets”与该 observation 连接起来。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 缁勭粐涓€涓贩鍚?memory graph `G = (V_s, E_s, V_e, E_e)`锛?    - semantic vertices / edges 鎵胯浇 object-level facts锛?    - episodic vertices 瀛?observation 鏂囨湰锛?    - episodic edges 鎶娾€滃悓涓€姝?observation 鎻愬彇鍑虹殑 semantic triplets鈥濅笌璇?observation 杩炴帴璧锋潵銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphAppendOrganization`
-    - 能把记录放入 graph layer，并维护一些图元数据。
-    - 但它表达的是 record-centric graph append，不是 AriGraph 所需的“semantic triplets + episodic observation + 跨两类记忆的连接”。
-  - `GraphAppendLinkReadyOrganization`
-    - 提供 graph layer + link-ready 写入壳子，但它服务的是 note graph/A-MEM 风格，不是 semantic/episodic 双记忆结构。
-- 当前缺失什么能力
-  - 缺少同时组织 semantic graph 与 episodic observation memory 的统一 organization primitive。
-  - 缺少“observation -> 当步 triplets”这种跨两类记忆对象的连接结构。
-  - 缺少对 episodic edge 这种“连接 observation 与一组 semantic edges”的正式承载边界。
-- 你的判断依据是什么
-  - 论文明说：AriGraph world model 由 semantic vertices/edges 与 episodic vertices/edges 共同组成。
-  - repo 实现可确认：
-    - `graphs/parent_graph.py` / `graphs/contriever_graph.py` 维护 semantic triplets 图；
-    - `graphs/contriever_graph.py` 还维护 `obs_episodic`，把 observation 与其对应 triplets/embedding 关联保存。
-  - 依据论文与 repo 做出的合理推断：
-    - repo 中 episodic memory 更像“observation -> associated triplets”的字典，而不是论文图示里的显式 episodic hyperedge，但两者表达的 memory linkage 是同一类机制。
-
+    - 鑳芥妸璁板綍鏀惧叆 graph layer锛屽苟缁存姢涓€浜涘浘鍏冩暟鎹€?    - 浣嗗畠琛ㄨ揪鐨勬槸 record-centric graph append锛屼笉鏄?AriGraph 鎵€闇€鐨勨€渟emantic triplets + episodic observation + 璺ㄤ袱绫昏蹇嗙殑杩炴帴鈥濄€?  - `GraphAppendLinkReadyOrganization`
+    - 鎻愪緵 graph layer + link-ready 鍐欏叆澹冲瓙锛屼絾瀹冩湇鍔＄殑鏄?note graph/A-MEM 椋庢牸锛屼笉鏄?semantic/episodic 鍙岃蹇嗙粨鏋勩€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鍚屾椂缁勭粐 semantic graph 涓?episodic observation memory 鐨勭粺涓€ organization primitive銆?  - 缂哄皯鈥渙bservation -> 褰撴 triplets鈥濊繖绉嶈法涓ょ被璁板繂瀵硅薄鐨勮繛鎺ョ粨鏋勩€?  - 缂哄皯瀵?episodic edge 杩欑鈥滆繛鎺?observation 涓庝竴缁?semantic edges鈥濈殑姝ｅ紡鎵胯浇杈圭晫銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欰riGraph world model 鐢?semantic vertices/edges 涓?episodic vertices/edges 鍏卞悓缁勬垚銆?  - repo 瀹炵幇鍙‘璁わ細
+    - `graphs/parent_graph.py` / `graphs/contriever_graph.py` 缁存姢 semantic triplets 鍥撅紱
+    - `graphs/contriever_graph.py` 杩樼淮鎶?`obs_episodic`锛屾妸 observation 涓庡叾瀵瑰簲 triplets/embedding 鍏宠仈淇濆瓨銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細
+    - repo 涓?episodic memory 鏇村儚鈥渙bservation -> associated triplets鈥濈殑瀛楀吀锛岃€屼笉鏄鏂囧浘绀洪噷鐨勬樉寮?episodic hyperedge锛屼絾涓よ€呰〃杈剧殑 memory linkage 鏄悓涓€绫绘満鍒躲€?
 #### evolution_trigger
 
-- 论文里做了什么
-  - 每次新 observation 到来时，都会触发对相关既有 semantic facts 的检查与更新。
-- MemPrimitive 现有哪些模块可直接复用
-  - `ThresholdEvolutionTrigger(threshold=0.5, constant=1.0)`
-    - 通过常量触发可以表达“每次写入后都执行演化”。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 姣忔鏂?observation 鍒版潵鏃讹紝閮戒細瑙﹀彂瀵圭浉鍏虫棦鏈?semantic facts 鐨勬鏌ヤ笌鏇存柊銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `ThresholdTrigger(slot="evolution_trigger", threshold=0.5, constant=1.0)`
+    - 閫氳繃甯搁噺瑙﹀彂鍙互琛ㄨ揪鈥滄瘡娆″啓鍏ュ悗閮芥墽琛屾紨鍖栤€濄€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `NewWriteEvolutionTrigger`
-    - 有“新写入后触发局部维护”的轮廓，但它当前面向 keyed/local-maintenance 家族，不是 AriGraph 的 observation-conditioned fact revision 语义。
-- 当前缺失什么能力
-  - 无必须新增的 trigger 缺口；该 slot 的关键不在 trigger，而在后续 evolution 本体。
-- 你的判断依据是什么
-  - 论文明说：Given new observation `o_t`，系统会先找相关已有知识，再移除过时边并扩展 semantic memory。
-  - repo 实现可确认：`graph.update(...)` 在每次 observation 到来时都执行“抽取 -> 找相关子图 -> 识别 outdated -> 删除 -> 写入”。
-  - 推断：这个 slot 可以通过现有 always-like evolution trigger 组合表达。
-
+    - 鏈夆€滄柊鍐欏叆鍚庤Е鍙戝眬閮ㄧ淮鎶も€濈殑杞粨锛屼絾瀹冨綋鍓嶉潰鍚?keyed/local-maintenance 瀹舵棌锛屼笉鏄?AriGraph 鐨?observation-conditioned fact revision 璇箟銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲繀椤绘柊澧炵殑 trigger 缂哄彛锛涜 slot 鐨勫叧閿笉鍦?trigger锛岃€屽湪鍚庣画 evolution 鏈綋銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欸iven new observation `o_t`锛岀郴缁熶細鍏堟壘鐩稿叧宸叉湁鐭ヨ瘑锛屽啀绉婚櫎杩囨椂杈瑰苟鎵╁睍 semantic memory銆?  - repo 瀹炵幇鍙‘璁わ細`graph.update(...)` 鍦ㄦ瘡娆?observation 鍒版潵鏃堕兘鎵ц鈥滄娊鍙?-> 鎵剧浉鍏冲瓙鍥?-> 璇嗗埆 outdated -> 鍒犻櫎 -> 鍐欏叆鈥濄€?  - 鎺ㄦ柇锛氳繖涓?slot 鍙互閫氳繃鐜版湁 always-like evolution trigger 缁勫悎琛ㄨ揪銆?
 #### memory_evolution
 
-- 论文里做了什么
-  - 对 observation 涉及到的对象，先找到已有相关 semantic edges；
-  - 再识别哪些旧事实已过时，与当前 observation 的新 triplets 冲突；
-  - 删除这些 outdated edges，然后再并入新知识。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 瀵?observation 娑夊強鍒扮殑瀵硅薄锛屽厛鎵惧埌宸叉湁鐩稿叧 semantic edges锛?  - 鍐嶈瘑鍒摢浜涙棫浜嬪疄宸茶繃鏃讹紝涓庡綋鍓?observation 鐨勬柊 triplets 鍐茬獊锛?  - 鍒犻櫎杩欎簺 outdated edges锛岀劧鍚庡啀骞跺叆鏂扮煡璇嗐€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphLinkEvolution`
-    - 能对 graph layer 做额外图写回，但偏向补 link，不支持“根据新 observation 删除/替换过时 semantic facts”。
-  - `GraphNeighborAppendEvolution`
-    - 只是 `GraphLinkEvolution` 的兼容包装，能力边界相同。
-  - `NeighborContextUpdateEvolution`
-    - 能重写邻居上下文，但其目标是 note graph 邻居改写，不是 AriGraph 的事实级冲突消解。
-- 当前缺失什么能力
-  - 缺少“基于新 observation triplets，对相关旧 semantic edges 做冲突检测与删除”的 memory evolution primitive。
-  - 缺少删除式 graph evolution，而不仅是 append/link-strengthening。
-- 你的判断依据是什么
-  - 论文明说：outdated edges in related semantic edges are detected by comparing them with new triplets and removed from the graph。
-  - repo 实现可确认：
-    - `prompts/prompts.py` 中 `prompt_refining_items` 专门要求判断 existing triplets 中哪些应被新 triplets 替换；
-    - `graphs/contriever_graph.py` 的 `update()` 会调用 `parse_triplets_removing(...)` 和 `delete_triplets(...)`。
-  - 推断：AriGraph 的关键 evolution 不是“增补相似边”，而是“局部事实修订”；这在 MemPrimitive 当前模块集里是明确缺口。
-
+    - 鑳藉 graph layer 鍋氶澶栧浘鍐欏洖锛屼絾鍋忓悜琛?link锛屼笉鏀寔鈥滄牴鎹柊 observation 鍒犻櫎/鏇挎崲杩囨椂 semantic facts鈥濄€?  - `GraphNeighborAppendEvolution`
+    - 鍙槸 `GraphLinkEvolution` 鐨勫吋瀹瑰寘瑁咃紝鑳藉姏杈圭晫鐩稿悓銆?  - `NeighborContextUpdateEvolution`
+    - 鑳介噸鍐欓偦灞呬笂涓嬫枃锛屼絾鍏剁洰鏍囨槸 note graph 閭诲眳鏀瑰啓锛屼笉鏄?AriGraph 鐨勪簨瀹炵骇鍐茬獊娑堣В銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥滃熀浜庢柊 observation triplets锛屽鐩稿叧鏃?semantic edges 鍋氬啿绐佹娴嬩笌鍒犻櫎鈥濈殑 memory evolution primitive銆?  - 缂哄皯鍒犻櫎寮?graph evolution锛岃€屼笉浠呮槸 append/link-strengthening銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歰utdated edges in related semantic edges are detected by comparing them with new triplets and removed from the graph銆?  - repo 瀹炵幇鍙‘璁わ細
+    - `prompts/prompts.py` 涓?`prompt_refining_items` 涓撻棬瑕佹眰鍒ゆ柇 existing triplets 涓摢浜涘簲琚柊 triplets 鏇挎崲锛?    - `graphs/contriever_graph.py` 鐨?`update()` 浼氳皟鐢?`parse_triplets_removing(...)` 鍜?`delete_triplets(...)`銆?  - 鎺ㄦ柇锛欰riGraph 鐨勫叧閿?evolution 涓嶆槸鈥滃琛ョ浉浼艰竟鈥濓紝鑰屾槸鈥滃眬閮ㄤ簨瀹炰慨璁⑩€濓紱杩欏湪 MemPrimitive 褰撳墠妯″潡闆嗛噷鏄槑纭己鍙ｃ€?
 #### retrieval
 
-- 论文里做了什么
-  - 检索分两段：
-    - semantic search：先按 query 找最相关 triplets，再沿 semantic graph 递归扩展；
-    - episodic search：再把这些 triplets 回连到 past episodic observations，给 observation-level experiences 打分并返回 top-k。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 妫€绱㈠垎涓ゆ锛?    - semantic search锛氬厛鎸?query 鎵炬渶鐩稿叧 triplets锛屽啀娌?semantic graph 閫掑綊鎵╁睍锛?    - episodic search锛氬啀鎶婅繖浜?triplets 鍥炶繛鍒?past episodic observations锛岀粰 observation-level experiences 鎵撳垎骞惰繑鍥?top-k銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphSeedAndExpandRetrieval`
-    - 覆盖了“先找 seed，再沿图扩展”的粗轮廓。
-    - 但它当前仍是 MemPrimitive baseline graph 的一跳 seed-expand，不包含 AriGraph 的“semantic triplet retrieval -> episodic retrieval”两段式输出语义。
-  - `EmbeddingSimilarityRetrieval`
-    - 可类比 AriGraph semantic search 中的 embedding-based relevance，但它只返回相似记录，不会继续图扩展，也不会回连 episodic memory。
-  - `GraphNeighborRetrieval`
-    - 只适合已知 seed id 的邻居检索，不适合 AriGraph 这种从 query 文本出发的 triplet-level semantic retrieval。
-  - `LayerAwareRetrieval`
-    - 只能做层间分发，不能表达 AriGraph 的 semantic/episodic 联动检索流程。
-- 当前缺失什么能力
-  - 缺少“semantic graph retrieval + episodic memory retrieval”一体化检索 primitive。
-  - 缺少基于 triplet 匹配结果给 episodic observations 打分并返回的机制。
-  - 缺少对“query set / 多个查询实体”输入的原生支持边界。
-- 你的判断依据是什么
-  - 论文明说：Algorithm 1 先做 `SemanticSearch(q, V_s, E_s, d, w)`，再做 `EpisodicSearch(E_s^Q, V_e, E_e, k)`。
-  - repo 实现可确认：
-    - `utils/retriever_search_drafts.py` 的 `graph_retr_search(...)` 通过 embedding search over triplet strings + BFS 扩展返回 associated subgraph；
-    - `utils/utils.py` 的 `find_top_episodic_emb(...)` 根据 retrieved triplets 与 observation 关联 triplets 的重合度，并结合 observation/plan embedding similarity，返回 top episodic memories；
-    - `agents/parent_agent.py` 还会先从 observation/plan 中提取“crucial items”作为 retrieval queries。
-  - 备注
-    - repo 的 episodic scoring 比论文更工程化，除了 triplet overlap 还混入了 observation-plan embedding similarity；这应视为 repo 细化，而不是论文主机制本身。
-
+    - 瑕嗙洊浜嗏€滃厛鎵?seed锛屽啀娌垮浘鎵╁睍鈥濈殑绮楄疆寤撱€?    - 浣嗗畠褰撳墠浠嶆槸 MemPrimitive baseline graph 鐨勪竴璺?seed-expand锛屼笉鍖呭惈 AriGraph 鐨勨€渟emantic triplet retrieval -> episodic retrieval鈥濅袱娈靛紡杈撳嚭璇箟銆?  - `EmbeddingSimilarityRetrieval`
+    - 鍙被姣?AriGraph semantic search 涓殑 embedding-based relevance锛屼絾瀹冨彧杩斿洖鐩镐技璁板綍锛屼笉浼氱户缁浘鎵╁睍锛屼篃涓嶄細鍥炶繛 episodic memory銆?  - `GraphNeighborRetrieval`
+    - 鍙€傚悎宸茬煡 seed id 鐨勯偦灞呮绱紝涓嶉€傚悎 AriGraph 杩欑浠?query 鏂囨湰鍑哄彂鐨?triplet-level semantic retrieval銆?  - `LayerAwareRetrieval`
+    - 鍙兘鍋氬眰闂村垎鍙戯紝涓嶈兘琛ㄨ揪 AriGraph 鐨?semantic/episodic 鑱斿姩妫€绱㈡祦绋嬨€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥渟emantic graph retrieval + episodic memory retrieval鈥濅竴浣撳寲妫€绱?primitive銆?  - 缂哄皯鍩轰簬 triplet 鍖归厤缁撴灉缁?episodic observations 鎵撳垎骞惰繑鍥炵殑鏈哄埗銆?  - 缂哄皯瀵光€渜uery set / 澶氫釜鏌ヨ瀹炰綋鈥濊緭鍏ョ殑鍘熺敓鏀寔杈圭晫銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欰lgorithm 1 鍏堝仛 `SemanticSearch(q, V_s, E_s, d, w)`锛屽啀鍋?`EpisodicSearch(E_s^Q, V_e, E_e, k)`銆?  - repo 瀹炵幇鍙‘璁わ細
+    - `utils/retriever_search_drafts.py` 鐨?`graph_retr_search(...)` 閫氳繃 embedding search over triplet strings + BFS 鎵╁睍杩斿洖 associated subgraph锛?    - `utils/utils.py` 鐨?`find_top_episodic_emb(...)` 鏍规嵁 retrieved triplets 涓?observation 鍏宠仈 triplets 鐨勯噸鍚堝害锛屽苟缁撳悎 observation/plan embedding similarity锛岃繑鍥?top episodic memories锛?    - `agents/parent_agent.py` 杩樹細鍏堜粠 observation/plan 涓彁鍙栤€渃rucial items鈥濅綔涓?retrieval queries銆?  - 澶囨敞
+    - repo 鐨?episodic scoring 姣旇鏂囨洿宸ョ▼鍖栵紝闄や簡 triplet overlap 杩樻贩鍏ヤ簡 observation-plan embedding similarity锛涜繖搴旇涓?repo 缁嗗寲锛岃€屼笉鏄鏂囦富鏈哄埗鏈韩銆?
 #### readout
 
-- 论文里做了什么
-  - 把 relevant semantic memories 与 relevant episodic memories 放入 working memory，供 planning 和 decision making 使用。
-- MemPrimitive 现有哪些模块可直接复用
-  - `ConcatenateReadout`
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鎶?relevant semantic memories 涓?relevant episodic memories 鏀惧叆 working memory锛屼緵 planning 鍜?decision making 浣跨敤銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `ConcatenateReadout`
   - `BulletListReadout`
   - `GroupedByLayerReadout`
-    - 这些模块都可以承担“把检索出的文本化记忆拼接给下游”的职责。
-- 哪些模块只能部分复用
+    - 杩欎簺妯″潡閮藉彲浠ユ壙鎷呪€滄妸妫€绱㈠嚭鐨勬枃鏈寲璁板繂鎷兼帴缁欎笅娓糕€濈殑鑱岃矗銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphReadout`
-    - 适合调试图结构，但 AriGraph 默认 readout 面向 working memory 的文本上下文，不是图调试输出。
-  - `PromptContextReadout`
-    - 具备“为下游 prompt 组上下文”的方向，但当前是 Reflexion 风格上下文模板，不是 AriGraph 的 semantic+episodic 组合格式。
-- 当前缺失什么能力
-  - 若只要求“把检索结果交给下游”，无关键缺口。
-  - 若要求更贴近论文中的 working-memory 组织格式，则缺少一个能显式区分 semantic memories 与 episodic memories 的 readout 模板。
-- 你的判断依据是什么
-  - 论文明说：working memory 包含 current observation、recent history、relevant semantic memories、relevant episodic memories、goal 与 current plan。
-  - repo 实现可确认：`pipeline_arigraph.py` 在 planning / action prompt 中分别注入 `subgraph` 和 `top_episodic`。
-  - 推断：readout 不是 AriGraph 的主要机制瓶颈，主要缺口仍在 retrieval 之前。
-
-### 与 MemPrimitive 现有组件的对照结论
-
-| slot | 结论 | 说明 |
+    - 閫傚悎璋冭瘯鍥剧粨鏋勶紝浣?AriGraph 榛樿 readout 闈㈠悜 working memory 鐨勬枃鏈笂涓嬫枃锛屼笉鏄浘璋冭瘯杈撳嚭銆?  - `PromptContextReadout`
+    - 鍏峰鈥滀负涓嬫父 prompt 缁勪笂涓嬫枃鈥濈殑鏂瑰悜锛屼絾褰撳墠鏄?Reflexion 椋庢牸涓婁笅鏂囨ā鏉匡紝涓嶆槸 AriGraph 鐨?semantic+episodic 缁勫悎鏍煎紡銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鑻ュ彧瑕佹眰鈥滄妸妫€绱㈢粨鏋滀氦缁欎笅娓糕€濓紝鏃犲叧閿己鍙ｃ€?  - 鑻ヨ姹傛洿璐磋繎璁烘枃涓殑 working-memory 缁勭粐鏍煎紡锛屽垯缂哄皯涓€涓兘鏄惧紡鍖哄垎 semantic memories 涓?episodic memories 鐨?readout 妯℃澘銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歸orking memory 鍖呭惈 current observation銆乺ecent history銆乺elevant semantic memories銆乺elevant episodic memories銆乬oal 涓?current plan銆?  - repo 瀹炵幇鍙‘璁わ細`pipeline_arigraph.py` 鍦?planning / action prompt 涓垎鍒敞鍏?`subgraph` 鍜?`top_episodic`銆?  - 鎺ㄦ柇锛歳eadout 涓嶆槸 AriGraph 鐨勪富瑕佹満鍒剁摱棰堬紝涓昏缂哄彛浠嶅湪 retrieval 涔嬪墠銆?
+### 涓?MemPrimitive 鐜版湁缁勪欢鐨勫鐓х粨璁?
+| slot | 缁撹 | 璇存槑 |
 | --- | --- | --- |
-| `unit_formation` | 直接复用 | `PassThroughUnitFormation` 足以表达 step-level observation 写入 |
-| `representation` | 部分复用 | 有 `triple` 表示壳子，但缺 observation-level、非 heuristic 的 triplet extraction primitive |
-| `write_trigger` | 直接复用 | `AlwaysWriteTrigger` 足够 |
-| `organization` | 部分复用 | 有 graph append，但缺 semantic memory + episodic memory 联合组织 |
-| `evolution_trigger` | 直接复用 | 可用现有 always-like trigger 组合表达“每步都演化” |
-| `memory_evolution` | 部分复用 | 有 graph evolution 外壳，但缺 AriGraph 核心的 outdated fact pruning |
-| `retrieval` | 部分复用 | 有 graph seed-expand 雏形，但缺 semantic retrieval 与 episodic retrieval 的两段联动 |
-| `readout` | 直接复用 | 通用文本 readout 可承载基础 working-memory 注入 |
+| `unit_formation` | 鐩存帴澶嶇敤 | `PassThroughUnitFormation` 瓒充互琛ㄨ揪 step-level observation 鍐欏叆 |
+| `representation` | 閮ㄥ垎澶嶇敤 | 鏈?`triple` 琛ㄧず澹冲瓙锛屼絾缂?observation-level銆侀潪 heuristic 鐨?triplet extraction primitive |
+| `write_trigger` | 鐩存帴澶嶇敤 | `AlwaysTrigger` 瓒冲 |
+| `organization` | 閮ㄥ垎澶嶇敤 | 鏈?graph append锛屼絾缂?semantic memory + episodic memory 鑱斿悎缁勭粐 |
+| `evolution_trigger` | 鐩存帴澶嶇敤 | 鍙敤鐜版湁 always-like trigger 缁勫悎琛ㄨ揪鈥滄瘡姝ラ兘婕斿寲鈥?|
+| `memory_evolution` | 閮ㄥ垎澶嶇敤 | 鏈?graph evolution 澶栧３锛屼絾缂?AriGraph 鏍稿績鐨?outdated fact pruning |
+| `retrieval` | 閮ㄥ垎澶嶇敤 | 鏈?graph seed-expand 闆忓舰锛屼絾缂?semantic retrieval 涓?episodic retrieval 鐨勪袱娈佃仈鍔?|
+| `readout` | 鐩存帴澶嶇敤 | 閫氱敤鏂囨湰 readout 鍙壙杞藉熀纭€ working-memory 娉ㄥ叆 |
 
-### 重表达判断
+### 閲嶈〃杈惧垽鏂?
+鍙兘閮ㄥ垎鏄犲皠銆?
+涓昏鍘熷洜涓嶆槸 slot 浣撶郴涓嶉€傞厤锛岃€屾槸褰撳墠缂哄け鐨勬濂芥槸 AriGraph 鐨勪笁绫绘牳蹇冩満鍒讹細
 
-只能部分映射。
-
-主要原因不是 slot 体系不适配，而是当前缺失的正好是 AriGraph 的三类核心机制：
-
-- semantic graph 与 episodic observation memory 的联合组织结构
-- 基于新 observation 的 outdated fact pruning
-- semantic retrieval 之后回连 episodic memory 的两段式检索
-
-如果只用现有模块强行拼装，可以得到一个“有 triplets、有 graph、能做一些 graph retrieval”的近似版，但还不足以忠实重表达 AriGraph 作为 world-model memory 的关键闭环。
-
-### 备注与证据边界
-
-- 论文明说
-  - AriGraph 由 semantic vertices/edges 与 episodic vertices/edges 共同组成。
-  - 新 observation 到来后，会提取 triplets、识别相关旧知识、移除过时边，再扩展 semantic memory。
-  - 检索分为 semantic search 与 episodic search 两段。
-  - episodic relevance 由匹配 triplet 数量与 observation 信息量共同决定。
-- repo 实现可确认
-  - `graphs/contriever_graph.py` 的 `update()` 实现了 triplet 抽取、相关子图检索、outdated triplet 删除与新 triplet 写入。
-  - `utils/retriever_search_drafts.py` 实现了基于 embedding search + BFS 的 semantic subgraph retrieval。
-  - `utils/utils.py` 的 `find_top_episodic_emb(...)` 实现了 episodic memory 排序。
-  - `pipeline_arigraph.py` 将 retrieved semantic memories 与 episodic memories 一起注入 planning / action prompt。
-- 依据论文与 repo 做出的合理推断
-  - 在 MemPrimitive 中，AriGraph 最自然的缺失模块不是单一的 graph retriever，而是“semantic/episodic graph organization + outdated fact pruning + two-stage retrieval”这一整套 primitive 边界。
-  - `readout` 可以继续复用通用文本 readout，不需要为 AriGraph 单独新增重型 readout family。
-- 当前证据不足、不能下结论的点
-  - 论文中的 episodic edge 更像显式图结构；repo 当前更偏工程实现，使用 observation 到 triplet 列表/embedding 的关联存储。两者语义接近，但数据结构并不一一同构。
-  - repo 的 episodic scoring 混入了 observation/plan embedding similarity，这比论文主文中的公式更强；不能把这部分直接当成论文明确主张。
-
+- semantic graph 涓?episodic observation memory 鐨勮仈鍚堢粍缁囩粨鏋?- 鍩轰簬鏂?observation 鐨?outdated fact pruning
+- semantic retrieval 涔嬪悗鍥炶繛 episodic memory 鐨勪袱娈靛紡妫€绱?
+濡傛灉鍙敤鐜版湁妯″潡寮鸿鎷艰锛屽彲浠ュ緱鍒颁竴涓€滄湁 triplets銆佹湁 graph銆佽兘鍋氫竴浜?graph retrieval鈥濈殑杩戜技鐗堬紝浣嗚繕涓嶈冻浠ュ繝瀹為噸琛ㄨ揪 AriGraph 浣滀负 world-model memory 鐨勫叧閿棴鐜€?
+### 澶囨敞涓庤瘉鎹竟鐣?
+- 璁烘枃鏄庤
+  - AriGraph 鐢?semantic vertices/edges 涓?episodic vertices/edges 鍏卞悓缁勬垚銆?  - 鏂?observation 鍒版潵鍚庯紝浼氭彁鍙?triplets銆佽瘑鍒浉鍏虫棫鐭ヨ瘑銆佺Щ闄よ繃鏃惰竟锛屽啀鎵╁睍 semantic memory銆?  - 妫€绱㈠垎涓?semantic search 涓?episodic search 涓ゆ銆?  - episodic relevance 鐢卞尮閰?triplet 鏁伴噺涓?observation 淇℃伅閲忓叡鍚屽喅瀹氥€?- repo 瀹炵幇鍙‘璁?  - `graphs/contriever_graph.py` 鐨?`update()` 瀹炵幇浜?triplet 鎶藉彇銆佺浉鍏冲瓙鍥炬绱€乷utdated triplet 鍒犻櫎涓庢柊 triplet 鍐欏叆銆?  - `utils/retriever_search_drafts.py` 瀹炵幇浜嗗熀浜?embedding search + BFS 鐨?semantic subgraph retrieval銆?  - `utils/utils.py` 鐨?`find_top_episodic_emb(...)` 瀹炵幇浜?episodic memory 鎺掑簭銆?  - `pipeline_arigraph.py` 灏?retrieved semantic memories 涓?episodic memories 涓€璧锋敞鍏?planning / action prompt銆?- 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂?  - 鍦?MemPrimitive 涓紝AriGraph 鏈€鑷劧鐨勭己澶辨ā鍧椾笉鏄崟涓€鐨?graph retriever锛岃€屾槸鈥渟emantic/episodic graph organization + outdated fact pruning + two-stage retrieval鈥濊繖涓€鏁村 primitive 杈圭晫銆?  - `readout` 鍙互缁х画澶嶇敤閫氱敤鏂囨湰 readout锛屼笉闇€瑕佷负 AriGraph 鍗曠嫭鏂板閲嶅瀷 readout family銆?- 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+  - 璁烘枃涓殑 episodic edge 鏇村儚鏄惧紡鍥剧粨鏋勶紱repo 褰撳墠鏇村亸宸ョ▼瀹炵幇锛屼娇鐢?observation 鍒?triplet 鍒楄〃/embedding 鐨勫叧鑱斿瓨鍌ㄣ€備袱鑰呰涔夋帴杩戯紝浣嗘暟鎹粨鏋勫苟涓嶄竴涓€鍚屾瀯銆?  - repo 鐨?episodic scoring 娣峰叆浜?observation/plan embedding similarity锛岃繖姣旇鏂囦富鏂囦腑鐨勫叕寮忔洿寮猴紱涓嶈兘鎶婅繖閮ㄥ垎鐩存帴褰撴垚璁烘枃鏄庣‘涓诲紶銆?
 ## HiAgent: Hierarchical Working Memory Management for Solving Long-Horizon Agent Tasks with Large Language Model
 
-论文链接: <https://aclanthology.org/2025.acl-long.1575/>
+璁烘枃閾炬帴: <https://aclanthology.org/2025.acl-long.1575/>
 
-官方 repo: <https://github.com/HiAgent2024/HiAgent>
+瀹樻柟 repo: <https://github.com/HiAgent2024/HiAgent>
 
-### 论文侧 memory 机制速写
+### 璁烘枃渚?memory 鏈哄埗閫熷啓
 
-HiAgent 关注的不是跨 trial 长期记忆，而是单次任务尝试中的 working memory 管理。它把 subgoal 作为 working-memory chunk：当前 subgoal 保留完整的 action-observation 细节，已完成 subgoal 则被压缩成一个 summarized observation，与 subgoal 一起留在上下文里。这样，历史轨迹不会被整段原样塞进 prompt，而是以“`(subgoal, summary)` 为主，当前 subgoal 保留细节”的层级结构暴露给模型。
+HiAgent 鍏虫敞鐨勪笉鏄法 trial 闀挎湡璁板繂锛岃€屾槸鍗曟浠诲姟灏濊瘯涓殑 working memory 绠＄悊銆傚畠鎶?subgoal 浣滀负 working-memory chunk锛氬綋鍓?subgoal 淇濈暀瀹屾暣鐨?action-observation 缁嗚妭锛屽凡瀹屾垚 subgoal 鍒欒鍘嬬缉鎴愪竴涓?summarized observation锛屼笌 subgoal 涓€璧风暀鍦ㄤ笂涓嬫枃閲屻€傝繖鏍凤紝鍘嗗彶杞ㄨ抗涓嶄細琚暣娈靛師鏍峰杩?prompt锛岃€屾槸浠モ€渀(subgoal, summary)` 涓轰富锛屽綋鍓?subgoal 淇濈暀缁嗚妭鈥濈殑灞傜骇缁撴瀯鏆撮湶缁欐ā鍨嬨€?
+濡傛灉妯″瀷鍒ゆ柇鏌愪釜鏃?subgoal 鐨勮缁嗚建杩瑰褰撳墠鍐崇瓥浠嶇劧鍏抽敭锛孒iAgent 鍏佽妯″瀷鏄惧紡鐢熸垚 `retrieve(subgoal_id)`锛屾妸瀵瑰簲 subgoal 鐨勫畬鏁?action-observation pairs 鍐嶆媺鍥炰笂涓嬫枃銆傛寜 MemPrimitive slot 鐪嬶紝瀹冩洿鍍忥細
 
-如果模型判断某个旧 subgoal 的详细轨迹对当前决策仍然关键，HiAgent 允许模型显式生成 `retrieve(subgoal_id)`，把对应 subgoal 的完整 action-observation pairs 再拉回上下文。按 MemPrimitive slot 看，它更像：
-
-- `unit_formation`: 每一步交互形成新的 working-memory 增量；
-- `representation`: 主要保持自然语言 action / observation / subgoal 文本表示；
-- `write_trigger`: 每一步默认写入当前 working-memory 轨迹；
-- `organization`: 按 subgoal 切 chunk，区分当前 detailed chunk 与历史 summarized chunks；
-- `evolution_trigger`: 当模型判断当前 subgoal 已完成时，触发压缩归档；
-- `memory_evolution`: 把已完成 subgoal 的详细轨迹总结成 summarized observation，并以 summary 取代默认暴露的旧细节；
-- `retrieval`: 按需按 subgoal id 取回某个旧 chunk 的完整详细轨迹；
-- `readout`: 把“历史 summary + 当前细节 + 按需恢复的旧细节”拼成工作记忆上下文。
-
-### 按 MemPrimitive slot 的拆解
-
+- `unit_formation`: 姣忎竴姝ヤ氦浜掑舰鎴愭柊鐨?working-memory 澧為噺锛?- `representation`: 涓昏淇濇寔鑷劧璇█ action / observation / subgoal 鏂囨湰琛ㄧず锛?- `write_trigger`: 姣忎竴姝ラ粯璁ゅ啓鍏ュ綋鍓?working-memory 杞ㄨ抗锛?- `organization`: 鎸?subgoal 鍒?chunk锛屽尯鍒嗗綋鍓?detailed chunk 涓庡巻鍙?summarized chunks锛?- `evolution_trigger`: 褰撴ā鍨嬪垽鏂綋鍓?subgoal 宸插畬鎴愭椂锛岃Е鍙戝帇缂╁綊妗ｏ紱
+- `memory_evolution`: 鎶婂凡瀹屾垚 subgoal 鐨勮缁嗚建杩规€荤粨鎴?summarized observation锛屽苟浠?summary 鍙栦唬榛樿鏆撮湶鐨勬棫缁嗚妭锛?- `retrieval`: 鎸夐渶鎸?subgoal id 鍙栧洖鏌愪釜鏃?chunk 鐨勫畬鏁磋缁嗚建杩癸紱
+- `readout`: 鎶娾€滃巻鍙?summary + 褰撳墠缁嗚妭 + 鎸夐渶鎭㈠鐨勬棫缁嗚妭鈥濇嫾鎴愬伐浣滆蹇嗕笂涓嬫枃銆?
+### 鎸?MemPrimitive slot 鐨勬媶瑙?
 #### unit_formation
 
-- 论文里做了什么
-  - 每个时间步都会把新的交互结果并入当前 trial 的 working memory；repo 中实际保存的是按时间追加的 action-observation 对，以及必要时插入的 `Subgoal` 标记。
-- MemPrimitive 现有哪些模块可直接复用
-  - `PassThroughUnitFormation`
-    - 如果把每一步 observation 视为一次 ingest，或把 action 一并编码进 observation 文本/metadata，则足以承载“每步产生一个新的 working-memory 增量”这一最小写入单位。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 姣忎釜鏃堕棿姝ラ兘浼氭妸鏂扮殑浜や簰缁撴灉骞跺叆褰撳墠 trial 鐨?working memory锛況epo 涓疄闄呬繚瀛樼殑鏄寜鏃堕棿杩藉姞鐨?action-observation 瀵癸紝浠ュ強蹇呰鏃舵彃鍏ョ殑 `Subgoal` 鏍囪銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `PassThroughUnitFormation`
+    - 濡傛灉鎶婃瘡涓€姝?observation 瑙嗕负涓€娆?ingest锛屾垨鎶?action 涓€骞剁紪鐮佽繘 observation 鏂囨湰/metadata锛屽垯瓒充互鎵胯浇鈥滄瘡姝ヤ骇鐢熶竴涓柊鐨?working-memory 澧為噺鈥濊繖涓€鏈€灏忓啓鍏ュ崟浣嶃€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `SentenceSplitUnitFormation`
   - `LineSplitUnitFormation`
   - `WindowedUnitFormation`
-    - 它们能做切分，但 HiAgent 的关键粒度不是句子或窗口，而是交互 step 与 subgoal chunk。
-- 当前缺失什么能力
-  - 无关键缺口。HiAgent 的主要创新不在 unit formation。
-- 你的判断依据是什么
-  - 论文明说：agent 在每个时间步维护 working memory，并围绕 subgoal 组织 action-observation history。
-  - repo 实现可确认：`agentboard/agents/cme_final.py` 中 `self.memory` 按步追加 `[("Action", action), ("Observation", state)]`，并在需要时插入 `[("Subgoal", subgoal)]`。
-  - 推断：MemPrimitive 现有 step-level unit 形成能力足以承载该 slot。
-
+    - 瀹冧滑鑳藉仛鍒囧垎锛屼絾 HiAgent 鐨勫叧閿矑搴︿笉鏄彞瀛愭垨绐楀彛锛岃€屾槸浜や簰 step 涓?subgoal chunk銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€侶iAgent 鐨勪富瑕佸垱鏂颁笉鍦?unit formation銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歛gent 鍦ㄦ瘡涓椂闂存缁存姢 working memory锛屽苟鍥寸粫 subgoal 缁勭粐 action-observation history銆?  - repo 瀹炵幇鍙‘璁わ細`agentboard/agents/cme_final.py` 涓?`self.memory` 鎸夋杩藉姞 `[("Action", action), ("Observation", state)]`锛屽苟鍦ㄩ渶瑕佹椂鎻掑叆 `[("Subgoal", subgoal)]`銆?  - 鎺ㄦ柇锛歁emPrimitive 鐜版湁 step-level unit 褰㈡垚鑳藉姏瓒充互鎵胯浇璇?slot銆?
 #### representation
 
-- 论文里做了什么
-  - HiAgent 的 memory 表示核心仍是自然语言文本，而不是 embedding / graph / triples：包括 subgoal 文本、action-observation 对文本，以及已完成 subgoal 的 summarized observation。
-- MemPrimitive 现有哪些模块可直接复用
-  - `BasicRepresentation(elements=("text",))`
-    - 足以表达 HiAgent 对 working-memory 内容的最基本文本表示。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - HiAgent 鐨?memory 琛ㄧず鏍稿績浠嶆槸鑷劧璇█鏂囨湰锛岃€屼笉鏄?embedding / graph / triples锛氬寘鎷?subgoal 鏂囨湰銆乤ction-observation 瀵规枃鏈紝浠ュ強宸插畬鎴?subgoal 鐨?summarized observation銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `BasicRepresentation(elements=("text",))`
+    - 瓒充互琛ㄨ揪 HiAgent 瀵?working-memory 鍐呭鐨勬渶鍩烘湰鏂囨湰琛ㄧず銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BasicRepresentation(elements=("text", "summary"))`
-    - 表面上有 summary 能力，但该 summary 是对单个 unit 文本的表示增强，不是 HiAgent 这种“对一个完整 subgoal trajectory 做 subgoal-conditioned summarization”。
-  - `SemanticFieldEnrichmentRepresentation`
-    - 可为 unit 附加结构化 note payload，但它服务的是 note-like enrichment，不是 HiAgent 的 subgoal / summarized observation 语义。
-- 当前缺失什么能力
-  - 无必须单独新增到 `representation` slot 的关键能力。HiAgent 的关键 summary 更适合落在 `memory_evolution`，而不是 ingest-side representation。
-- 你的判断依据是什么
-  - 论文明说：summarized observation `s_i = S(g_i, o_0, a_0, ..., o_t)` 是围绕 subgoal 对历史轨迹的压缩表示。
-  - repo 实现可确认：`cme_final.py` 中 memory 主要由 `"Subgoal"`、`"Action"`、`"Observation"` 这类文本标签及其字符串内容构成。
-  - 依据论文与 repo 做出的合理推断：HiAgent 没有依赖复杂的底层表示学习；其关键不在表示种类，而在后续如何按 subgoal 管理这些文本块。
-
+    - 琛ㄩ潰涓婃湁 summary 鑳藉姏锛屼絾璇?summary 鏄鍗曚釜 unit 鏂囨湰鐨勮〃绀哄寮猴紝涓嶆槸 HiAgent 杩欑鈥滃涓€涓畬鏁?subgoal trajectory 鍋?subgoal-conditioned summarization鈥濄€?  - `SemanticFieldEnrichmentRepresentation`
+    - 鍙负 unit 闄勫姞缁撴瀯鍖?note payload锛屼絾瀹冩湇鍔＄殑鏄?note-like enrichment锛屼笉鏄?HiAgent 鐨?subgoal / summarized observation 璇箟銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲繀椤诲崟鐙柊澧炲埌 `representation` slot 鐨勫叧閿兘鍔涖€侶iAgent 鐨勫叧閿?summary 鏇撮€傚悎钀藉湪 `memory_evolution`锛岃€屼笉鏄?ingest-side representation銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歴ummarized observation `s_i = S(g_i, o_0, a_0, ..., o_t)` 鏄洿缁?subgoal 瀵瑰巻鍙茶建杩圭殑鍘嬬缉琛ㄧず銆?  - repo 瀹炵幇鍙‘璁わ細`cme_final.py` 涓?memory 涓昏鐢?`"Subgoal"`銆乣"Action"`銆乣"Observation"` 杩欑被鏂囨湰鏍囩鍙婂叾瀛楃涓插唴瀹规瀯鎴愩€?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細HiAgent 娌℃湁渚濊禆澶嶆潅鐨勫簳灞傝〃绀哄涔狅紱鍏跺叧閿笉鍦ㄨ〃绀虹绫伙紝鑰屽湪鍚庣画濡備綍鎸?subgoal 绠＄悊杩欎簺鏂囨湰鍧椼€?
 #### write_trigger
 
-- 论文里做了什么
-  - 默认每一步交互都会写入当前 working-memory 轨迹，没有专门的 selective write 机制。
-- MemPrimitive 现有哪些模块可直接复用
-  - `AlwaysWriteTrigger`
-- 哪些模块只能部分复用
-  - `ThresholdWriteTrigger`
-    - 技术上可以模拟全写入，但不是最直接表达。
-- 当前缺失什么能力
-  - 无关键缺口。
-- 你的判断依据是什么
-  - 论文明说：HiAgent 的区别主要在 working-memory 的层级管理，而不是“哪些 step 值得写入”。
-  - repo 实现可确认：`cme_final.py` 的 `update()` 在每个 step 都把 action-observation 对追加进 `self.memory`。
-  - 推断：该 slot 可由现有全写入模块直接表达。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 榛樿姣忎竴姝ヤ氦浜掗兘浼氬啓鍏ュ綋鍓?working-memory 杞ㄨ抗锛屾病鏈変笓闂ㄧ殑 selective write 鏈哄埗銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `AlwaysTrigger`
+- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`
+    - 鎶€鏈笂鍙互妯℃嫙鍏ㄥ啓鍏ワ紝浣嗕笉鏄渶鐩存帴琛ㄨ揪銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欻iAgent 鐨勫尯鍒富瑕佸湪 working-memory 鐨勫眰绾х鐞嗭紝鑰屼笉鏄€滃摢浜?step 鍊煎緱鍐欏叆鈥濄€?  - repo 瀹炵幇鍙‘璁わ細`cme_final.py` 鐨?`update()` 鍦ㄦ瘡涓?step 閮芥妸 action-observation 瀵硅拷鍔犺繘 `self.memory`銆?  - 鎺ㄦ柇锛氳 slot 鍙敱鐜版湁鍏ㄥ啓鍏ユā鍧楃洿鎺ヨ〃杈俱€?
 #### organization
 
-- 论文里做了什么
-  - 以 subgoal 为 chunk 组织 working memory：
-    - 当前 subgoal 保留完整 action-observation pairs；
-    - 已完成 subgoal 只保留 `(subgoal, summarized observation)`；
-    - 需要时可再把某个旧 subgoal 的详细轨迹恢复到上下文中。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 浠?subgoal 涓?chunk 缁勭粐 working memory锛?    - 褰撳墠 subgoal 淇濈暀瀹屾暣 action-observation pairs锛?    - 宸插畬鎴?subgoal 鍙繚鐣?`(subgoal, summarized observation)`锛?    - 闇€瑕佹椂鍙啀鎶婃煇涓棫 subgoal 鐨勮缁嗚建杩规仮澶嶅埌涓婁笅鏂囦腑銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `AppendOrganization`
-    - 能顺序写入记录，但不能表达“当前 chunk 保留细节、历史 chunk 默认只暴露 summary”的层级 chunk 组织。
-  - `ConditionalLayerOrganization`
-    - 可以按规则分层，但缺少 subgoal chunk 边界、subgoal id、当前/历史状态切换等控制逻辑。
-  - `PlacementWithoutAppendOrganization`
-    - 能发 placement，但不能独立完成 HiAgent 的 chunk 组织。
-- 当前缺失什么能力
-  - 缺少显式的 subgoal-chunk organization primitive。
-  - 缺少“当前 detailed chunk / 历史 summarized chunk / 按需恢复旧 detailed chunk”的统一组织边界。
-  - 缺少稳定的 subgoal id 与 chunk 生命周期承载方式。
-- 你的判断依据是什么
-  - 论文明说：working memory 形式从直接保留完整历史，变成以 subgoal 为 chunk 的层级表示，过去 subgoal 只保留 summary，当前 subgoal 保留细节。
-  - repo 实现可确认：`cme_final.py` 中 `serialize_history()` 会扫描 `Subgoal` 边界，对旧 subgoal 改写成编号后的 `Subgoal + Observation(summary)`，而最后一个 subgoal 之后的详细轨迹保持展开。
-  - 依据论文与 repo 做出的合理推断：HiAgent 的核心组织机制不是简单 append，而是“chunked working-memory exposure policy”。
-
+    - 鑳介『搴忓啓鍏ヨ褰曪紝浣嗕笉鑳借〃杈锯€滃綋鍓?chunk 淇濈暀缁嗚妭銆佸巻鍙?chunk 榛樿鍙毚闇?summary鈥濈殑灞傜骇 chunk 缁勭粐銆?  - `ConditionalLayerOrganization`
+    - 鍙互鎸夎鍒欏垎灞傦紝浣嗙己灏?subgoal chunk 杈圭晫銆乻ubgoal id銆佸綋鍓?鍘嗗彶鐘舵€佸垏鎹㈢瓑鎺у埗閫昏緫銆?  - `PlacementWithoutAppendOrganization`
+    - 鑳藉彂 placement锛屼絾涓嶈兘鐙珛瀹屾垚 HiAgent 鐨?chunk 缁勭粐銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鏄惧紡鐨?subgoal-chunk organization primitive銆?  - 缂哄皯鈥滃綋鍓?detailed chunk / 鍘嗗彶 summarized chunk / 鎸夐渶鎭㈠鏃?detailed chunk鈥濈殑缁熶竴缁勭粐杈圭晫銆?  - 缂哄皯绋冲畾鐨?subgoal id 涓?chunk 鐢熷懡鍛ㄦ湡鎵胯浇鏂瑰紡銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歸orking memory 褰㈠紡浠庣洿鎺ヤ繚鐣欏畬鏁村巻鍙诧紝鍙樻垚浠?subgoal 涓?chunk 鐨勫眰绾ц〃绀猴紝杩囧幓 subgoal 鍙繚鐣?summary锛屽綋鍓?subgoal 淇濈暀缁嗚妭銆?  - repo 瀹炵幇鍙‘璁わ細`cme_final.py` 涓?`serialize_history()` 浼氭壂鎻?`Subgoal` 杈圭晫锛屽鏃?subgoal 鏀瑰啓鎴愮紪鍙峰悗鐨?`Subgoal + Observation(summary)`锛岃€屾渶鍚庝竴涓?subgoal 涔嬪悗鐨勮缁嗚建杩逛繚鎸佸睍寮€銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細HiAgent 鐨勬牳蹇冪粍缁囨満鍒朵笉鏄畝鍗?append锛岃€屾槸鈥渃hunked working-memory exposure policy鈥濄€?
 #### evolution_trigger
 
-- 论文里做了什么
-  - 当模型判断当前 subgoal 已完成时，触发把该 subgoal 的详细轨迹压缩成 summarized observation，并进入下一个 subgoal。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
-  - `ThresholdEvolutionTrigger`
-    - 可以模拟“每次都做演化”，但不能表达 HiAgent 需要的“只在 subgoal 完成时触发压缩”。
-  - `OutcomeConditionedEvolutionTrigger`
-    - 轮廓上有“基于结果信号触发”的方向，但它面向 Reflexion 式 trial 结果，不是 HiAgent 的 subgoal-completion 判断。
-  - `NewWriteEvolutionTrigger`
-    - 有“新写入后做维护”的轮廓，但不是 HiAgent 的 chunk 压缩时机。
-- 当前缺失什么能力
-  - 缺少面向“subgoal 完成”这一事件的 evolution trigger。
-  - 缺少把 LLM 的 subgoal-completion 判断显式转成 `evolution_decisions` 的通用边界。
-- 你的判断依据是什么
-  - 论文明说：LLM 可以在每步要么继续当前 subgoal，要么在判断当前 subgoal 已完成后生成新 subgoal。
-  - repo 实现可确认：`cme_final.py` 中当模型输出包含 `Subgoal:` 时，会把它视为进入新 subgoal 的切换点；旧 subgoal 随后会在序列化阶段被压缩。
-  - 推断：现有 evolution trigger 家族还没有直接覆盖这种 subgoal-level switch 语义。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 褰撴ā鍨嬪垽鏂綋鍓?subgoal 宸插畬鎴愭椂锛岃Е鍙戞妸璇?subgoal 鐨勮缁嗚建杩瑰帇缂╂垚 summarized observation锛屽苟杩涘叆涓嬩竴涓?subgoal銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`
+    - 鍙互妯℃嫙鈥滄瘡娆￠兘鍋氭紨鍖栤€濓紝浣嗕笉鑳借〃杈?HiAgent 闇€瑕佺殑鈥滃彧鍦?subgoal 瀹屾垚鏃惰Е鍙戝帇缂┾€濄€?  - `OutcomeConditionedEvolutionTrigger`
+    - 杞粨涓婃湁鈥滃熀浜庣粨鏋滀俊鍙疯Е鍙戔€濈殑鏂瑰悜锛屼絾瀹冮潰鍚?Reflexion 寮?trial 缁撴灉锛屼笉鏄?HiAgent 鐨?subgoal-completion 鍒ゆ柇銆?  - `NewWriteEvolutionTrigger`
+    - 鏈夆€滄柊鍐欏叆鍚庡仛缁存姢鈥濈殑杞粨锛屼絾涓嶆槸 HiAgent 鐨?chunk 鍘嬬缉鏃舵満銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯闈㈠悜鈥渟ubgoal 瀹屾垚鈥濊繖涓€浜嬩欢鐨?evolution trigger銆?  - 缂哄皯鎶?LLM 鐨?subgoal-completion 鍒ゆ柇鏄惧紡杞垚 `decisions` 鐨勯€氱敤杈圭晫銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歀LM 鍙互鍦ㄦ瘡姝ヨ涔堢户缁綋鍓?subgoal锛岃涔堝湪鍒ゆ柇褰撳墠 subgoal 宸插畬鎴愬悗鐢熸垚鏂?subgoal銆?  - repo 瀹炵幇鍙‘璁わ細`cme_final.py` 涓綋妯″瀷杈撳嚭鍖呭惈 `Subgoal:` 鏃讹紝浼氭妸瀹冭涓鸿繘鍏ユ柊 subgoal 鐨勫垏鎹㈢偣锛涙棫 subgoal 闅忓悗浼氬湪搴忓垪鍖栭樁娈佃鍘嬬缉銆?  - 鎺ㄦ柇锛氱幇鏈?evolution trigger 瀹舵棌杩樻病鏈夌洿鎺ヨ鐩栬繖绉?subgoal-level switch 璇箟銆?
 #### memory_evolution
 
-- 论文里做了什么
-  - 对已完成 subgoal 的完整 action-observation trajectory 做 summarization，得到 summarized observation；
-  - 默认上下文不再展开旧 detailed trajectory，而是用 `(subgoal, summary)` 取代；
-  - 当前 subgoal 的详细轨迹继续保持展开。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 瀵瑰凡瀹屾垚 subgoal 鐨勫畬鏁?action-observation trajectory 鍋?summarization锛屽緱鍒?summarized observation锛?  - 榛樿涓婁笅鏂囦笉鍐嶅睍寮€鏃?detailed trajectory锛岃€屾槸鐢?`(subgoal, summary)` 鍙栦唬锛?  - 褰撳墠 subgoal 鐨勮缁嗚建杩圭户缁繚鎸佸睍寮€銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `SummaryRewriteEvolution`
-    - 有“追加 summary record”的轮廓，但它对齐的是单个 unit 的 summary rewrite，而不是 HiAgent 的多步 subgoal trajectory summarization。
-  - `LayerMoveEvolution`
-    - 可以把内容复制到另一层，但只是 copy-append，不具备“旧细节默认隐藏、summary 取代其上下文暴露”的替换语义。
-- 当前缺失什么能力
-  - 缺少对完整 subgoal chunk 做 summarization 的 evolution primitive。
-  - 缺少“summary 取代旧细节为默认上下文暴露形式，但旧细节仍可按需恢复”的 replacement/archive 机制。
-  - 缺少对 chunk 级而非 unit 级 memory evolution 的明确承载边界。
-- 你的判断依据是什么
-  - 论文明说：已完成 subgoal 的 action-observation pairs 会被 summarized observation 替换；当前 subgoal 保留细节。
-  - repo 实现可确认：
-    - `cme_final.py` 在 `serialize_history()` 中对除最后一个之外的旧 subgoal 做压缩；
-    - 它调用 `TrajectorySummarizer.generate_summary([trajectory], [subgoal])` 生成 summary；
-    - 旧 subgoal 在上下文中被改写成 `Subgoal + Observation(summary)`。
-  - 当前证据不足、不能下结论的点
-    - 公开 repo 中 `TrajectorySummarizer` 的源码当前未找到，因此 summary 模型内部实现细节无法确认。
-
+    - 鏈夆€滆拷鍔?summary record鈥濈殑杞粨锛屼絾瀹冨榻愮殑鏄崟涓?unit 鐨?summary rewrite锛岃€屼笉鏄?HiAgent 鐨勫姝?subgoal trajectory summarization銆?  - `LayerMoveEvolution`
+    - 鍙互鎶婂唴瀹瑰鍒跺埌鍙︿竴灞傦紝浣嗗彧鏄?copy-append锛屼笉鍏峰鈥滄棫缁嗚妭榛樿闅愯棌銆乻ummary 鍙栦唬鍏朵笂涓嬫枃鏆撮湶鈥濈殑鏇挎崲璇箟銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯瀵瑰畬鏁?subgoal chunk 鍋?summarization 鐨?evolution primitive銆?  - 缂哄皯鈥渟ummary 鍙栦唬鏃х粏鑺備负榛樿涓婁笅鏂囨毚闇插舰寮忥紝浣嗘棫缁嗚妭浠嶅彲鎸夐渶鎭㈠鈥濈殑 replacement/archive 鏈哄埗銆?  - 缂哄皯瀵?chunk 绾ц€岄潪 unit 绾?memory evolution 鐨勬槑纭壙杞借竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氬凡瀹屾垚 subgoal 鐨?action-observation pairs 浼氳 summarized observation 鏇挎崲锛涘綋鍓?subgoal 淇濈暀缁嗚妭銆?  - repo 瀹炵幇鍙‘璁わ細
+    - `cme_final.py` 鍦?`serialize_history()` 涓闄ゆ渶鍚庝竴涓箣澶栫殑鏃?subgoal 鍋氬帇缂╋紱
+    - 瀹冭皟鐢?`TrajectorySummarizer.generate_summary([trajectory], [subgoal])` 鐢熸垚 summary锛?    - 鏃?subgoal 鍦ㄤ笂涓嬫枃涓鏀瑰啓鎴?`Subgoal + Observation(summary)`銆?  - 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+    - 鍏紑 repo 涓?`TrajectorySummarizer` 鐨勬簮鐮佸綋鍓嶆湭鎵惧埌锛屽洜姝?summary 妯″瀷鍐呴儴瀹炵幇缁嗚妭鏃犳硶纭銆?
 #### retrieval
 
-- 论文里做了什么
-  - 当模型觉得某个旧 subgoal 的详细轨迹仍然关键时，显式生成 retrieval function，按 subgoal id 取回对应的完整 action-observation pairs。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 褰撴ā鍨嬭寰楁煇涓棫 subgoal 鐨勮缁嗚建杩逛粛鐒跺叧閿椂锛屾樉寮忕敓鎴?retrieval function锛屾寜 subgoal id 鍙栧洖瀵瑰簲鐨勫畬鏁?action-observation pairs銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BufferRetrieval`
-    - 只能取最近窗口，不能按 subgoal id 精确回取某个旧 chunk。
-  - `RecencyRetrieval`
-    - 只能按时间顺序读最近记录，不理解 subgoal 边界。
-  - `LayerAwareRetrieval`
-    - 只能在多个 retriever 间分发，不能单独承担“按 subgoal 标识符恢复详细轨迹”。
-- 当前缺失什么能力
-  - 缺少按 subgoal id 检索旧 detailed trajectory 的 retrieval primitive。
-  - 缺少“summary chunk -> detailed chunk”的按需 rehydrate/reveal 语义。
-  - 缺少与模型显式 `retrieve(subgoal_id)` 调用对接的 retrieval 边界。
-- 你的判断依据是什么
-  - 论文明说：trajectory retrieval module 允许模型在需要时取回过去某个 subgoal 的完整 action-observation pairs。
-  - repo 实现可确认：
-    - `cme_final.py` 通过正则解析 `retrieve(3)` 这类动作；
-    - 命中后把 subgoal id 记入 `self.subgoal_idx`，再重新构造 prompt；
-    - `serialize_history()` 对被点名的旧 subgoal 不再压缩，而是把原始详细轨迹重新拼回上下文。
-  - 依据论文与 repo 做出的合理推断：HiAgent 的 retrieval 不是语义相似检索，而是 chunk id-addressed trajectory recall。
-
+    - 鍙兘鍙栨渶杩戠獥鍙ｏ紝涓嶈兘鎸?subgoal id 绮剧‘鍥炲彇鏌愪釜鏃?chunk銆?  - `RecencyRetrieval`
+    - 鍙兘鎸夋椂闂撮『搴忚鏈€杩戣褰曪紝涓嶇悊瑙?subgoal 杈圭晫銆?  - `LayerAwareRetrieval`
+    - 鍙兘鍦ㄥ涓?retriever 闂村垎鍙戯紝涓嶈兘鍗曠嫭鎵挎媴鈥滄寜 subgoal 鏍囪瘑绗︽仮澶嶈缁嗚建杩光€濄€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鎸?subgoal id 妫€绱㈡棫 detailed trajectory 鐨?retrieval primitive銆?  - 缂哄皯鈥渟ummary chunk -> detailed chunk鈥濈殑鎸夐渶 rehydrate/reveal 璇箟銆?  - 缂哄皯涓庢ā鍨嬫樉寮?`retrieve(subgoal_id)` 璋冪敤瀵规帴鐨?retrieval 杈圭晫銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歵rajectory retrieval module 鍏佽妯″瀷鍦ㄩ渶瑕佹椂鍙栧洖杩囧幓鏌愪釜 subgoal 鐨勫畬鏁?action-observation pairs銆?  - repo 瀹炵幇鍙‘璁わ細
+    - `cme_final.py` 閫氳繃姝ｅ垯瑙ｆ瀽 `retrieve(3)` 杩欑被鍔ㄤ綔锛?    - 鍛戒腑鍚庢妸 subgoal id 璁板叆 `self.subgoal_idx`锛屽啀閲嶆柊鏋勯€?prompt锛?    - `serialize_history()` 瀵硅鐐瑰悕鐨勬棫 subgoal 涓嶅啀鍘嬬缉锛岃€屾槸鎶婂師濮嬭缁嗚建杩归噸鏂版嫾鍥炰笂涓嬫枃銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細HiAgent 鐨?retrieval 涓嶆槸璇箟鐩镐技妫€绱紝鑰屾槸 chunk id-addressed trajectory recall銆?
 #### readout
 
-- 论文里做了什么
-  - 把 working memory 渲染成 prompt 上下文：
-    - 历史 subgoal 以 `subgoal + summary` 形式出现；
-    - 当前 subgoal 以完整详细轨迹出现；
-    - 若触发 retrieval，则某些旧 subgoal 也会恢复为完整详细轨迹。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鎶?working memory 娓叉煋鎴?prompt 涓婁笅鏂囷細
+    - 鍘嗗彶 subgoal 浠?`subgoal + summary` 褰㈠紡鍑虹幇锛?    - 褰撳墠 subgoal 浠ュ畬鏁磋缁嗚建杩瑰嚭鐜帮紱
+    - 鑻ヨЕ鍙?retrieval锛屽垯鏌愪簺鏃?subgoal 涔熶細鎭㈠涓哄畬鏁磋缁嗚建杩广€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `ConcatenateReadout`
-    - 能做纯文本拼接，但不能显式保留层级 working-memory 结构。
-  - `GroupedByLayerReadout`
-    - 轮廓上最接近“按层显示”，但仍不能表达 subgoal 编号、summary-vs-detail 切换、按需恢复旧 chunk 等格式。
-  - `PromptContextReadout`
-    - 有“拼 prompt context”的方向，但当前更偏 Reflexion/readout 语义，不是 HiAgent 的层级工作记忆呈现。
-- 当前缺失什么能力
-  - 缺少一个显式面向 hierarchical working memory 的 readout 模板。
-  - 缺少稳定呈现“历史 summary + 当前细节 + 恢复旧细节”的读出格式。
-- 你的判断依据是什么
-  - 论文明说：HiAgent 的 working memory 本质上就是一种层级上下文组织方式。
-  - repo 实现可确认：`cme_final.py` 的 `make_prompt()` 直接通过 `serialize_history()` 把压缩后的旧 subgoal、当前详细轨迹、以及被 retrieval 指定的旧详细轨迹拼成最终 prompt。
-  - 推断：该 slot 不是 HiAgent 的最难点，但当前通用 readout 还不足以忠实重表达其层级上下文格式。
-
-### 与 MemPrimitive 现有组件的对照结论
-
-| slot | 结论 | 说明 |
+    - 鑳藉仛绾枃鏈嫾鎺ワ紝浣嗕笉鑳芥樉寮忎繚鐣欏眰绾?working-memory 缁撴瀯銆?  - `GroupedByLayerReadout`
+    - 杞粨涓婃渶鎺ヨ繎鈥滄寜灞傛樉绀衡€濓紝浣嗕粛涓嶈兘琛ㄨ揪 subgoal 缂栧彿銆乻ummary-vs-detail 鍒囨崲銆佹寜闇€鎭㈠鏃?chunk 绛夋牸寮忋€?  - `PromptContextReadout`
+    - 鏈夆€滄嫾 prompt context鈥濈殑鏂瑰悜锛屼絾褰撳墠鏇村亸 Reflexion/readout 璇箟锛屼笉鏄?HiAgent 鐨勫眰绾у伐浣滆蹇嗗憟鐜般€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯涓€涓樉寮忛潰鍚?hierarchical working memory 鐨?readout 妯℃澘銆?  - 缂哄皯绋冲畾鍛堢幇鈥滃巻鍙?summary + 褰撳墠缁嗚妭 + 鎭㈠鏃х粏鑺傗€濈殑璇诲嚭鏍煎紡銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛欻iAgent 鐨?working memory 鏈川涓婂氨鏄竴绉嶅眰绾т笂涓嬫枃缁勭粐鏂瑰紡銆?  - repo 瀹炵幇鍙‘璁わ細`cme_final.py` 鐨?`make_prompt()` 鐩存帴閫氳繃 `serialize_history()` 鎶婂帇缂╁悗鐨勬棫 subgoal銆佸綋鍓嶈缁嗚建杩广€佷互鍙婅 retrieval 鎸囧畾鐨勬棫璇︾粏杞ㄨ抗鎷兼垚鏈€缁?prompt銆?  - 鎺ㄦ柇锛氳 slot 涓嶆槸 HiAgent 鐨勬渶闅剧偣锛屼絾褰撳墠閫氱敤 readout 杩樹笉瓒充互蹇犲疄閲嶈〃杈惧叾灞傜骇涓婁笅鏂囨牸寮忋€?
+### 涓?MemPrimitive 鐜版湁缁勪欢鐨勫鐓х粨璁?
+| slot | 缁撹 | 璇存槑 |
 | --- | --- | --- |
-| `unit_formation` | 直接复用 | `PassThroughUnitFormation` 足以承载 step-level working-memory 增量 |
-| `representation` | 直接复用 | HiAgent 主要依赖自然语言文本表示，复杂机制不在该 slot |
-| `write_trigger` | 直接复用 | `AlwaysWriteTrigger` 足够 |
-| `organization` | 部分复用 | 有 append / routing 外壳，但缺 subgoal-chunk 层级组织 |
-| `evolution_trigger` | 部分复用 | 有通用 trigger 外壳，但缺 subgoal-completion 触发 |
-| `memory_evolution` | 部分复用 | 有 `SummaryRewriteEvolution` / `LayerMoveEvolution` 轮廓，但缺 chunk-level summarization 与 replacement/archive 语义 |
-| `retrieval` | 部分复用 | 有 recency/buffer/layer-aware 轮廓，但缺按 subgoal id 恢复旧 detailed trajectory |
-| `readout` | 部分复用 | 有通用文本/Prompt readout，但缺 hierarchical working-memory 呈现格式 |
+| `unit_formation` | 鐩存帴澶嶇敤 | `PassThroughUnitFormation` 瓒充互鎵胯浇 step-level working-memory 澧為噺 |
+| `representation` | 鐩存帴澶嶇敤 | HiAgent 涓昏渚濊禆鑷劧璇█鏂囨湰琛ㄧず锛屽鏉傛満鍒朵笉鍦ㄨ slot |
+| `write_trigger` | 鐩存帴澶嶇敤 | `AlwaysTrigger` 瓒冲 |
+| `organization` | 閮ㄥ垎澶嶇敤 | 鏈?append / routing 澶栧３锛屼絾缂?subgoal-chunk 灞傜骇缁勭粐 |
+| `evolution_trigger` | 閮ㄥ垎澶嶇敤 | 鏈夐€氱敤 trigger 澶栧３锛屼絾缂?subgoal-completion 瑙﹀彂 |
+| `memory_evolution` | 閮ㄥ垎澶嶇敤 | 鏈?`SummaryRewriteEvolution` / `LayerMoveEvolution` 杞粨锛屼絾缂?chunk-level summarization 涓?replacement/archive 璇箟 |
+| `retrieval` | 閮ㄥ垎澶嶇敤 | 鏈?recency/buffer/layer-aware 杞粨锛屼絾缂烘寜 subgoal id 鎭㈠鏃?detailed trajectory |
+| `readout` | 閮ㄥ垎澶嶇敤 | 鏈夐€氱敤鏂囨湰/Prompt readout锛屼絾缂?hierarchical working-memory 鍛堢幇鏍煎紡 |
 
-### 重表达判断
-
-只能部分映射。
-
-主要原因不是 HiAgent 需要新的顶层 slot，而是当前缺失的正好是它的核心 working-memory 机制边界：
-
+### 閲嶈〃杈惧垽鏂?
+鍙兘閮ㄥ垎鏄犲皠銆?
+涓昏鍘熷洜涓嶆槸 HiAgent 闇€瑕佹柊鐨勯《灞?slot锛岃€屾槸褰撳墠缂哄け鐨勬濂芥槸瀹冪殑鏍稿績 working-memory 鏈哄埗杈圭晫锛?
 - subgoal-chunked hierarchical organization
 - subgoal-completion-triggered chunk summarization
-- summary 替代旧细节的默认上下文暴露语义
-- 按 subgoal id 恢复旧 detailed trajectory 的 retrieval
+- summary 鏇夸唬鏃х粏鑺傜殑榛樿涓婁笅鏂囨毚闇茶涔?- 鎸?subgoal id 鎭㈠鏃?detailed trajectory 鐨?retrieval
 
-如果只用现有模块强行拼装，最多能做出“有文本 summary、有 append、有简单 readout”的近似版，但还不足以忠实重表达 HiAgent 作为层级 working-memory 管理方法的关键机制。
-
-### 备注与证据边界
-
-- 论文明说
-  - HiAgent 把 subgoal 作为 working-memory chunk。
-  - 当前 subgoal 保留详细 action-observation pairs，过去 subgoal 保留 summarized observation。
-  - summarized observation 由 `S(g_i, o_0, a_0, ..., o_t)` 生成，并需要评估 subgoal 是否完成。
-  - 当需要旧细节时，模型可生成 retrieval function 取回某个 subgoal 的完整 trajectory。
-- repo 实现可确认
-  - `agentboard/agents/cme_final.py` 维护 `self.memory`，其中混合保存 `Subgoal`、`Action`、`Observation` 文本条目。
-  - `serialize_history()` 会压缩最后一个 subgoal 之前的旧 subgoal，只保留 `Subgoal + Observation(summary)`。
-  - `retrieve(subgoal_id)` 会被显式解析，命中的旧 subgoal 不再压缩，而是把原始 detailed trajectory 重新拼回 prompt。
-- 依据论文与 repo 做出的合理推断
-  - HiAgent 的关键 primitive 边界更接近“hierarchical working-memory chunk lifecycle”，而不是传统的 semantic retrieval 或 long-term memory indexing。
-  - 在 MemPrimitive 里，最自然的新增模块应集中在 `organization`、`evolution_trigger`、`memory_evolution`、`retrieval`、`readout`，而不是 `representation`。
-- 当前证据不足、不能下结论的点
-  - 公开 repo 中 `TrajectorySummarizer` 被调用，但对应源码当前未找到，因此摘要模型的具体实现方式无法确认。
-  - 公开 eval config 使用的 agent 名称是 `ContextEfficientAgent`，而代码里注册的是 `ContextEfficientAgentV2`；repo 当前存在命名不一致，说明公开实现可能有缺失或整理不完整之处。
-
+濡傛灉鍙敤鐜版湁妯″潡寮鸿鎷艰锛屾渶澶氳兘鍋氬嚭鈥滄湁鏂囨湰 summary銆佹湁 append銆佹湁绠€鍗?readout鈥濈殑杩戜技鐗堬紝浣嗚繕涓嶈冻浠ュ繝瀹為噸琛ㄨ揪 HiAgent 浣滀负灞傜骇 working-memory 绠＄悊鏂规硶鐨勫叧閿満鍒躲€?
+### 澶囨敞涓庤瘉鎹竟鐣?
+- 璁烘枃鏄庤
+  - HiAgent 鎶?subgoal 浣滀负 working-memory chunk銆?  - 褰撳墠 subgoal 淇濈暀璇︾粏 action-observation pairs锛岃繃鍘?subgoal 淇濈暀 summarized observation銆?  - summarized observation 鐢?`S(g_i, o_0, a_0, ..., o_t)` 鐢熸垚锛屽苟闇€瑕佽瘎浼?subgoal 鏄惁瀹屾垚銆?  - 褰撻渶瑕佹棫缁嗚妭鏃讹紝妯″瀷鍙敓鎴?retrieval function 鍙栧洖鏌愪釜 subgoal 鐨勫畬鏁?trajectory銆?- repo 瀹炵幇鍙‘璁?  - `agentboard/agents/cme_final.py` 缁存姢 `self.memory`锛屽叾涓贩鍚堜繚瀛?`Subgoal`銆乣Action`銆乣Observation` 鏂囨湰鏉＄洰銆?  - `serialize_history()` 浼氬帇缂╂渶鍚庝竴涓?subgoal 涔嬪墠鐨勬棫 subgoal锛屽彧淇濈暀 `Subgoal + Observation(summary)`銆?  - `retrieve(subgoal_id)` 浼氳鏄惧紡瑙ｆ瀽锛屽懡涓殑鏃?subgoal 涓嶅啀鍘嬬缉锛岃€屾槸鎶婂師濮?detailed trajectory 閲嶆柊鎷煎洖 prompt銆?- 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂?  - HiAgent 鐨勫叧閿?primitive 杈圭晫鏇存帴杩戔€渉ierarchical working-memory chunk lifecycle鈥濓紝鑰屼笉鏄紶缁熺殑 semantic retrieval 鎴?long-term memory indexing銆?  - 鍦?MemPrimitive 閲岋紝鏈€鑷劧鐨勬柊澧炴ā鍧楀簲闆嗕腑鍦?`organization`銆乣evolution_trigger`銆乣memory_evolution`銆乣retrieval`銆乣readout`锛岃€屼笉鏄?`representation`銆?- 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+  - 鍏紑 repo 涓?`TrajectorySummarizer` 琚皟鐢紝浣嗗搴旀簮鐮佸綋鍓嶆湭鎵惧埌锛屽洜姝ゆ憳瑕佹ā鍨嬬殑鍏蜂綋瀹炵幇鏂瑰紡鏃犳硶纭銆?  - 鍏紑 eval config 浣跨敤鐨?agent 鍚嶇О鏄?`ContextEfficientAgent`锛岃€屼唬鐮侀噷娉ㄥ唽鐨勬槸 `ContextEfficientAgentV2`锛況epo 褰撳墠瀛樺湪鍛藉悕涓嶄竴鑷达紝璇存槑鍏紑瀹炵幇鍙兘鏈夌己澶辨垨鏁寸悊涓嶅畬鏁翠箣澶勩€?
 ## Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory
 
-论文链接: <https://arxiv.org/abs/2504.19413>
+璁烘枃閾炬帴: <https://arxiv.org/abs/2504.19413>
 
-官方 repo: <https://github.com/mem0ai/mem0>
+瀹樻柟 repo: <https://github.com/mem0ai/mem0>
 
-### 论文侧 memory 机制速写
+### 璁烘枃渚?memory 鏈哄埗閫熷啓
 
-Mem0 论文主体的核心不是“把整段对话直接塞进向量库”，而是一个两阶段 memory pipeline：
-
+Mem0 璁烘枃涓讳綋鐨勬牳蹇冧笉鏄€滄妸鏁存瀵硅瘽鐩存帴濉炶繘鍚戦噺搴撯€濓紝鑰屾槸涓€涓袱闃舵 memory pipeline锛?
 1. extraction phase  
-   - 以“当前消息对”作为处理单位；
-   - 结合会话摘要与最近若干条消息作为上下文；
-   - 用 LLM 抽取 candidate facts / candidate memories。
-2. update phase  
-   - 对每个 candidate fact 检索 top-k 相似旧记忆；
-   - 再由 LLM 决策对知识库执行 `ADD / UPDATE / DELETE / NONE`；
-   - 最终把结果写回向量记忆库，并维护时间一致性与去冗余。
-
-论文还提出了 graph-memory 增强版：把 memory 表示成带实体类型、实体 embedding 和关系边的有向标注图；新信息进入时会做冲突检测，把过时关系标为无效；检索时同时支持 query 实体锚定扩展与 triplet-level 语义匹配。
-
-如果按 MemPrimitive 当前 slot 体系强行落位，最自然的拆法是：
-
-- `unit_formation`: 以一对新消息为交互单元。
-- `representation`: 从新交互中抽 salient facts；graph 版则抽实体类型与关系 triplets。
-- `write_trigger`: 对已抽出的 candidate facts 默认都进入后续评估。
-- `organization`: 基础版是平坦的 scoped vector memory；graph 版是 typed entity-relation graph。
-- `evolution_trigger`: 每个 candidate fact 都触发一次“与旧记忆比较并决定如何维护”的流程。
-- `memory_evolution`: 真正执行 `ADD / UPDATE / DELETE / NONE`；graph 版还要做冲突关系失效化。
-- `retrieval`: 基础版是 embedding similarity recall；graph 版是 entity-centric + triplet similarity 的图检索。
-- `readout`: 返回相关 memory 文本，graph 版附带关系上下文。
-
-### 按 MemPrimitive slot 的拆解
-
+   - 浠モ€滃綋鍓嶆秷鎭鈥濅綔涓哄鐞嗗崟浣嶏紱
+   - 缁撳悎浼氳瘽鎽樿涓庢渶杩戣嫢骞叉潯娑堟伅浣滀负涓婁笅鏂囷紱
+   - 鐢?LLM 鎶藉彇 candidate facts / candidate memories銆?2. update phase  
+   - 瀵规瘡涓?candidate fact 妫€绱?top-k 鐩镐技鏃ц蹇嗭紱
+   - 鍐嶇敱 LLM 鍐崇瓥瀵圭煡璇嗗簱鎵ц `ADD / UPDATE / DELETE / NONE`锛?   - 鏈€缁堟妸缁撴灉鍐欏洖鍚戦噺璁板繂搴擄紝骞剁淮鎶ゆ椂闂翠竴鑷存€т笌鍘诲啑浣欍€?
+璁烘枃杩樻彁鍑轰簡 graph-memory 澧炲己鐗堬細鎶?memory 琛ㄧず鎴愬甫瀹炰綋绫诲瀷銆佸疄浣?embedding 鍜屽叧绯昏竟鐨勬湁鍚戞爣娉ㄥ浘锛涙柊淇℃伅杩涘叆鏃朵細鍋氬啿绐佹娴嬶紝鎶婅繃鏃跺叧绯绘爣涓烘棤鏁堬紱妫€绱㈡椂鍚屾椂鏀寔 query 瀹炰綋閿氬畾鎵╁睍涓?triplet-level 璇箟鍖归厤銆?
+濡傛灉鎸?MemPrimitive 褰撳墠 slot 浣撶郴寮鸿钀戒綅锛屾渶鑷劧鐨勬媶娉曟槸锛?
+- `unit_formation`: 浠ヤ竴瀵规柊娑堟伅涓轰氦浜掑崟鍏冦€?- `representation`: 浠庢柊浜や簰涓娊 salient facts锛沢raph 鐗堝垯鎶藉疄浣撶被鍨嬩笌鍏崇郴 triplets銆?- `write_trigger`: 瀵瑰凡鎶藉嚭鐨?candidate facts 榛樿閮借繘鍏ュ悗缁瘎浼般€?- `organization`: 鍩虹鐗堟槸骞冲潶鐨?scoped vector memory锛沢raph 鐗堟槸 typed entity-relation graph銆?- `evolution_trigger`: 姣忎釜 candidate fact 閮借Е鍙戜竴娆♀€滀笌鏃ц蹇嗘瘮杈冨苟鍐冲畾濡備綍缁存姢鈥濈殑娴佺▼銆?- `memory_evolution`: 鐪熸鎵ц `ADD / UPDATE / DELETE / NONE`锛沢raph 鐗堣繕瑕佸仛鍐茬獊鍏崇郴澶辨晥鍖栥€?- `retrieval`: 鍩虹鐗堟槸 embedding similarity recall锛沢raph 鐗堟槸 entity-centric + triplet similarity 鐨勫浘妫€绱€?- `readout`: 杩斿洖鐩稿叧 memory 鏂囨湰锛実raph 鐗堥檮甯﹀叧绯讳笂涓嬫枃銆?
+### 鎸?MemPrimitive slot 鐨勬媶瑙?
 #### unit_formation
 
-- 论文里做了什么
-  - 论文把“当前消息与其前一条消息”组成一个 interaction unit；抽取时还会引入 conversation summary 与 recent messages 作为辅助上下文。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无完全直接复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 璁烘枃鎶娾€滃綋鍓嶆秷鎭笌鍏跺墠涓€鏉℃秷鎭€濈粍鎴愪竴涓?interaction unit锛涙娊鍙栨椂杩樹細寮曞叆 conversation summary 涓?recent messages 浣滀负杈呭姪涓婁笅鏂囥€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲畬鍏ㄧ洿鎺ュ鐢ㄦā鍧椼€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `PassThroughUnitFormation`
-    - 如果上游已经把“消息对 + 必要上下文”预先打包成一个 `Observation`，可以承载 Mem0 的最小处理单元。
-  - `MetadataHintUnitFormation`
-    - 可以从 metadata hints 中构造 unit，但它并不是为“对话双消息单元”设计的。
-- 当前缺失什么能力
-  - 缺少面向 conversation turn-pair 的原生 unit formation。
-  - 缺少把 recent-message window / conversation summary 稳定并入当前 unit 的形成边界。
-- 你的判断依据是什么
-  - 论文明说：Mem0 以新的 message pair 为处理单位，并结合 conversation summary 与 recent messages 做 extraction。
-  - repo 实现可确认：当前 OSS `Memory.add(...)` 直接接收 message 列表，`parse_messages(...)` 把对话串成文本，但没有一个显式的“turn-pair unit formation”模块。
-  - 依据论文与 repo 做出的合理推断：在 MemPrimitive 中，这一语义可以借 `PassThroughUnitFormation` 承载，但需要上游手动打包，因此只能部分复用。
-
+    - 濡傛灉涓婃父宸茬粡鎶娾€滄秷鎭 + 蹇呰涓婁笅鏂団€濋鍏堟墦鍖呮垚涓€涓?`Observation`锛屽彲浠ユ壙杞?Mem0 鐨勬渶灏忓鐞嗗崟鍏冦€?  - `MetadataHintUnitFormation`
+    - 鍙互浠?metadata hints 涓瀯閫?unit锛屼絾瀹冨苟涓嶆槸涓衡€滃璇濆弻娑堟伅鍗曞厓鈥濊璁＄殑銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯闈㈠悜 conversation turn-pair 鐨勫師鐢?unit formation銆?  - 缂哄皯鎶?recent-message window / conversation summary 绋冲畾骞跺叆褰撳墠 unit 鐨勫舰鎴愯竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歁em0 浠ユ柊鐨?message pair 涓哄鐞嗗崟浣嶏紝骞剁粨鍚?conversation summary 涓?recent messages 鍋?extraction銆?  - repo 瀹炵幇鍙‘璁わ細褰撳墠 OSS `Memory.add(...)` 鐩存帴鎺ユ敹 message 鍒楄〃锛宍parse_messages(...)` 鎶婂璇濅覆鎴愭枃鏈紝浣嗘病鏈変竴涓樉寮忕殑鈥渢urn-pair unit formation鈥濇ā鍧椼€?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍦?MemPrimitive 涓紝杩欎竴璇箟鍙互鍊?`PassThroughUnitFormation` 鎵胯浇锛屼絾闇€瑕佷笂娓告墜鍔ㄦ墦鍖咃紝鍥犳鍙兘閮ㄥ垎澶嶇敤銆?
 #### representation
 
-- 论文里做了什么
-  - 基础 Mem0：从新交互中抽取 salient facts / memories，且抽取要感知会话摘要与最近上下文。
-  - graph 版：先抽实体及类型，再抽实体间关系 triplets。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍩虹 Mem0锛氫粠鏂颁氦浜掍腑鎶藉彇 salient facts / memories锛屼笖鎶藉彇瑕佹劅鐭ヤ細璇濇憳瑕佷笌鏈€杩戜笂涓嬫枃銆?  - graph 鐗堬細鍏堟娊瀹炰綋鍙婄被鍨嬶紝鍐嶆娊瀹炰綋闂村叧绯?triplets銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BasicRepresentation(elements=("text", "summary"))`
-    - 有“文本 + 摘要”外观，但它是对单个 unit 做局部表示增强，不是 Mem0 那种“基于新交互 + 会话上下文抽 candidate facts”的 extraction。
-  - `BasicRepresentation(elements=("text", "triple", "entities"))`
-    - 对 graph 版只覆盖了“看起来像有 entities/triples”的表面结构，不等于带实体类型的关系抽取。
-- 当前缺失什么能力
-  - 缺少 conversation-context-aware 的 salient fact extraction primitive。
-  - 缺少“从消息对中直接产出 candidate facts 列表”的表示模块。
-  - 缺少 graph 版所需的 typed entity extraction + relation triplet extraction primitive。
-- 你的判断依据是什么
-  - 论文明说：基础 Mem0 的 extraction phase 结合 `S_t` 与 recent messages，从新 message pair 中抽 memories；graph 版明确分为 entity extraction 与 relationship generation 两步。
-  - repo 实现可确认：`mem0/memory/main.py` 里 `get_fact_retrieval_messages(...)` 驱动 LLM 抽取 `facts`；`mem0/memory/graph_memory.py` 中 `_retrieve_nodes_from_data(...)` 与 `_establish_nodes_relations_from_data(...)` 分别做实体与关系抽取。
-  - repo 实现可确认：当前 OSS 路径没有看到论文所说的独立 async summary refresh 模块暴露在开源主链路中。
-  - 推断：MemPrimitive 现有 representation 家族主要做 unit-local 表示增强，不足以直接表达 Mem0 的 extraction 核心。
-
+    - 鏈夆€滄枃鏈?+ 鎽樿鈥濆瑙傦紝浣嗗畠鏄鍗曚釜 unit 鍋氬眬閮ㄨ〃绀哄寮猴紝涓嶆槸 Mem0 閭ｇ鈥滃熀浜庢柊浜や簰 + 浼氳瘽涓婁笅鏂囨娊 candidate facts鈥濈殑 extraction銆?  - `BasicRepresentation(elements=("text", "triple", "entities"))`
+    - 瀵?graph 鐗堝彧瑕嗙洊浜嗏€滅湅璧锋潵鍍忔湁 entities/triples鈥濈殑琛ㄩ潰缁撴瀯锛屼笉绛変簬甯﹀疄浣撶被鍨嬬殑鍏崇郴鎶藉彇銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 conversation-context-aware 鐨?salient fact extraction primitive銆?  - 缂哄皯鈥滀粠娑堟伅瀵逛腑鐩存帴浜у嚭 candidate facts 鍒楄〃鈥濈殑琛ㄧず妯″潡銆?  - 缂哄皯 graph 鐗堟墍闇€鐨?typed entity extraction + relation triplet extraction primitive銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氬熀纭€ Mem0 鐨?extraction phase 缁撳悎 `S_t` 涓?recent messages锛屼粠鏂?message pair 涓娊 memories锛沢raph 鐗堟槑纭垎涓?entity extraction 涓?relationship generation 涓ゆ銆?  - repo 瀹炵幇鍙‘璁わ細`mem0/memory/main.py` 閲?`get_fact_retrieval_messages(...)` 椹卞姩 LLM 鎶藉彇 `facts`锛沗mem0/memory/graph_memory.py` 涓?`_retrieve_nodes_from_data(...)` 涓?`_establish_nodes_relations_from_data(...)` 鍒嗗埆鍋氬疄浣撲笌鍏崇郴鎶藉彇銆?  - repo 瀹炵幇鍙‘璁わ細褰撳墠 OSS 璺緞娌℃湁鐪嬪埌璁烘枃鎵€璇寸殑鐙珛 async summary refresh 妯″潡鏆撮湶鍦ㄥ紑婧愪富閾捐矾涓€?  - 鎺ㄦ柇锛歁emPrimitive 鐜版湁 representation 瀹舵棌涓昏鍋?unit-local 琛ㄧず澧炲己锛屼笉瓒充互鐩存帴琛ㄨ揪 Mem0 鐨?extraction 鏍稿績銆?
 #### write_trigger
 
-- 论文里做了什么
-  - 论文没有单独强调一个复杂 write gate；一旦 extraction phase 产出 candidate facts，这些候选就会进入 update evaluation。
-- MemPrimitive 现有哪些模块可直接复用
-  - `AlwaysWriteTrigger`
-- 哪些模块只能部分复用
-  - `ThresholdWriteTrigger`
-    - 可以充当 always-like 触发，但不是最自然表达。
-- 当前缺失什么能力
-  - 无关键缺口。
-- 你的判断依据是什么
-  - 论文明说：candidate facts 会进入 update phase，与相似旧记忆比较后决定最终操作。
-  - repo 实现可确认：`_add_to_vector_store(...)` 中只要抽出了 `new_retrieved_facts`，就会继续走相似检索和 memory action 决策。
-  - 推断：Mem0 的 selectivity 主要发生在 extraction 与 update-resolution，不在独立 write gate。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 璁烘枃娌℃湁鍗曠嫭寮鸿皟涓€涓鏉?write gate锛涗竴鏃?extraction phase 浜у嚭 candidate facts锛岃繖浜涘€欓€夊氨浼氳繘鍏?update evaluation銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `AlwaysTrigger`
+- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`
+    - 鍙互鍏呭綋 always-like 瑙﹀彂锛屼絾涓嶆槸鏈€鑷劧琛ㄨ揪銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歝andidate facts 浼氳繘鍏?update phase锛屼笌鐩镐技鏃ц蹇嗘瘮杈冨悗鍐冲畾鏈€缁堟搷浣溿€?  - repo 瀹炵幇鍙‘璁わ細`_add_to_vector_store(...)` 涓彧瑕佹娊鍑轰簡 `new_retrieved_facts`锛屽氨浼氱户缁蛋鐩镐技妫€绱㈠拰 memory action 鍐崇瓥銆?  - 鎺ㄦ柇锛歁em0 鐨?selectivity 涓昏鍙戠敓鍦?extraction 涓?update-resolution锛屼笉鍦ㄧ嫭绔?write gate銆?
 #### organization
 
-- 论文里做了什么
-  - 基础 Mem0：把 memory 维护在一个 scoped 的平坦记忆库里，依赖 embedding 检索、时间戳和稳定 ID。
-  - graph 版：把 memory 组织成有向标注图，节点含实体类型、embedding 与元数据，边为关系 triplets。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍩虹 Mem0锛氭妸 memory 缁存姢鍦ㄤ竴涓?scoped 鐨勫钩鍧﹁蹇嗗簱閲岋紝渚濊禆 embedding 妫€绱€佹椂闂存埑鍜岀ǔ瀹?ID銆?  - graph 鐗堬細鎶?memory 缁勭粐鎴愭湁鍚戞爣娉ㄥ浘锛岃妭鐐瑰惈瀹炰綋绫诲瀷銆乪mbedding 涓庡厓鏁版嵁锛岃竟涓哄叧绯?triplets銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `AppendOrganization`
-    - 对基础版 ADD 路径是接近的，能表达“把新 fact 作为 record 写入某层”。
-    - 但它不内建 Mem0 的 scoped mutable memory 语义，也不处理与后续 update/delete 生命周期的耦合。
-  - `GraphAppendOrganization`
-    - 对 graph 版只提供了 record-centric graph append 外壳，不等于 typed entity-relation graph。
-- 当前缺失什么能力
-  - 缺少面向基础 Mem0 的“平坦但可后续原位维护”的 memory organization 语义边界。
-  - 缺少 graph 版的 typed entity-relation graph organization。
-  - 缺少对实体节点 embedding、关系边状态、作用域 metadata 的统一组织 contract。
-- 你的判断依据是什么
-  - 论文明说：基础版使用向量 memory database；graph 版使用 directed labeled graph，节点含 type/embedding/metadata。
-  - repo 实现可确认：`mem0/memory/main.py` 把 memory 作为向量库记录管理；`mem0/memory/graph_memory.py` 用图数据库维护实体节点与关系边。
-  - 推断：基础版的静态组织不复杂，但如果按 MemPrimitive 的组织 slot 严格划界，当前模块仍只覆盖了 append 外壳。
-
+    - 瀵瑰熀纭€鐗?ADD 璺緞鏄帴杩戠殑锛岃兘琛ㄨ揪鈥滄妸鏂?fact 浣滀负 record 鍐欏叆鏌愬眰鈥濄€?    - 浣嗗畠涓嶅唴寤?Mem0 鐨?scoped mutable memory 璇箟锛屼篃涓嶅鐞嗕笌鍚庣画 update/delete 鐢熷懡鍛ㄦ湡鐨勮€﹀悎銆?  - `GraphAppendOrganization`
+    - 瀵?graph 鐗堝彧鎻愪緵浜?record-centric graph append 澶栧３锛屼笉绛変簬 typed entity-relation graph銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯闈㈠悜鍩虹 Mem0 鐨勨€滃钩鍧︿絾鍙悗缁師浣嶇淮鎶も€濈殑 memory organization 璇箟杈圭晫銆?  - 缂哄皯 graph 鐗堢殑 typed entity-relation graph organization銆?  - 缂哄皯瀵瑰疄浣撹妭鐐?embedding銆佸叧绯昏竟鐘舵€併€佷綔鐢ㄥ煙 metadata 鐨勭粺涓€缁勭粐 contract銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氬熀纭€鐗堜娇鐢ㄥ悜閲?memory database锛沢raph 鐗堜娇鐢?directed labeled graph锛岃妭鐐瑰惈 type/embedding/metadata銆?  - repo 瀹炵幇鍙‘璁わ細`mem0/memory/main.py` 鎶?memory 浣滀负鍚戦噺搴撹褰曠鐞嗭紱`mem0/memory/graph_memory.py` 鐢ㄥ浘鏁版嵁搴撶淮鎶ゅ疄浣撹妭鐐逛笌鍏崇郴杈广€?  - 鎺ㄦ柇锛氬熀纭€鐗堢殑闈欐€佺粍缁囦笉澶嶆潅锛屼絾濡傛灉鎸?MemPrimitive 鐨勭粍缁?slot 涓ユ牸鍒掔晫锛屽綋鍓嶆ā鍧椾粛鍙鐩栦簡 append 澶栧３銆?
 #### evolution_trigger
 
-- 论文里做了什么
-  - 每个 candidate fact 都会触发一次 update evaluation；graph 版新关系进入时也会触发 conflict detection。
-- MemPrimitive 现有哪些模块可直接复用
-  - 可直接用现有 always-like 组合表达。
-  - `ThresholdEvolutionTrigger`
-    - 设定成恒真时，可表达“每个 candidate fact 都进入后续 evolution”。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 姣忎釜 candidate fact 閮戒細瑙﹀彂涓€娆?update evaluation锛沢raph 鐗堟柊鍏崇郴杩涘叆鏃朵篃浼氳Е鍙?conflict detection銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鍙洿鎺ョ敤鐜版湁 always-like 缁勫悎琛ㄨ揪銆?  - `ThresholdTrigger`
+    - 璁惧畾鎴愭亽鐪熸椂锛屽彲琛ㄨ揪鈥滄瘡涓?candidate fact 閮借繘鍏ュ悗缁?evolution鈥濄€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `NewWriteEvolutionTrigger`
-    - 有“新写入后做维护”的轮廓，但不等于 Mem0 的每-fact update evaluation。
-- 当前缺失什么能力
-  - 无必须新增的触发 primitive；现有组合足够承载该 slot。
-- 你的判断依据是什么
-  - 论文明说：update phase 是 extraction 后的固定后续阶段，而不是条件很复杂的稀疏触发。
-  - repo 实现可确认：`_add_to_vector_store(...)` 对每个新 fact 都执行相似检索与 memory action 决策。
-  - 推断：该 slot 在 Mem0 中不是主要瓶颈。
-
+    - 鏈夆€滄柊鍐欏叆鍚庡仛缁存姢鈥濈殑杞粨锛屼絾涓嶇瓑浜?Mem0 鐨勬瘡-fact update evaluation銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲繀椤绘柊澧炵殑瑙﹀彂 primitive锛涚幇鏈夌粍鍚堣冻澶熸壙杞借 slot銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歶pdate phase 鏄?extraction 鍚庣殑鍥哄畾鍚庣画闃舵锛岃€屼笉鏄潯浠跺緢澶嶆潅鐨勭█鐤忚Е鍙戙€?  - repo 瀹炵幇鍙‘璁わ細`_add_to_vector_store(...)` 瀵规瘡涓柊 fact 閮芥墽琛岀浉浼兼绱笌 memory action 鍐崇瓥銆?  - 鎺ㄦ柇锛氳 slot 鍦?Mem0 涓笉鏄富瑕佺摱棰堛€?
 #### memory_evolution
 
-- 论文里做了什么
-  - 基础 Mem0 的真正核心在这里：对每个 candidate fact 先找 top-k 相似旧记忆，再由 LLM 决定执行 `ADD / UPDATE / DELETE / NONE`。
-  - graph 版还要对冲突关系做 invalidation，而不是只会追加。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍩虹 Mem0 鐨勭湡姝ｆ牳蹇冨湪杩欓噷锛氬姣忎釜 candidate fact 鍏堟壘 top-k 鐩镐技鏃ц蹇嗭紝鍐嶇敱 LLM 鍐冲畾鎵ц `ADD / UPDATE / DELETE / NONE`銆?  - graph 鐗堣繕瑕佸鍐茬獊鍏崇郴鍋?invalidation锛岃€屼笉鏄彧浼氳拷鍔犮€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `SummaryRewriteEvolution`
-    - 有“基于已有内容做改写”的轮廓，但与 Mem0 的 action-resolution 完全不同。
-  - `LayerMoveEvolution`
-    - 有 record rewrite / move 的味道，但不负责相似检索与 `ADD/UPDATE/DELETE/NONE` 决策。
-  - `GraphLinkEvolution`
-    - graph 版可借其“图上做额外维护”的外壳，但不支持 conflict invalidation。
-- 当前缺失什么能力
-  - 缺少 `ADD / UPDATE / DELETE / NONE` 四路 memory maintenance primitive。
-  - 缺少“candidate fact -> top-k similar old memories -> LLM decision -> store mutation”的完整 evolution module。
-  - 缺少 graph 版“把冲突关系标记失效而非直接删除”的 evolution 语义。
-- 你的判断依据是什么
-  - 论文明说：基础 Mem0 的 update phase 明确有四种操作；graph 版对冲突关系做 obsolete/invalidation。
-  - repo 实现可确认：`mem0/memory/main.py` 中 `_add_to_vector_store(...)` 先对每个新 fact 做 vector search，再用 `get_update_memory_messages(...)` 让 LLM 输出 `ADD / UPDATE / DELETE / NONE`，并分别调用 `_create_memory` / `_update_memory` / `_delete_memory`。
-  - repo 实现可确认：`mem0/memory/graph_memory.py` 中 `_get_delete_entities_from_search_output(...)` + `_delete_entities(...)` 会把关系标成 `valid = false`。
-  - 推断：这是当前 MemPrimitive 与 Mem0 之间最关键、也最集中的缺口。
-
+    - 鏈夆€滃熀浜庡凡鏈夊唴瀹瑰仛鏀瑰啓鈥濈殑杞粨锛屼絾涓?Mem0 鐨?action-resolution 瀹屽叏涓嶅悓銆?  - `LayerMoveEvolution`
+    - 鏈?record rewrite / move 鐨勫懗閬擄紝浣嗕笉璐熻矗鐩镐技妫€绱笌 `ADD/UPDATE/DELETE/NONE` 鍐崇瓥銆?  - `GraphLinkEvolution`
+    - graph 鐗堝彲鍊熷叾鈥滃浘涓婂仛棰濆缁存姢鈥濈殑澶栧３锛屼絾涓嶆敮鎸?conflict invalidation銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 `ADD / UPDATE / DELETE / NONE` 鍥涜矾 memory maintenance primitive銆?  - 缂哄皯鈥渃andidate fact -> top-k similar old memories -> LLM decision -> store mutation鈥濈殑瀹屾暣 evolution module銆?  - 缂哄皯 graph 鐗堚€滄妸鍐茬獊鍏崇郴鏍囪澶辨晥鑰岄潪鐩存帴鍒犻櫎鈥濈殑 evolution 璇箟銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氬熀纭€ Mem0 鐨?update phase 鏄庣‘鏈夊洓绉嶆搷浣滐紱graph 鐗堝鍐茬獊鍏崇郴鍋?obsolete/invalidation銆?  - repo 瀹炵幇鍙‘璁わ細`mem0/memory/main.py` 涓?`_add_to_vector_store(...)` 鍏堝姣忎釜鏂?fact 鍋?vector search锛屽啀鐢?`get_update_memory_messages(...)` 璁?LLM 杈撳嚭 `ADD / UPDATE / DELETE / NONE`锛屽苟鍒嗗埆璋冪敤 `_create_memory` / `_update_memory` / `_delete_memory`銆?  - repo 瀹炵幇鍙‘璁わ細`mem0/memory/graph_memory.py` 涓?`_get_delete_entities_from_search_output(...)` + `_delete_entities(...)` 浼氭妸鍏崇郴鏍囨垚 `valid = false`銆?  - 鎺ㄦ柇锛氳繖鏄綋鍓?MemPrimitive 涓?Mem0 涔嬮棿鏈€鍏抽敭銆佷篃鏈€闆嗕腑鐨勭己鍙ｃ€?
 #### retrieval
 
-- 论文里做了什么
-  - 基础 Mem0：以 embedding similarity 做 memory recall。
-  - graph 版：同时有 entity-centric graph traversal 与 triplet semantic matching 两条 retrieval 路。
-- MemPrimitive 现有哪些模块可直接复用
-  - `EmbeddingSimilarityRetrieval`
-    - 对基础版 user-facing recall 足够接近。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍩虹 Mem0锛氫互 embedding similarity 鍋?memory recall銆?  - graph 鐗堬細鍚屾椂鏈?entity-centric graph traversal 涓?triplet semantic matching 涓ゆ潯 retrieval 璺€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `EmbeddingSimilarityRetrieval`
+    - 瀵瑰熀纭€鐗?user-facing recall 瓒冲鎺ヨ繎銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphSeedAndExpandRetrieval`
-    - 能表达“图中找 seed 再扩展”的粗轮廓，但不等于 Mem0 graph 版的 entity-anchor traversal。
-  - `BM25Retrieval`
-    - 对 graph repo 的 BM25 relation rerank only 是很弱的局部近似，不是论文主干。
-- 当前缺失什么能力
-  - 如果要覆盖 graph 版，需要一个“entity-centric + triplet similarity”的混合图检索 primitive。
-  - 当前 retrieval slot 也没有直接表达“ingest-time top-k similar memories for update evaluation”的位置；该能力更适合下沉到 `memory_evolution` 内部。
-- 你的判断依据是什么
-  - 论文明说：基础版用向量 memory database 做相似检索；graph 版同时有 entity-centric 与 semantic triplet retrieval。
-  - repo 实现可确认：`search(...)` 主路径调用 `_search_vector_store(...)`，图检索并行返回 `relations`；`graph_memory.py` 中 `search(...)` 先抽 query entities，再在图上找相近节点与关系，最后用 BM25 做关系序列重排。
-  - 推断：基础版 retrieval 可直接复用，graph 版只能部分映射。
-
+    - 鑳借〃杈锯€滃浘涓壘 seed 鍐嶆墿灞曗€濈殑绮楄疆寤擄紝浣嗕笉绛変簬 Mem0 graph 鐗堢殑 entity-anchor traversal銆?  - `BM25Retrieval`
+    - 瀵?graph repo 鐨?BM25 relation rerank only 鏄緢寮辩殑灞€閮ㄨ繎浼硷紝涓嶆槸璁烘枃涓诲共銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 濡傛灉瑕佽鐩?graph 鐗堬紝闇€瑕佷竴涓€渆ntity-centric + triplet similarity鈥濈殑娣峰悎鍥炬绱?primitive銆?  - 褰撳墠 retrieval slot 涔熸病鏈夌洿鎺ヨ〃杈锯€渋ngest-time top-k similar memories for update evaluation鈥濈殑浣嶇疆锛涜鑳藉姏鏇撮€傚悎涓嬫矇鍒?`memory_evolution` 鍐呴儴銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛氬熀纭€鐗堢敤鍚戦噺 memory database 鍋氱浉浼兼绱紱graph 鐗堝悓鏃舵湁 entity-centric 涓?semantic triplet retrieval銆?  - repo 瀹炵幇鍙‘璁わ細`search(...)` 涓昏矾寰勮皟鐢?`_search_vector_store(...)`锛屽浘妫€绱㈠苟琛岃繑鍥?`relations`锛沗graph_memory.py` 涓?`search(...)` 鍏堟娊 query entities锛屽啀鍦ㄥ浘涓婃壘鐩歌繎鑺傜偣涓庡叧绯伙紝鏈€鍚庣敤 BM25 鍋氬叧绯诲簭鍒楅噸鎺掋€?  - 鎺ㄦ柇锛氬熀纭€鐗?retrieval 鍙洿鎺ュ鐢紝graph 鐗堝彧鑳介儴鍒嗘槧灏勩€?
 #### readout
 
-- 论文里做了什么
-  - 基础版把相关 memories 交给下游对话模型作为补充上下文。
-  - graph 版会额外返回关系上下文。
-- MemPrimitive 现有哪些模块可直接复用
-  - `ConcatenateReadout`
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍩虹鐗堟妸鐩稿叧 memories 浜ょ粰涓嬫父瀵硅瘽妯″瀷浣滀负琛ュ厖涓婁笅鏂囥€?  - graph 鐗堜細棰濆杩斿洖鍏崇郴涓婁笅鏂囥€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `ConcatenateReadout`
   - `BulletListReadout`
   - `GroupedByLayerReadout`
-- 哪些模块只能部分复用
+- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GraphReadout`
-    - 对 graph 版调试可用，但不是 Mem0 默认的结果形态。
-- 当前缺失什么能力
-  - 基础版无关键缺口。
-  - 如果希望忠实对齐 graph 版“向量命中 + relations 并行返回”的接口形式，可能需要一个更贴近 Mem0 API 的 readout 适配层，但这不是主机制缺口。
-- 你的判断依据是什么
-  - 论文明说：retrieved memories 被注入后续回答过程；graph 版提供额外 relational context。
-  - repo 实现可确认：`search(...)` 返回 `{"results": original_memories, "relations": graph_entities}`。
-  - 推断：readout 不构成 Mem0 的主要重表达障碍。
-
-### 与 MemPrimitive 现有组件的对照结论
-
-| slot | 结论 | 说明 |
+    - 瀵?graph 鐗堣皟璇曞彲鐢紝浣嗕笉鏄?Mem0 榛樿鐨勭粨鏋滃舰鎬併€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鍩虹鐗堟棤鍏抽敭缂哄彛銆?  - 濡傛灉甯屾湜蹇犲疄瀵归綈 graph 鐗堚€滃悜閲忓懡涓?+ relations 骞惰杩斿洖鈥濈殑鎺ュ彛褰㈠紡锛屽彲鑳介渶瑕佷竴涓洿璐磋繎 Mem0 API 鐨?readout 閫傞厤灞傦紝浣嗚繖涓嶆槸涓绘満鍒剁己鍙ｃ€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔?  - 璁烘枃鏄庤锛歳etrieved memories 琚敞鍏ュ悗缁洖绛旇繃绋嬶紱graph 鐗堟彁渚涢澶?relational context銆?  - repo 瀹炵幇鍙‘璁わ細`search(...)` 杩斿洖 `{"results": original_memories, "relations": graph_entities}`銆?  - 鎺ㄦ柇锛歳eadout 涓嶆瀯鎴?Mem0 鐨勪富瑕侀噸琛ㄨ揪闅滅銆?
+### 涓?MemPrimitive 鐜版湁缁勪欢鐨勫鐓х粨璁?
+| slot | 缁撹 | 璇存槑 |
 | --- | --- | --- |
-| `unit_formation` | 部分复用 | `PassThroughUnitFormation` 可承载预打包的 turn-pair，但缺原生 conversation pair / context bundling |
-| `representation` | 只能部分复用 | 缺上下文感知 fact extraction；graph 版缺 typed entity + relation triplet extraction |
-| `write_trigger` | 直接复用 | `AlwaysWriteTrigger` 足够表达“候选进入 update evaluation” |
-| `organization` | 部分复用 | 基础 append 外壳可用，但 graph 版 typed entity-relation graph 仍缺明确承载 |
-| `evolution_trigger` | 直接复用 | 可用 always-like 触发表达“每个 candidate fact 都进入维护” |
-| `memory_evolution` | 当前缺失关键能力 | 缺 Mem0 核心的 similarity-resolved `ADD/UPDATE/DELETE/NONE` 维护 primitive |
-| `retrieval` | 部分复用 | 基础向量 recall 可复用；graph 版 retrieval 只能局部映射 |
-| `readout` | 直接复用 | 通用 memory 文本 readout 足以承载基础版输出 |
+| `unit_formation` | 閮ㄥ垎澶嶇敤 | `PassThroughUnitFormation` 鍙壙杞介鎵撳寘鐨?turn-pair锛屼絾缂哄師鐢?conversation pair / context bundling |
+| `representation` | 鍙兘閮ㄥ垎澶嶇敤 | 缂轰笂涓嬫枃鎰熺煡 fact extraction锛沢raph 鐗堢己 typed entity + relation triplet extraction |
+| `write_trigger` | 鐩存帴澶嶇敤 | `AlwaysTrigger` 瓒冲琛ㄨ揪鈥滃€欓€夎繘鍏?update evaluation鈥?|
+| `organization` | 閮ㄥ垎澶嶇敤 | 鍩虹 append 澶栧３鍙敤锛屼絾 graph 鐗?typed entity-relation graph 浠嶇己鏄庣‘鎵胯浇 |
+| `evolution_trigger` | 鐩存帴澶嶇敤 | 鍙敤 always-like 瑙﹀彂琛ㄨ揪鈥滄瘡涓?candidate fact 閮借繘鍏ョ淮鎶も€?|
+| `memory_evolution` | 褰撳墠缂哄け鍏抽敭鑳藉姏 | 缂?Mem0 鏍稿績鐨?similarity-resolved `ADD/UPDATE/DELETE/NONE` 缁存姢 primitive |
+| `retrieval` | 閮ㄥ垎澶嶇敤 | 鍩虹鍚戦噺 recall 鍙鐢紱graph 鐗?retrieval 鍙兘灞€閮ㄦ槧灏?|
+| `readout` | 鐩存帴澶嶇敤 | 閫氱敤 memory 鏂囨湰 readout 瓒充互鎵胯浇鍩虹鐗堣緭鍑?|
 
-### 重表达判断
+### 閲嶈〃杈惧垽鏂?
+鍙ぇ閮ㄥ垎閲嶈〃杈俱€?
+鏇村噯纭湴璇达細
 
-可大部分重表达。
+- **鍩虹 Mem0** 宸茬粡寰堟帴杩?MemPrimitive 褰撳墠鑳藉姏杈圭晫锛?- 鐪熸闃荤鈥滃畬鏁撮噸琛ㄨ揪鈥濈殑锛屾槸瀹冩渶鏍稿績鐨?update-resolution 娌℃湁鐜版垚 primitive锛?- **graph-memory 澧炲己鐗?* 鍒欒繘涓€姝ユ毚闇插嚭 typed graph organization銆佸叧绯诲け鏁堝寲銆佸浘妫€绱㈡贩鍚堢瓥鐣ヨ繖浜涙柊澧炵己鍙ｃ€?
+鎵€浠ュ鏋滃彧鐪嬭鏂囩殑鍩虹 Mem0 涓讳綋锛岀瀹屾暣閲嶈〃杈惧彧宸皯閲忎絾鍏抽敭鐨勬ā鍧楋紱濡傛灉鎶?graph-memory 鍙樹綋涔熺畻杩涘悓涓€鏉＄洰锛屽垯鏁翠綋浠嶅簲淇濆畧鍐欐垚鈥滃彲澶ч儴鍒嗛噸琛ㄨ揪鈥濓紝鑰屼笉鏄€滃彲瀹屾暣閲嶈〃杈锯€濄€?
+### 澶囨敞涓庤瘉鎹竟鐣?
+- 璁烘枃鏄庤
+  - Mem0 涓讳綋鍒?extraction 涓?update 涓ら樁娈点€?  - extraction 浣跨敤褰撳墠 message pair銆乧onversation summary銆乺ecent messages銆?  - update 瀵规瘡涓?candidate fact 鍏堟壘 top-k 鐩镐技鏃ц蹇嗭紝鍐嶅仛 `ADD / UPDATE / DELETE / NOOP`銆?  - graph-memory 鍙樹綋鎶婅蹇嗚〃绀烘垚 directed labeled graph锛屽苟瀵瑰啿绐佸叧绯诲仛澶辨晥鍖栥€?  - graph 妫€绱㈠寘鍚?entity-centric retrieval 涓?semantic triplet retrieval銆?- repo 瀹炵幇鍙‘璁?  - `mem0/memory/main.py` 涓?`_add_to_vector_store(...)` 鍏堢敤 LLM 鎶?`facts`锛屽啀瀵规瘡涓?fact 鍋氬悜閲忔绱紝鍐嶈 LLM 杈撳嚭 `ADD / UPDATE / DELETE / NONE`锛屾渶鍚庡垎鍒墽琛?create/update/delete銆?  - `mem0/memory/main.py` 鐨?`search(...)` 浠?vector search 涓轰富锛実raph 鎼滅储骞惰杩斿洖鍦?`relations`銆?  - `mem0/memory/graph_memory.py` 涓疄浣撴娊鍙栦笌鍏崇郴鎶藉彇鏄袱姝ワ紱鍥炬洿鏂版敮鎸佹妸鍐茬獊杈规爣璁颁负 `valid = false`銆?- 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂?  - 鍦?MemPrimitive 涓紝Mem0 鐨勬牳蹇冩柊澧?primitive 鏈€鑷劧搴旇惤鍦?`representation` 涓?`memory_evolution`锛岃€屼笉鏄?`write_trigger`銆?  - 璁烘枃閲岀殑鈥渋ngest-time similarity retrieval鈥濇洿鍍?`memory_evolution` 鍐呴儴瀛愯繃绋嬶紝鑰屼笉鏄綋鍓?recall-side `retrieval` slot 鐨勭洿鎺ュ搴旂墿銆?- 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+  - 璁烘枃瀹ｇО鐨?async conversation-summary module锛屽湪褰撳墠 OSS 涓昏矾寰勯噷娌℃湁鐪嬪埌鍚屾牱娓呮櫚鐨勭嫭绔嬪疄鐜拌竟鐣岋紱瀹冨彲鑳芥槸璁烘枃绯荤粺鎴栧钩鍙颁晶鑳藉姏锛岃€屼笉鏄綋鍓嶅紑婧愪唬鐮佷腑鐨勫悓绾фā鍧椼€?  - 褰撳墠寮€婧?repo 宸叉贩鍏ュ钩鍙板寲鑳藉姏锛屽 `user_id/agent_id/run_id` 浣滅敤鍩熴€乺eranker銆乸rocedural memory銆乬raph 骞惰杩斿洖绛夛紱杩欎簺涓嶅簲鍏ㄩ儴鍙嶆帹涓鸿鏂囦富鏂囩殑鏍稿績 memory 鏈哄埗銆?## LightMem: Lightweight and Efficient Memory-Augmented Generation
 
-更准确地说：
+璁烘枃閾炬帴: <https://openreview.net/forum?id=8QOO8Ufq2M>
 
-- **基础 Mem0** 已经很接近 MemPrimitive 当前能力边界；
-- 真正阻碍“完整重表达”的，是它最核心的 update-resolution 没有现成 primitive；
-- **graph-memory 增强版** 则进一步暴露出 typed graph organization、关系失效化、图检索混合策略这些新增缺口。
+瀹樻柟 repo: <https://github.com/zjunlp/LightMem>
 
-所以如果只看论文的基础 Mem0 主体，离完整重表达只差少量但关键的模块；如果把 graph-memory 变体也算进同一条目，则整体仍应保守写成“可大部分重表达”，而不是“可完整重表达”。
+鏈 repo 璇佹嵁涓昏鏍稿鐗堟湰: `zjunlp/LightMem` `main` 鍒嗘敮锛屼复鏃舵鏌ュ埌鐨勬彁浜や负 `ca39c30`銆?
+### 璁烘枃渚?memory 鏈哄埗閫熷啓
 
-### 备注与证据边界
+LightMem 鐨?memory 涓绘満鍒朵笉鏄€滄洿澶嶆潅鐨勫彫鍥炲櫒鈥濓紝鑰屾槸鎶婇暱鏈熻蹇嗘瀯寤烘媶鎴愪笁娈碉細
 
-- 论文明说
-  - Mem0 主体分 extraction 与 update 两阶段。
-  - extraction 使用当前 message pair、conversation summary、recent messages。
-  - update 对每个 candidate fact 先找 top-k 相似旧记忆，再做 `ADD / UPDATE / DELETE / NOOP`。
-  - graph-memory 变体把记忆表示成 directed labeled graph，并对冲突关系做失效化。
-  - graph 检索包含 entity-centric retrieval 与 semantic triplet retrieval。
-- repo 实现可确认
-  - `mem0/memory/main.py` 中 `_add_to_vector_store(...)` 先用 LLM 抽 `facts`，再对每个 fact 做向量检索，再让 LLM 输出 `ADD / UPDATE / DELETE / NONE`，最后分别执行 create/update/delete。
-  - `mem0/memory/main.py` 的 `search(...)` 以 vector search 为主，graph 搜索并行返回在 `relations`。
-  - `mem0/memory/graph_memory.py` 中实体抽取与关系抽取是两步；图更新支持把冲突边标记为 `valid = false`。
-- 依据论文与 repo 做出的合理推断
-  - 在 MemPrimitive 中，Mem0 的核心新增 primitive 最自然应落在 `representation` 与 `memory_evolution`，而不是 `write_trigger`。
-  - 论文里的“ingest-time similarity retrieval”更像 `memory_evolution` 内部子过程，而不是当前 recall-side `retrieval` slot 的直接对应物。
-- 当前证据不足、不能下结论的点
-  - 论文宣称的 async conversation-summary module，在当前 OSS 主路径里没有看到同样清晰的独立实现边界；它可能是论文系统或平台侧能力，而不是当前开源代码中的同级模块。
-  - 当前开源 repo 已混入平台化能力，如 `user_id/agent_id/run_id` 作用域、reranker、procedural memory、graph 并行返回等；这些不应全部反推为论文主文的核心 memory 机制。
-## LightMem: Lightweight and Efficient Memory-Augmented Generation
+- `Light1 / sensory memory`锛氭柊瀵硅瘽 turn 鍏堢粡杩囬鍘嬬缉锛屽彧淇濈暀淇℃伅瀵嗗害鏇撮珮鐨?token锛屽啀杩涘叆涓€涓湁 token 瀹归噺涓婇檺鐨勬劅瀹樼紦鍐插尯銆?- `Light2 / topic-aware STM`锛氬綋鎰熷畼缂撳啿鍖鸿揪鍒板閲忛槇鍊煎悗锛岀郴缁熷熀浜?attention + 鐩搁偦 turn 璇箟鐩镐技搴﹀仛 topic segmentation锛屾妸鑻ュ共 turn 缁勭粐鎴?topic segment锛涢殢鍚庢妸杩欎簺 segment 鏆傚瓨杩?STM锛孲TM 鍒拌揪闃堝€煎悗鍐嶆寜 topic 绮掑害鍋氭€荤粨锛屽舰鎴愯繘鍏?LTM 鐨勮蹇嗘潯鐩€?- `Light3 / LTM with sleep-time update`锛氬湪绾块樁娈靛鏂?entry 鍏堝仛 soft insert锛屼笉闃诲浜や簰锛涙洿鏂拌鎺ㄨ繜鍒扳€渟leep time鈥濓紝鍏堜负姣忎釜 entry 鏋勯€犱竴涓甫鏃堕棿绾︽潫鐨勭浉浼煎€欓€夋洿鏂伴槦鍒楋紝鍐嶇绾垮苟琛屾墽琛?update/delete/ignore銆?
+濡傛灉鎸?MemPrimitive 褰撳墠 slot 浣撶郴纭槧灏勶紝鏈€鑷劧鐨勪富閾捐矾鏄細
 
-论文链接: <https://openreview.net/forum?id=8QOO8Ufq2M>
-
-官方 repo: <https://github.com/zjunlp/LightMem>
-
-本次 repo 证据主要核对版本: `zjunlp/LightMem` `main` 分支，临时检查到的提交为 `ca39c30`。
-
-### 论文侧 memory 机制速写
-
-LightMem 的 memory 主机制不是“更复杂的召回器”，而是把长期记忆构建拆成三段：
-
-- `Light1 / sensory memory`：新对话 turn 先经过预压缩，只保留信息密度更高的 token，再进入一个有 token 容量上限的感官缓冲区。
-- `Light2 / topic-aware STM`：当感官缓冲区达到容量阈值后，系统基于 attention + 相邻 turn 语义相似度做 topic segmentation，把若干 turn 组织成 topic segment；随后把这些 segment 暂存进 STM，STM 到达阈值后再按 topic 粒度做总结，形成进入 LTM 的记忆条目。
-- `Light3 / LTM with sleep-time update`：在线阶段对新 entry 先做 soft insert，不阻塞交互；更新被推迟到“sleep time”，先为每个 entry 构造一个带时间约束的相似候选更新队列，再离线并行执行 update/delete/ignore。
-
-如果按 MemPrimitive 当前 slot 体系硬映射，最自然的主链路是：
-
-- `unit_formation`：以增量对话 turn（通常是一轮 user/assistant 交换）作为进入 sensory memory 的基本输入单元。
-- `representation`：先对 turn 做预压缩，再在 topic 粒度上形成可总结、可索引的文本表示；进入 LTM 的 entry 至少带 topic-aware summary 与 embedding。
-- `write_trigger`：不是每条 turn 立即写入长期记忆，而是由 buffer capacity 触发分段与总结。
-- `organization`：核心是 sensory buffer -> topic-aware STM buffer -> LTM 三层组织，而不是单层 append。
-- `evolution_trigger`：长期记忆更新由 sleep-time / offline trigger 启动，而非每次在线写入时立即完成。
-- `memory_evolution`：先按相似度与时间戳为每个 entry 构造 update queue，再并行决定 update/delete/ignore。
-- `retrieval`：面向用户查询时主要是 embedding retrieval；论文并不把 retrieval 设计当作主要创新点。
-- `readout`：把检索到的 memory 文本拼接返回给下游问答即可。
-
-### 按 MemPrimitive slot 的拆解
-
+- `unit_formation`锛氫互澧為噺瀵硅瘽 turn锛堥€氬父鏄竴杞?user/assistant 浜ゆ崲锛変綔涓鸿繘鍏?sensory memory 鐨勫熀鏈緭鍏ュ崟鍏冦€?- `representation`锛氬厛瀵?turn 鍋氶鍘嬬缉锛屽啀鍦?topic 绮掑害涓婂舰鎴愬彲鎬荤粨銆佸彲绱㈠紩鐨勬枃鏈〃绀猴紱杩涘叆 LTM 鐨?entry 鑷冲皯甯?topic-aware summary 涓?embedding銆?- `write_trigger`锛氫笉鏄瘡鏉?turn 绔嬪嵆鍐欏叆闀挎湡璁板繂锛岃€屾槸鐢?buffer capacity 瑙﹀彂鍒嗘涓庢€荤粨銆?- `organization`锛氭牳蹇冩槸 sensory buffer -> topic-aware STM buffer -> LTM 涓夊眰缁勭粐锛岃€屼笉鏄崟灞?append銆?- `evolution_trigger`锛氶暱鏈熻蹇嗘洿鏂扮敱 sleep-time / offline trigger 鍚姩锛岃€岄潪姣忔鍦ㄧ嚎鍐欏叆鏃剁珛鍗冲畬鎴愩€?- `memory_evolution`锛氬厛鎸夌浉浼煎害涓庢椂闂存埑涓烘瘡涓?entry 鏋勯€?update queue锛屽啀骞惰鍐冲畾 update/delete/ignore銆?- `retrieval`锛氶潰鍚戠敤鎴锋煡璇㈡椂涓昏鏄?embedding retrieval锛涜鏂囧苟涓嶆妸 retrieval 璁捐褰撲綔涓昏鍒涙柊鐐广€?- `readout`锛氭妸妫€绱㈠埌鐨?memory 鏂囨湰鎷兼帴杩斿洖缁欎笅娓搁棶绛斿嵆鍙€?
+### 鎸?MemPrimitive slot 鐨勬媶瑙?
 #### unit_formation
 
-- 论文里做了什么
-  - 在实验设定里采用 incremental dialogue turn feeding；每次输入是一轮一轮到来的对话 turn。
-  - 从机制上看，进入 sensory memory 的最小处理单元是 turn 级内容，而不是整段会话一次性写入。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍦ㄥ疄楠岃瀹氶噷閲囩敤 incremental dialogue turn feeding锛涙瘡娆¤緭鍏ユ槸涓€杞竴杞埌鏉ョ殑瀵硅瘽 turn銆?  - 浠庢満鍒朵笂鐪嬶紝杩涘叆 sensory memory 鐨勬渶灏忓鐞嗗崟鍏冩槸 turn 绾у唴瀹癸紝鑰屼笉鏄暣娈典細璇濅竴娆℃€у啓鍏ャ€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `PassThroughUnitFormation`
-    - 如果上游已经把一次 user/assistant 交互预先打包成一个 `Observation`，可以承载“turn 级输入单元”这一最小外观。
-  - `MetadataHintUnitFormation`
-    - 也可以靠上游 hints 人工构造多单元，但这不是 LightMem 原生的 turn ingestion 语义。
-- 当前缺失什么能力
-  - 缺少显式的“对话 turn / turn-pair 形成单元”能力边界。
-  - 缺少与后续 sensory buffer 协作的 unit formation 约定；当前 unit_formation 不知道 buffer token 预算、speaker 对齐或 turn 粒度。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：采用 turn-level incremental feeding。
-  - repo 实现可确认：`src/lightmem/memory/lightmem.py` 的 `add_memory(...)` 以新消息批进入；`sensory_memory.py` 里按 user/assistant 成对 turn 组织切段。
-  - 依据论文与 repo 做出的合理推断：在 MemPrimitive 里，这一 slot 若要忠实表达 LightMem，至少需要把“turn 级输入单元”显式化，而不只是一般文本 passthrough。
-
+    - 濡傛灉涓婃父宸茬粡鎶婁竴娆?user/assistant 浜や簰棰勫厛鎵撳寘鎴愪竴涓?`Observation`锛屽彲浠ユ壙杞解€渢urn 绾ц緭鍏ュ崟鍏冣€濊繖涓€鏈€灏忓瑙傘€?  - `MetadataHintUnitFormation`
+    - 涔熷彲浠ラ潬涓婃父 hints 浜哄伐鏋勯€犲鍗曞厓锛屼絾杩欎笉鏄?LightMem 鍘熺敓鐨?turn ingestion 璇箟銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鏄惧紡鐨勨€滃璇?turn / turn-pair 褰㈡垚鍗曞厓鈥濊兘鍔涜竟鐣屻€?  - 缂哄皯涓庡悗缁?sensory buffer 鍗忎綔鐨?unit formation 绾﹀畾锛涘綋鍓?unit_formation 涓嶇煡閬?buffer token 棰勭畻銆乻peaker 瀵归綈鎴?turn 绮掑害銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛氶噰鐢?turn-level incremental feeding銆?  - repo 瀹炵幇鍙‘璁わ細`src/lightmem/memory/lightmem.py` 鐨?`add_memory(...)` 浠ユ柊娑堟伅鎵硅繘鍏ワ紱`sensory_memory.py` 閲屾寜 user/assistant 鎴愬 turn 缁勭粐鍒囨銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍦?MemPrimitive 閲岋紝杩欎竴 slot 鑻ヨ蹇犲疄琛ㄨ揪 LightMem锛岃嚦灏戦渶瑕佹妸鈥渢urn 绾ц緭鍏ュ崟鍏冣€濇樉寮忓寲锛岃€屼笉鍙槸涓€鑸枃鏈?passthrough銆?
 #### representation
 
-- 论文里做了什么
-  - 先做 iterative pre-compression，保留更高信息密度 token。
-  - 在 STM/LTM 侧，topic segment 会被总结成更紧凑的 summary 表示，并生成 embedding 供长期索引和检索。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍏堝仛 iterative pre-compression锛屼繚鐣欐洿楂樹俊鎭瘑搴?token銆?  - 鍦?STM/LTM 渚э紝topic segment 浼氳鎬荤粨鎴愭洿绱у噾鐨?summary 琛ㄧず锛屽苟鐢熸垚 embedding 渚涢暱鏈熺储寮曞拰妫€绱€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BasicRepresentation(elements=("summary", "embedding"))`
-    - 能覆盖“生成摘要 + 生成向量”这一粗轮廓。
-  - `BasicRepresentation(elements=("keywords", "entities", "tags"))`
-    - 只能提供辅助元信息，不能表达 LightMem 的 token-level pre-compression。
-- 当前缺失什么能力
-  - 缺少“预压缩”这一 representation primitive；现有表示增强没有 token retention / entropy-style compression 语义。
-  - 缺少“topic-aware segment summary”这一稳定表征边界；当前 summary 是 unit-local 的，不是 segment-local 的。
-  - 缺少把“原始 turn 内容 + 压缩内容 + topic summary + summary embedding”打成同一类长期记忆 entry 表示的机制。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：Light1 先做 pre-compression；Light2 把 topic 结构总结后形成进入 LTM 的条目，条目包含 summary embedding。
-  - repo 实现可确认：`lightmem.py` 里 `pre_compress=True` 时先调用 `compress(...)`；topic segment 进入 `meta_text_extract(...)` 后被转成 `MemoryEntry`，并在插入向量库时依赖 embedding。
-  - 当前证据边界：repo 的 extraction prompt 更偏“事实抽取”，而论文正文在机制层更强调 topic-aware summarization；两者不能完全画等号。
-
+    - 鑳借鐩栤€滅敓鎴愭憳瑕?+ 鐢熸垚鍚戦噺鈥濊繖涓€绮楄疆寤撱€?  - `BasicRepresentation(elements=("keywords", "entities", "tags"))`
+    - 鍙兘鎻愪緵杈呭姪鍏冧俊鎭紝涓嶈兘琛ㄨ揪 LightMem 鐨?token-level pre-compression銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥滈鍘嬬缉鈥濊繖涓€ representation primitive锛涚幇鏈夎〃绀哄寮烘病鏈?token retention / entropy-style compression 璇箟銆?  - 缂哄皯鈥渢opic-aware segment summary鈥濊繖涓€绋冲畾琛ㄥ緛杈圭晫锛涘綋鍓?summary 鏄?unit-local 鐨勶紝涓嶆槸 segment-local 鐨勩€?  - 缂哄皯鎶娾€滃師濮?turn 鍐呭 + 鍘嬬缉鍐呭 + topic summary + summary embedding鈥濇墦鎴愬悓涓€绫婚暱鏈熻蹇?entry 琛ㄧず鐨勬満鍒躲€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歀ight1 鍏堝仛 pre-compression锛汱ight2 鎶?topic 缁撴瀯鎬荤粨鍚庡舰鎴愯繘鍏?LTM 鐨勬潯鐩紝鏉＄洰鍖呭惈 summary embedding銆?  - repo 瀹炵幇鍙‘璁わ細`lightmem.py` 閲?`pre_compress=True` 鏃跺厛璋冪敤 `compress(...)`锛泃opic segment 杩涘叆 `meta_text_extract(...)` 鍚庤杞垚 `MemoryEntry`锛屽苟鍦ㄦ彃鍏ュ悜閲忓簱鏃朵緷璧?embedding銆?  - 褰撳墠璇佹嵁杈圭晫锛歳epo 鐨?extraction prompt 鏇村亸鈥滀簨瀹炴娊鍙栤€濓紝鑰岃鏂囨鏂囧湪鏈哄埗灞傛洿寮鸿皟 topic-aware summarization锛涗袱鑰呬笉鑳藉畬鍏ㄧ敾绛夊彿銆?
 #### write_trigger
 
-- 论文里做了什么
-  - 写入不是“每个 turn 都直接总结并入 LTM”。
-  - 感官缓冲区达到容量阈值时触发 topic segmentation；STM 缓冲区再次达到阈值时触发 topic-level extraction / summarization 并形成长期记忆条目。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接复用模块。
-- 哪些模块只能部分复用
-  - `ThresholdWriteTrigger`
-    - 只有“阈值触发”的外壳相似，但当前分数来源是常量/信号，不是 buffer occupancy 或 token budget。
-  - `AlwaysWriteTrigger`
-    - 只适合表达“entry 一旦形成就入库”，不适合表达 LightMem 的批量缓冲触发。
-- 当前缺失什么能力
-  - 缺少 buffer-capacity / token-budget 驱动的 write trigger。
-  - 缺少多级触发：sensory -> STM 的分段触发，以及 STM -> LTM 的总结触发。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：sensory buffer 达到容量后触发 segmentation；STM 达到阈值后再做 summarization。
-  - repo 实现可确认：`SenMemBufferManager.add_messages(...)` 与 `ShortMemBufferManager.add_segments(...)` 都是按 token 上限决定是否触发后续阶段。
-  - 依据论文与 repo 做出的合理推断：LightMem 的写触发本质是“缓存阈值触发”，不是现有 MemPrimitive 触发族所覆盖的 metadata/key/常量阈值。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍐欏叆涓嶆槸鈥滄瘡涓?turn 閮界洿鎺ユ€荤粨骞跺叆 LTM鈥濄€?  - 鎰熷畼缂撳啿鍖鸿揪鍒板閲忛槇鍊兼椂瑙﹀彂 topic segmentation锛汼TM 缂撳啿鍖哄啀娆¤揪鍒伴槇鍊兼椂瑙﹀彂 topic-level extraction / summarization 骞跺舰鎴愰暱鏈熻蹇嗘潯鐩€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`
+    - 鍙湁鈥滈槇鍊艰Е鍙戔€濈殑澶栧３鐩镐技锛屼絾褰撳墠鍒嗘暟鏉ユ簮鏄父閲?淇″彿锛屼笉鏄?buffer occupancy 鎴?token budget銆?  - `AlwaysTrigger`
+    - 鍙€傚悎琛ㄨ揪鈥渆ntry 涓€鏃﹀舰鎴愬氨鍏ュ簱鈥濓紝涓嶉€傚悎琛ㄨ揪 LightMem 鐨勬壒閲忕紦鍐茶Е鍙戙€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 buffer-capacity / token-budget 椹卞姩鐨?write trigger銆?  - 缂哄皯澶氱骇瑙﹀彂锛歴ensory -> STM 鐨勫垎娈佃Е鍙戯紝浠ュ強 STM -> LTM 鐨勬€荤粨瑙﹀彂銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歴ensory buffer 杈惧埌瀹归噺鍚庤Е鍙?segmentation锛汼TM 杈惧埌闃堝€煎悗鍐嶅仛 summarization銆?  - repo 瀹炵幇鍙‘璁わ細`SenMemBufferManager.add_messages(...)` 涓?`ShortMemBufferManager.add_segments(...)` 閮芥槸鎸?token 涓婇檺鍐冲畾鏄惁瑙﹀彂鍚庣画闃舵銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細LightMem 鐨勫啓瑙﹀彂鏈川鏄€滅紦瀛橀槇鍊艰Е鍙戔€濓紝涓嶆槸鐜版湁 MemPrimitive 瑙﹀彂鏃忔墍瑕嗙洊鐨?metadata/key/甯搁噺闃堝€笺€?
 #### organization
 
-- 论文里做了什么
-  - 组织结构是三层的：sensory memory buffer、topic-aware STM、LTM。
-  - STM 中间态不是简单 append，而是 `{topic, message turns}` 这样的 topic-segment 索引结构；LTM entry 则进一步变成 topic summary + raw turn support 的长期条目。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 缁勭粐缁撴瀯鏄笁灞傜殑锛歴ensory memory buffer銆乼opic-aware STM銆丩TM銆?  - STM 涓棿鎬佷笉鏄畝鍗?append锛岃€屾槸 `{topic, message turns}` 杩欐牱鐨?topic-segment 绱㈠紩缁撴瀯锛汱TM entry 鍒欒繘涓€姝ュ彉鎴?topic summary + raw turn support 鐨勯暱鏈熸潯鐩€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `AppendOrganization`
-    - 只能表达“把条目写到某层”，不能表达层间缓冲与 topic segment 结构。
-  - `ConditionalLayerOrganization`
-    - 可做简单分层路由，但不能表达“先在 sensory/STM 暂存，后批量提升到 LTM”的生命周期。
-- 当前缺失什么能力
-  - 缺少显式的分层 buffer organization primitive。
-  - 缺少 topic-segment 级数据结构及其与 LTM entry 的绑定关系。
-  - 缺少“在线先 soft insert，后离线更新”的 LTM 生命周期组织边界。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：LightMem 由 sensory、STM、LTM 三模块组成；STM 维护 `{topic, message turns}`，LTM 存 `{topic, {sum_i, user_i, model_i}}`。
-  - repo 实现可确认：`SenMemBufferManager`、`ShortMemBufferManager`、`LightMemory` 的向量 LTM 插入路径分别对应三层。
-  - 依据论文与 repo 做出的合理推断：当前 MemPrimitive 的 layer 概念能表达“多层”，但不能直接表达“多层缓冲 + topic segment 生命周期”。
-
+    - 鍙兘琛ㄨ揪鈥滄妸鏉＄洰鍐欏埌鏌愬眰鈥濓紝涓嶈兘琛ㄨ揪灞傞棿缂撳啿涓?topic segment 缁撴瀯銆?  - `ConditionalLayerOrganization`
+    - 鍙仛绠€鍗曞垎灞傝矾鐢憋紝浣嗕笉鑳借〃杈锯€滃厛鍦?sensory/STM 鏆傚瓨锛屽悗鎵归噺鎻愬崌鍒?LTM鈥濈殑鐢熷懡鍛ㄦ湡銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鏄惧紡鐨勫垎灞?buffer organization primitive銆?  - 缂哄皯 topic-segment 绾ф暟鎹粨鏋勫強鍏朵笌 LTM entry 鐨勭粦瀹氬叧绯汇€?  - 缂哄皯鈥滃湪绾垮厛 soft insert锛屽悗绂荤嚎鏇存柊鈥濈殑 LTM 鐢熷懡鍛ㄦ湡缁勭粐杈圭晫銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歀ightMem 鐢?sensory銆丼TM銆丩TM 涓夋ā鍧楃粍鎴愶紱STM 缁存姢 `{topic, message turns}`锛孡TM 瀛?`{topic, {sum_i, user_i, model_i}}`銆?  - repo 瀹炵幇鍙‘璁わ細`SenMemBufferManager`銆乣ShortMemBufferManager`銆乣LightMemory` 鐨勫悜閲?LTM 鎻掑叆璺緞鍒嗗埆瀵瑰簲涓夊眰銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細褰撳墠 MemPrimitive 鐨?layer 姒傚康鑳借〃杈锯€滃灞傗€濓紝浣嗕笉鑳界洿鎺ヨ〃杈锯€滃灞傜紦鍐?+ topic segment 鐢熷懡鍛ㄦ湡鈥濄€?
 #### evolution_trigger
 
-- 论文里做了什么
-  - 长期记忆更新被延后到 sleep time。
-  - 当所有 entries 插入完成或收到 update trigger 时，系统为 LTM entries 构造 update queue，并启动离线更新。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 闀挎湡璁板繂鏇存柊琚欢鍚庡埌 sleep time銆?  - 褰撴墍鏈?entries 鎻掑叆瀹屾垚鎴栨敹鍒?update trigger 鏃讹紝绯荤粺涓?LTM entries 鏋勯€?update queue锛屽苟鍚姩绂荤嚎鏇存柊銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `NewWriteEvolutionTrigger`
-    - 有“新写入后触发维护”的轮廓，但它是局部在线维护，不是 LightMem 的离线批处理触发。
-  - `ThresholdEvolutionTrigger`
-    - 只能做抽象阈值触发，缺少 sleep-time / batch-update 语义。
-- 当前缺失什么能力
-  - 缺少显式的 sleep-time / offline batch evolution trigger。
-  - 缺少“构造 update queue”和“执行离线更新”两个阶段之间的触发边界。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：更新与在线推理解耦，等所有 entries 插入完成或更新触发到来后，再计算 update queue。
-  - repo 实现可确认：`construct_update_queue_all_entries(...)` 与 `offline_update_all_entries(...)` 是独立的离线步骤。
-  - 依据论文与 repo 做出的合理推断：在 MemPrimitive 里，把这一路径强行塞进现有 online evolution trigger 会丢失 LightMem 的关键效率语义。
-
+    - 鏈夆€滄柊鍐欏叆鍚庤Е鍙戠淮鎶も€濈殑杞粨锛屼絾瀹冩槸灞€閮ㄥ湪绾跨淮鎶わ紝涓嶆槸 LightMem 鐨勭绾挎壒澶勭悊瑙﹀彂銆?  - `ThresholdTrigger`
+    - 鍙兘鍋氭娊璞￠槇鍊艰Е鍙戯紝缂哄皯 sleep-time / batch-update 璇箟銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鏄惧紡鐨?sleep-time / offline batch evolution trigger銆?  - 缂哄皯鈥滄瀯閫?update queue鈥濆拰鈥滄墽琛岀绾挎洿鏂扳€濅袱涓樁娈典箣闂寸殑瑙﹀彂杈圭晫銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛氭洿鏂颁笌鍦ㄧ嚎鎺ㄧ悊瑙ｈ€︼紝绛夋墍鏈?entries 鎻掑叆瀹屾垚鎴栨洿鏂拌Е鍙戝埌鏉ュ悗锛屽啀璁＄畻 update queue銆?  - repo 瀹炵幇鍙‘璁わ細`construct_update_queue_all_entries(...)` 涓?`offline_update_all_entries(...)` 鏄嫭绔嬬殑绂荤嚎姝ラ銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍦?MemPrimitive 閲岋紝鎶婅繖涓€璺緞寮鸿濉炶繘鐜版湁 online evolution trigger 浼氫涪澶?LightMem 鐨勫叧閿晥鐜囪涔夈€?
 #### memory_evolution
 
-- 论文里做了什么
-  - 在线阶段只做 soft update，即新 entry 直接插入 LTM。
-  - 离线阶段先为每个 entry 建立 top-k 相似候选队列，并加入时间约束，只允许较新的 entry 更新较旧的 entry。
-  - 随后每个目标 entry 独立执行 update/delete/ignore，因此可以并行。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鍦ㄧ嚎闃舵鍙仛 soft update锛屽嵆鏂?entry 鐩存帴鎻掑叆 LTM銆?  - 绂荤嚎闃舵鍏堜负姣忎釜 entry 寤虹珛 top-k 鐩镐技鍊欓€夐槦鍒楋紝骞跺姞鍏ユ椂闂寸害鏉燂紝鍙厑璁歌緝鏂扮殑 entry 鏇存柊杈冩棫鐨?entry銆?  - 闅忓悗姣忎釜鐩爣 entry 鐙珛鎵ц update/delete/ignore锛屽洜姝ゅ彲浠ュ苟琛屻€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `SummaryRewriteEvolution`
-    - 有“基于已有内容生成新版本”的表面相似性，但不具备 update queue 与时间约束。
-  - `LayerMoveEvolution`
-    - 能做记录改写/迁移，但没有“相似候选 + delete/update/ignore”决策。
-  - `TraceOnlyEvolution`
-    - 只能表达 no-op/记录痕迹，无法承载真实离线更新。
-- 当前缺失什么能力
-  - 缺少 timestamp-constrained similarity update queue 构造模块。
-  - 缺少“target entry + candidate source entries -> update/delete/ignore”的离线维护 primitive。
-  - 缺少并行 batch evolution 的能力边界。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：`Q(e_i)` 由相似度 top-k 与时间约束组成，且更新可并行执行。
-  - repo 实现可确认：`construct_update_queue_all_entries(...)` 先为每个 entry 写入 `update_queue`；`offline_update_all_entries(...)` 再并行调用 LLM 决定 `update` 或 `delete`，否则跳过。
-  - 当前证据不足、不能下结论的点：repo 当前 `UPDATE_PROMPT` 只显式暴露 `update/delete/ignore` 三类动作；论文正文若把“直接插入新 entry”也视作 update 体系的一部分，则 repo 的动作标签与论文抽象层级并不完全同构。
-
+    - 鏈夆€滃熀浜庡凡鏈夊唴瀹圭敓鎴愭柊鐗堟湰鈥濈殑琛ㄩ潰鐩镐技鎬э紝浣嗕笉鍏峰 update queue 涓庢椂闂寸害鏉熴€?  - `LayerMoveEvolution`
+    - 鑳藉仛璁板綍鏀瑰啓/杩佺Щ锛屼絾娌℃湁鈥滅浉浼煎€欓€?+ delete/update/ignore鈥濆喅绛栥€?  - `TraceOnlyEvolution`
+    - 鍙兘琛ㄨ揪 no-op/璁板綍鐥曡抗锛屾棤娉曟壙杞界湡瀹炵绾挎洿鏂般€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 timestamp-constrained similarity update queue 鏋勯€犳ā鍧椼€?  - 缂哄皯鈥渢arget entry + candidate source entries -> update/delete/ignore鈥濈殑绂荤嚎缁存姢 primitive銆?  - 缂哄皯骞惰 batch evolution 鐨勮兘鍔涜竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歚Q(e_i)` 鐢辩浉浼煎害 top-k 涓庢椂闂寸害鏉熺粍鎴愶紝涓旀洿鏂板彲骞惰鎵ц銆?  - repo 瀹炵幇鍙‘璁わ細`construct_update_queue_all_entries(...)` 鍏堜负姣忎釜 entry 鍐欏叆 `update_queue`锛沗offline_update_all_entries(...)` 鍐嶅苟琛岃皟鐢?LLM 鍐冲畾 `update` 鎴?`delete`锛屽惁鍒欒烦杩囥€?  - 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣锛歳epo 褰撳墠 `UPDATE_PROMPT` 鍙樉寮忔毚闇?`update/delete/ignore` 涓夌被鍔ㄤ綔锛涜鏂囨鏂囪嫢鎶娾€滅洿鎺ユ彃鍏ユ柊 entry鈥濅篃瑙嗕綔 update 浣撶郴鐨勪竴閮ㄥ垎锛屽垯 repo 鐨勫姩浣滄爣绛句笌璁烘枃鎶借薄灞傜骇骞朵笉瀹屽叏鍚屾瀯銆?
 #### retrieval
 
-- 论文里做了什么
-  - 论文没有把 retrieval 设计当作主要创新点；方法贡献主要集中在 memory construction 与 sleep-time update。
-  - 从系统使用角度看，LTM entry 通过 embedding semantic search 被召回。
-- MemPrimitive 现有哪些模块可直接复用
-  - `EmbeddingSimilarityRetrieval`
-    - 足以表达“对长期记忆条目做向量相似检索”这一核心 recall 机制。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - 璁烘枃娌℃湁鎶?retrieval 璁捐褰撲綔涓昏鍒涙柊鐐癸紱鏂规硶璐＄尞涓昏闆嗕腑鍦?memory construction 涓?sleep-time update銆?  - 浠庣郴缁熶娇鐢ㄨ搴︾湅锛孡TM entry 閫氳繃 embedding semantic search 琚彫鍥炪€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `EmbeddingSimilarityRetrieval`
+    - 瓒充互琛ㄨ揪鈥滃闀挎湡璁板繂鏉＄洰鍋氬悜閲忕浉浼兼绱⑩€濊繖涓€鏍稿績 recall 鏈哄埗銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `LayerAwareRetrieval`
-    - 如果以后想显式区分 LTM 与 summary store，可作为分层路由外壳，但不是论文必要条件。
-- 当前缺失什么能力
-  - 对 LightMem 论文主体而言，无关键缺口。
-  - 若把 repo 后续的 summary store / StructMem 扩展也算进来，则需要额外的层间检索设计；但那不是这篇论文的核心记忆机制。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：效率分析主要对比 Summary/Update 成本，并明确说明 retrieval stage 不是其关注重点。
-  - repo 实现可确认：`retrieve(...)` 直接对 query 做 embedding，然后查向量库返回 memory 文本。
-  - 依据论文与 repo 做出的合理推断：在 MemPrimitive 中，LightMem 的 retrieval 可被现有 embedding retrieval 直接承载。
-
+    - 濡傛灉浠ュ悗鎯虫樉寮忓尯鍒?LTM 涓?summary store锛屽彲浣滀负鍒嗗眰璺敱澶栧３锛屼絾涓嶆槸璁烘枃蹇呰鏉′欢銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 瀵?LightMem 璁烘枃涓讳綋鑰岃█锛屾棤鍏抽敭缂哄彛銆?  - 鑻ユ妸 repo 鍚庣画鐨?summary store / StructMem 鎵╁睍涔熺畻杩涙潵锛屽垯闇€瑕侀澶栫殑灞傞棿妫€绱㈣璁★紱浣嗛偅涓嶆槸杩欑瘒璁烘枃鐨勬牳蹇冭蹇嗘満鍒躲€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛氭晥鐜囧垎鏋愪富瑕佸姣?Summary/Update 鎴愭湰锛屽苟鏄庣‘璇存槑 retrieval stage 涓嶆槸鍏跺叧娉ㄩ噸鐐广€?  - repo 瀹炵幇鍙‘璁わ細`retrieve(...)` 鐩存帴瀵?query 鍋?embedding锛岀劧鍚庢煡鍚戦噺搴撹繑鍥?memory 鏂囨湰銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍦?MemPrimitive 涓紝LightMem 鐨?retrieval 鍙鐜版湁 embedding retrieval 鐩存帴鎵胯浇銆?
 #### readout
 
-- 论文里做了什么
-  - 把检索出的 memory 条目文本交给下游问答或代理使用。
-  - readout 不是论文创新点。
-- MemPrimitive 现有哪些模块可直接复用
-  - `ConcatenateReadout`
+- 璁烘枃閲屽仛浜嗕粈涔?  - 鎶婃绱㈠嚭鐨?memory 鏉＄洰鏂囨湰浜ょ粰涓嬫父闂瓟鎴栦唬鐞嗕娇鐢ㄣ€?  - readout 涓嶆槸璁烘枃鍒涙柊鐐广€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `ConcatenateReadout`
   - `BulletListReadout`
   - `GroupedByLayerReadout`
-- 哪些模块只能部分复用
+- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `JSONReadout`
-    - 只是在需要结构化下游接口时可选，不是论文必要。
-- 当前缺失什么能力
-  - 无关键缺口。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：LightMem 的重点在 memory bank construction 与 update efficiency，不在特殊 readout 格式。
-  - repo 实现可确认：`retrieve(...)` 最终把结果格式化成字符串列表/拼接文本。
-  - 依据论文与 repo 做出的合理推断：只要 retrieval 产出正确，现有通用 readout 即可承载 LightMem。
-
-### 与 MemPrimitive 现有组件的对照结论
-
-| slot | 结论 | 说明 |
+    - 鍙槸鍦ㄩ渶瑕佺粨鏋勫寲涓嬫父鎺ュ彛鏃跺彲閫夛紝涓嶆槸璁烘枃蹇呰銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 鏃犲叧閿己鍙ｃ€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歀ightMem 鐨勯噸鐐瑰湪 memory bank construction 涓?update efficiency锛屼笉鍦ㄧ壒娈?readout 鏍煎紡銆?  - repo 瀹炵幇鍙‘璁わ細`retrieve(...)` 鏈€缁堟妸缁撴灉鏍煎紡鍖栨垚瀛楃涓插垪琛?鎷兼帴鏂囨湰銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍙 retrieval 浜у嚭姝ｇ‘锛岀幇鏈夐€氱敤 readout 鍗冲彲鎵胯浇 LightMem銆?
+### 涓?MemPrimitive 鐜版湁缁勪欢鐨勫鐓х粨璁?
+| slot | 缁撹 | 璇存槑 |
 | --- | --- | --- |
-| `unit_formation` | 部分复用 | `PassThroughUnitFormation` 可承载预打包 turn，但缺原生 turn / turn-pair 形成语义 |
-| `representation` | 部分复用 | 有 summary/embedding 外壳，但缺 pre-compression 与 topic-segment summary 表征 |
-| `write_trigger` | 缺失 | 当前没有 buffer-capacity / token-budget 驱动触发器 |
-| `organization` | 部分复用 | 有多层/append 外壳，但缺 sensory -> STM -> LTM 的分层缓冲组织 |
-| `evolution_trigger` | 部分复用 | 可勉强表达“新写入后维护”，但缺 sleep-time batch trigger |
-| `memory_evolution` | 缺失 | 当前没有 timestamp-constrained update queue + offline parallel update primitive |
-| `retrieval` | 直接复用 | `EmbeddingSimilarityRetrieval` 足以表达论文主体 recall |
-| `readout` | 直接复用 | 通用文本 readout 足够 |
+| `unit_formation` | 閮ㄥ垎澶嶇敤 | `PassThroughUnitFormation` 鍙壙杞介鎵撳寘 turn锛屼絾缂哄師鐢?turn / turn-pair 褰㈡垚璇箟 |
+| `representation` | 閮ㄥ垎澶嶇敤 | 鏈?summary/embedding 澶栧３锛屼絾缂?pre-compression 涓?topic-segment summary 琛ㄥ緛 |
+| `write_trigger` | 缂哄け | 褰撳墠娌℃湁 buffer-capacity / token-budget 椹卞姩瑙﹀彂鍣?|
+| `organization` | 閮ㄥ垎澶嶇敤 | 鏈夊灞?append 澶栧３锛屼絾缂?sensory -> STM -> LTM 鐨勫垎灞傜紦鍐茬粍缁?|
+| `evolution_trigger` | 閮ㄥ垎澶嶇敤 | 鍙媺寮鸿〃杈锯€滄柊鍐欏叆鍚庣淮鎶も€濓紝浣嗙己 sleep-time batch trigger |
+| `memory_evolution` | 缂哄け | 褰撳墠娌℃湁 timestamp-constrained update queue + offline parallel update primitive |
+| `retrieval` | 鐩存帴澶嶇敤 | `EmbeddingSimilarityRetrieval` 瓒充互琛ㄨ揪璁烘枃涓讳綋 recall |
+| `readout` | 鐩存帴澶嶇敤 | 閫氱敤鏂囨湰 readout 瓒冲 |
 
-### 重表达判断
+### 閲嶈〃杈惧垽鏂?
+鍙兘閮ㄥ垎鏄犲皠銆?
+鍘熷洜涓嶅湪浜?slot 鏁伴噺涓嶅锛岃€屽湪浜?LightMem 鏈€鍏抽敭鐨勪袱娈垫満鍒跺綋鍓嶉兘娌℃湁鐪熷疄钀藉湴鎵胯浇鐗╋細
 
-只能部分映射。
+- 缂撳啿闃堝€奸┍鍔ㄧ殑涓夊眰 memory organization
+- sleep-time 鐨?update queue 鏋勯€犱笌绂荤嚎骞惰鏇存柊
 
-原因不在于 slot 数量不够，而在于 LightMem 最关键的两段机制当前都没有真实落地承载物：
-
-- 缓冲阈值驱动的三层 memory organization
-- sleep-time 的 update queue 构造与离线并行更新
-
-如果只用现有模块强行拼装，最多能做出“对话写入 + 摘要 + 向量检索”的近似版，但很难把 LightMem 的效率导向核心机制完整表达出来。
-
-### 备注与证据边界
-
-- 论文明说
-  - LightMem 由 sensory memory、topic-aware STM、sleep-time updated LTM 三部分组成。
-  - 新输入先经 pre-compression，再进入 sensory buffer。
-  - sensory buffer 达到阈值后触发基于 attention + similarity 的 topic segmentation。
-  - STM 达阈值后按 topic 粒度总结，形成进入 LTM 的条目。
-  - LTM 更新先 soft insert，再在 sleep time 构造带时间约束的相似 update queue，并离线并行更新。
-  - retrieval stage 不是论文主要优化对象。
-- repo 实现可确认
-  - `src/lightmem/factory/memory_buffer/sensory_memory.py` 实现了有 token 上限的 sensory buffer，以及 topic segmentation 后切段。
-  - `src/lightmem/factory/topic_segmenter/llmlingua_2.py` 实现了 attention-based boundary proposal。
-  - `src/lightmem/factory/memory_buffer/short_term_memory.py` 实现了 STM token 阈值触发。
-  - `src/lightmem/memory/lightmem.py` 中 `construct_update_queue_all_entries(...)` 会为条目写入 `update_queue`；`offline_update_all_entries(...)` 会并行执行离线 update。
-  - `retrieve(...)` 是直接的 embedding retrieval。
-- 依据论文与 repo 做出的合理推断
-  - 在 MemPrimitive 中，pre-compression 更适合作为 `representation`，而 topic-segment 生命周期更适合作为 `organization`。
-  - sleep-time update 在 slot 上应拆成 `evolution_trigger` + `memory_evolution` 两部分，而不是塞进单一 organization side effect。
-- 当前证据不足、不能下结论的点
-  - repo 当前 extraction prompt 明显比论文正文更偏“事实抽取”；这是否等同于论文中的 topic summary 具体实现，证据不足。
-  - repo 当前 `UPDATE_PROMPT` 暴露的动作是 `update/delete/ignore`；论文抽象层说的是 soft insert + offline update 框架。两者在动作标签上并非完全一一对应，不能过度等同。
-  - repo 2026 年主分支已经包含 StructMem、baseline toolkit 等后续扩展；这些不应反推为 LightMem 原论文的核心 memory 机制。
-
+濡傛灉鍙敤鐜版湁妯″潡寮鸿鎷艰锛屾渶澶氳兘鍋氬嚭鈥滃璇濆啓鍏?+ 鎽樿 + 鍚戦噺妫€绱⑩€濈殑杩戜技鐗堬紝浣嗗緢闅炬妸 LightMem 鐨勬晥鐜囧鍚戞牳蹇冩満鍒跺畬鏁磋〃杈惧嚭鏉ャ€?
+### 澶囨敞涓庤瘉鎹竟鐣?
+- 璁烘枃鏄庤
+  - LightMem 鐢?sensory memory銆乼opic-aware STM銆乻leep-time updated LTM 涓夐儴鍒嗙粍鎴愩€?  - 鏂拌緭鍏ュ厛缁?pre-compression锛屽啀杩涘叆 sensory buffer銆?  - sensory buffer 杈惧埌闃堝€煎悗瑙﹀彂鍩轰簬 attention + similarity 鐨?topic segmentation銆?  - STM 杈鹃槇鍊煎悗鎸?topic 绮掑害鎬荤粨锛屽舰鎴愯繘鍏?LTM 鐨勬潯鐩€?  - LTM 鏇存柊鍏?soft insert锛屽啀鍦?sleep time 鏋勯€犲甫鏃堕棿绾︽潫鐨勭浉浼?update queue锛屽苟绂荤嚎骞惰鏇存柊銆?  - retrieval stage 涓嶆槸璁烘枃涓昏浼樺寲瀵硅薄銆?- repo 瀹炵幇鍙‘璁?  - `src/lightmem/factory/memory_buffer/sensory_memory.py` 瀹炵幇浜嗘湁 token 涓婇檺鐨?sensory buffer锛屼互鍙?topic segmentation 鍚庡垏娈点€?  - `src/lightmem/factory/topic_segmenter/llmlingua_2.py` 瀹炵幇浜?attention-based boundary proposal銆?  - `src/lightmem/factory/memory_buffer/short_term_memory.py` 瀹炵幇浜?STM token 闃堝€艰Е鍙戙€?  - `src/lightmem/memory/lightmem.py` 涓?`construct_update_queue_all_entries(...)` 浼氫负鏉＄洰鍐欏叆 `update_queue`锛沗offline_update_all_entries(...)` 浼氬苟琛屾墽琛岀绾?update銆?  - `retrieve(...)` 鏄洿鎺ョ殑 embedding retrieval銆?- 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂?  - 鍦?MemPrimitive 涓紝pre-compression 鏇撮€傚悎浣滀负 `representation`锛岃€?topic-segment 鐢熷懡鍛ㄦ湡鏇撮€傚悎浣滀负 `organization`銆?  - sleep-time update 鍦?slot 涓婂簲鎷嗘垚 `evolution_trigger` + `memory_evolution` 涓ら儴鍒嗭紝鑰屼笉鏄杩涘崟涓€ organization side effect銆?- 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+  - repo 褰撳墠 extraction prompt 鏄庢樉姣旇鏂囨鏂囨洿鍋忊€滀簨瀹炴娊鍙栤€濓紱杩欐槸鍚︾瓑鍚屼簬璁烘枃涓殑 topic summary 鍏蜂綋瀹炵幇锛岃瘉鎹笉瓒炽€?  - repo 褰撳墠 `UPDATE_PROMPT` 鏆撮湶鐨勫姩浣滄槸 `update/delete/ignore`锛涜鏂囨娊璞″眰璇寸殑鏄?soft insert + offline update 妗嗘灦銆備袱鑰呭湪鍔ㄤ綔鏍囩涓婂苟闈炲畬鍏ㄤ竴涓€瀵瑰簲锛屼笉鑳借繃搴︾瓑鍚屻€?  - repo 2026 骞翠富鍒嗘敮宸茬粡鍖呭惈 StructMem銆乥aseline toolkit 绛夊悗缁墿灞曪紱杩欎簺涓嶅簲鍙嶆帹涓?LightMem 鍘熻鏂囩殑鏍稿績 memory 鏈哄埗銆?
 ## MIRIX: Multi-Agent Memory System for LLM-Based Agents
 
-论文链接: <https://arxiv.org/abs/2507.07957>
+璁烘枃閾炬帴: <https://arxiv.org/abs/2507.07957>
 
-官方 repo: <https://github.com/MIRIX-AI/MIRIX>
+瀹樻柟 repo: <https://github.com/MIRIX-AI/MIRIX>
 
-本次 repo 证据主要核对版本: `MIRIX-AI/MIRIX` 默认分支，临时检查时重点读取 `docs/ARCHITECTURE.md`、`mirix/functions/function_sets/memory_tools.py`、各 memory schema 与 manager 实现。
+鏈 repo 璇佹嵁涓昏鏍稿鐗堟湰: `MIRIX-AI/MIRIX` 榛樿鍒嗘敮锛屼复鏃舵鏌ユ椂閲嶇偣璇诲彇 `docs/ARCHITECTURE.md`銆乣mirix/functions/function_sets/memory_tools.py`銆佸悇 memory schema 涓?manager 瀹炵幇銆?
+### 璁烘枃渚?memory 鏈哄埗閫熷啓
 
-### 论文侧 memory 机制速写
+MIRIX 鐨?memory 鏈哄埗閲嶇偣锛屼笉鏄€滃崟涓€璁板繂搴撲笂鍐嶅彔涓€灞傛绱⑩€濓紝鑰屾槸鎶婇暱鏃惰蹇嗘樉寮忔媶鎴愬绫汇€佸啀浜ょ粰澶?agent 鍒嗗伐缁存姢銆傝鏂囦笌瀹樻柟鏂囨。涓€鑷村己璋冨叚绫?memory锛?
+- `Core Memory`锛氶潰鍚?persona / human profile 鐨勯珮浼樺厛绾у潡鐘惰蹇?- `Episodic Memory`锛氫簨浠跺寲缁忓巻
+- `Semantic Memory`锛氬叧浜庡疄浣撱€佸亸濂姐€佷簨瀹炪€佸叧绯荤殑姒傚康鎬х煡璇?- `Procedural Memory`锛氬彲澶嶇敤鐨勬搷浣滄楠や笌宸ヤ綔娴?- `Resource Memory`锛氭枃妗ｃ€佺綉椤点€佹枃浠剁瓑璧勬簮鍐呭
+- `Knowledge Vault`锛氬甫鏁忔劅绾у埆鐨勬満瀵嗘垨鍙楅檺淇℃伅
 
-MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”，而是把长时记忆显式拆成多类、再交给多 agent 分工维护。论文与官方文档一致强调六类 memory：
+瀵瑰簲鐨勫啓鍏ラ摼璺槸锛?
+- 鍏堢敱 `Meta Memory Manager Agent` 璇诲彇绱Н瀵硅瘽锛屽垽鏂繖娆′氦浜掑簲鏇存柊鍝簺 memory types
+- 鍐嶇敱鍚?memory-type 涓撶敤 agent 浜у嚭瀵瑰簲 schema 鐨?memory item锛屽苟鍐冲畾鏄彃鍏ャ€佹洿鏂般€佸悎骞惰繕鏄烦杩?- 鏈€鍚庣敱鍚?memory manager 鎸佷箙鍖栵紝骞跺湪闇€瑕佹椂閲嶇畻 embedding
 
-- `Core Memory`：面向 persona / human profile 的高优先级块状记忆
-- `Episodic Memory`：事件化经历
-- `Semantic Memory`：关于实体、偏好、事实、关系的概念性知识
-- `Procedural Memory`：可复用的操作步骤与工作流
-- `Resource Memory`：文档、网页、文件等资源内容
-- `Knowledge Vault`：带敏感级别的机密或受限信息
+瀵瑰簲鐨勭淮鎶や笌璇诲彇閾捐矾鏄細
 
-对应的写入链路是：
+- `Reflexion Agent` 璐熻矗璺?memory types 鐨勫幓閲嶃€佹暣鐞嗐€佷粠 episode 涓彁鐐兼洿楂樺眰 pattern
+- 鏌ヨ鏃舵寜 memory type 鍒嗗埆妫€绱紝鍐嶆妸涓嶅悓绫诲瀷鐨勭粨鏋滄寜绫诲瀷鍒嗙粍娉ㄥ叆 system prompt
+- 妫€绱㈠苟涓嶆槸缁熶竴鐨勫崟搴?recall锛岃€屾槸澶?store銆佸瓧娈垫劅鐭ャ€佺被鍨嬫劅鐭ョ殑 BM25 / embedding / fuzzy match 缁勫悎
 
-- 先由 `Meta Memory Manager Agent` 读取累积对话，判断这次交互应更新哪些 memory types
-- 再由各 memory-type 专用 agent 产出对应 schema 的 memory item，并决定是插入、更新、合并还是跳过
-- 最后由各 memory manager 持久化，并在需要时重算 embedding
+濡傛灉纭槧灏勫埌 MemPrimitive 褰撳墠 slot 浣撶郴锛孧IRIX 鐨勬牳蹇冩柊鎰忎富瑕佸帇鍦ㄥ洓澶勶細
 
-对应的维护与读取链路是：
+- `write_trigger`锛氫笉鏄€滃啓涓嶅啓鈥濅簩鍊硷紝鑰屾槸鈥滀竴娆′氦浜掕璺敱鍒板摢浜?memory types鈥?- `organization`锛氫笉鏄崟涓€ layer append锛岃€屾槸寮傛瀯澶氳蹇嗗簱骞跺瓨
+- `memory_evolution`锛氫笉鏄畝鍗曡拷鍔狅紝鑰屾槸绫诲瀷鍖?update / merge / rewrite / dedupe
+- `retrieval/readout`锛氫笉鏄崟涓€鍙洖鍣紝鑰屾槸澶?store 妫€绱㈠悗鍐嶆寜 memory type 缁勭粐璇诲嚭
 
-- `Reflexion Agent` 负责跨 memory types 的去重、整理、从 episode 中提炼更高层 pattern
-- 查询时按 memory type 分别检索，再把不同类型的结果按类型分组注入 system prompt
-- 检索并不是统一的单库 recall，而是多 store、字段感知、类型感知的 BM25 / embedding / fuzzy match 组合
-
-如果硬映射到 MemPrimitive 当前 slot 体系，MIRIX 的核心新意主要压在四处：
-
-- `write_trigger`：不是“写不写”二值，而是“一次交互要路由到哪些 memory types”
-- `organization`：不是单一 layer append，而是异构多记忆库并存
-- `memory_evolution`：不是简单追加，而是类型化 update / merge / rewrite / dedupe
-- `retrieval/readout`：不是单一召回器，而是多 store 检索后再按 memory type 组织读出
-
-### 按 MemPrimitive slot 的拆解
-
+### 鎸?MemPrimitive slot 鐨勬媶瑙?
 #### unit_formation
 
-- 论文里做了什么
-  - MIRIX 的上游输入并不是单句事实，而是“累积到当前时刻的一段交互上下文”。`Meta Memory Manager Agent` 会读取 accumulated messages / recent interaction，再决定哪些 memory types 需要更新。
-  - 进入专用 memory agent 之前，最小可感知单元更像“conversation bundle / interaction chunk”，而不是纯文本句子切片。
-- MemPrimitive 现有哪些模块可直接复用
-  - `PassThroughUnitFormation`
-    - 如果上游已经把一段对话上下文打包成单个 `Observation`，可以勉强承载 MIRIX 的输入外观。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鐨勪笂娓歌緭鍏ュ苟涓嶆槸鍗曞彞浜嬪疄锛岃€屾槸鈥滅疮绉埌褰撳墠鏃跺埢鐨勪竴娈典氦浜掍笂涓嬫枃鈥濄€俙Meta Memory Manager Agent` 浼氳鍙?accumulated messages / recent interaction锛屽啀鍐冲畾鍝簺 memory types 闇€瑕佹洿鏂般€?  - 杩涘叆涓撶敤 memory agent 涔嬪墠锛屾渶灏忓彲鎰熺煡鍗曞厓鏇村儚鈥渃onversation bundle / interaction chunk鈥濓紝鑰屼笉鏄函鏂囨湰鍙ュ瓙鍒囩墖銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - `PassThroughUnitFormation`
+    - 濡傛灉涓婃父宸茬粡鎶婁竴娈靛璇濅笂涓嬫枃鎵撳寘鎴愬崟涓?`Observation`锛屽彲浠ュ媺寮烘壙杞?MIRIX 鐨勮緭鍏ュ瑙傘€?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `MetadataHintUnitFormation`
-    - 可借助 hints 人工补上会话边界或来源标记，但它不原生表达“累积交互包”这一输入语义。
-  - `WindowedUnitFormation`
-    - 只能做局部窗口切片，不能稳定表达 MIRIX 那种面向 memory-router 的交互打包边界。
-- 当前缺失什么能力
-  - 缺少显式的“conversation bundle / interaction chunk”形成 primitive。
-  - 缺少把多轮文本、附件引用、时间范围、参与者信息一起封装为后续 typed-memory extraction 输入的标准 contract。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：MIRIX 由 MetaAgent 根据交互内容决定更新哪些 memory types。
-  - repo 实现可确认：`meta_memory_agent.txt` 直接要求 agent 从 accumulated messages 判断应更新的一组 memory types。
-  - 依据论文与 repo 做出的合理推断：对 MemPrimitive 来说，这里的自然输入单元不是句子，而是“待路由的一段交互包”。
-
+    - 鍙€熷姪 hints 浜哄伐琛ヤ笂浼氳瘽杈圭晫鎴栨潵婧愭爣璁帮紝浣嗗畠涓嶅師鐢熻〃杈锯€滅疮绉氦浜掑寘鈥濊繖涓€杈撳叆璇箟銆?  - `WindowedUnitFormation`
+    - 鍙兘鍋氬眬閮ㄧ獥鍙ｅ垏鐗囷紝涓嶈兘绋冲畾琛ㄨ揪 MIRIX 閭ｇ闈㈠悜 memory-router 鐨勪氦浜掓墦鍖呰竟鐣屻€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鏄惧紡鐨勨€渃onversation bundle / interaction chunk鈥濆舰鎴?primitive銆?  - 缂哄皯鎶婂杞枃鏈€侀檮浠跺紩鐢ㄣ€佹椂闂磋寖鍥淬€佸弬涓庤€呬俊鎭竴璧峰皝瑁呬负鍚庣画 typed-memory extraction 杈撳叆鐨勬爣鍑?contract銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歁IRIX 鐢?MetaAgent 鏍规嵁浜や簰鍐呭鍐冲畾鏇存柊鍝簺 memory types銆?  - repo 瀹炵幇鍙‘璁わ細`meta_memory_agent.txt` 鐩存帴瑕佹眰 agent 浠?accumulated messages 鍒ゆ柇搴旀洿鏂扮殑涓€缁?memory types銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細瀵?MemPrimitive 鏉ヨ锛岃繖閲岀殑鑷劧杈撳叆鍗曞厓涓嶆槸鍙ュ瓙锛岃€屾槸鈥滃緟璺敱鐨勪竴娈典氦浜掑寘鈥濄€?
 #### representation
 
-- 论文里做了什么
-  - MIRIX 的表示不是统一的 `summary + embedding`，而是先经由专用 agent 抽成不同 memory family 的 typed payload。
-  - 例如 episodic memory 会形成事件摘要、细节、参与者、时间；semantic memory 会形成实体名、摘要、细节、来源；procedural memory 会形成步骤化流程；resource memory 会形成标题、摘要、正文；knowledge vault 会形成敏感度与密钥型内容。
-  - 多数 memory types 在落库时还会补 embedding，但 embedding 只是 typed representation 的附属，不是主体。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鐨勮〃绀轰笉鏄粺涓€鐨?`summary + embedding`锛岃€屾槸鍏堢粡鐢变笓鐢?agent 鎶芥垚涓嶅悓 memory family 鐨?typed payload銆?  - 渚嬪 episodic memory 浼氬舰鎴愪簨浠舵憳瑕併€佺粏鑺傘€佸弬涓庤€呫€佹椂闂达紱semantic memory 浼氬舰鎴愬疄浣撳悕銆佹憳瑕併€佺粏鑺傘€佹潵婧愶紱procedural memory 浼氬舰鎴愭楠ゅ寲娴佺▼锛況esource memory 浼氬舰鎴愭爣棰樸€佹憳瑕併€佹鏂囷紱knowledge vault 浼氬舰鎴愭晱鎰熷害涓庡瘑閽ュ瀷鍐呭銆?  - 澶氭暟 memory types 鍦ㄨ惤搴撴椂杩樹細琛?embedding锛屼絾 embedding 鍙槸 typed representation 鐨勯檮灞烇紝涓嶆槸涓讳綋銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BasicRepresentation`
-    - 可提供 `summary`、`embedding`、`keywords` 等通用增强，但不能产出 MIRIX 所需的多 schema typed memory payload。
-  - `RetrievalOrientedEmbeddingRepresentation`
-    - 可覆盖“表示后附 embedding 供检索”的局部需求，但不负责把交互抽成 episodic / semantic / procedural / resource / vault 这些不同结构。
-  - `SemanticFieldEnrichmentRepresentation`
-    - 只是在统一记录上补语义字段，不是按 memory family 分化 schema。
-- 当前缺失什么能力
-  - 缺少“一次交互 -> 多种 memory schema 候选”的 typed extraction primitive。
-  - 缺少对 block memory、event memory、concept memory、procedure memory、resource memory、sensitive secret memory 的统一表示边界。
-  - 缺少“不同 memory type 使用不同字段集与后续索引字段”的 representation contract。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：MIRIX 使用多类 memory，并由不同 memory agents 管理。
-  - repo 实现可确认：各 schema 文件分别定义了 episodic / semantic / procedural / resource / knowledge vault 的字段结构，且工具层存在分 memory type 的 insert/update 接口。
-  - 依据论文与 repo 做出的合理推断：MIRIX 在 slot 上更接近“typed schema extraction representation”，而不是单一通用表示增强。
-
+    - 鍙彁渚?`summary`銆乣embedding`銆乣keywords` 绛夐€氱敤澧炲己锛屼絾涓嶈兘浜у嚭 MIRIX 鎵€闇€鐨勫 schema typed memory payload銆?  - `RetrievalOrientedEmbeddingRepresentation`
+    - 鍙鐩栤€滆〃绀哄悗闄?embedding 渚涙绱⑩€濈殑灞€閮ㄩ渶姹傦紝浣嗕笉璐熻矗鎶婁氦浜掓娊鎴?episodic / semantic / procedural / resource / vault 杩欎簺涓嶅悓缁撴瀯銆?  - `SemanticFieldEnrichmentRepresentation`
+    - 鍙槸鍦ㄧ粺涓€璁板綍涓婅ˉ璇箟瀛楁锛屼笉鏄寜 memory family 鍒嗗寲 schema銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥滀竴娆′氦浜?-> 澶氱 memory schema 鍊欓€夆€濈殑 typed extraction primitive銆?  - 缂哄皯瀵?block memory銆乪vent memory銆乧oncept memory銆乸rocedure memory銆乺esource memory銆乻ensitive secret memory 鐨勭粺涓€琛ㄧず杈圭晫銆?  - 缂哄皯鈥滀笉鍚?memory type 浣跨敤涓嶅悓瀛楁闆嗕笌鍚庣画绱㈠紩瀛楁鈥濈殑 representation contract銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歁IRIX 浣跨敤澶氱被 memory锛屽苟鐢变笉鍚?memory agents 绠＄悊銆?  - repo 瀹炵幇鍙‘璁わ細鍚?schema 鏂囦欢鍒嗗埆瀹氫箟浜?episodic / semantic / procedural / resource / knowledge vault 鐨勫瓧娈电粨鏋勶紝涓斿伐鍏峰眰瀛樺湪鍒?memory type 鐨?insert/update 鎺ュ彛銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細MIRIX 鍦?slot 涓婃洿鎺ヨ繎鈥渢yped schema extraction representation鈥濓紝鑰屼笉鏄崟涓€閫氱敤琛ㄧず澧炲己銆?
 #### write_trigger
 
-- 论文里做了什么
-  - MIRIX 的写触发核心不是简单判断“写不写”，而是由 MetaAgent 对当前交互做多标签路由，决定本次应更新哪些 memory types。
-  - 当某个 memory type 被选中后，还会进入该类型专用 agent 的后续判断与更新。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鐨勫啓瑙﹀彂鏍稿績涓嶆槸绠€鍗曞垽鏂€滃啓涓嶅啓鈥濓紝鑰屾槸鐢?MetaAgent 瀵瑰綋鍓嶄氦浜掑仛澶氭爣绛捐矾鐢憋紝鍐冲畾鏈搴旀洿鏂板摢浜?memory types銆?  - 褰撴煇涓?memory type 琚€変腑鍚庯紝杩樹細杩涘叆璇ョ被鍨嬩笓鐢?agent 鐨勫悗缁垽鏂笌鏇存柊銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `LLMJudgedWriteTrigger`
-    - 可以借 LLM 做“是否值得写”判断，但它没有 MIRIX 所需的 one-to-many memory-type routing 输出。
-  - `MetadataGatedWriteTrigger`
-    - 如果上游已写好目标 memory types，可按 metadata 过滤；但 MIRIX 自身关键在于触发器内部产出路由结果，而不是消费既有标签。
-  - `AlwaysWriteTrigger`
-    - 只能表达“全部送入后续流程”，无法表达“只更新 episodic + semantic，不更新 resource / vault”。
-- 当前缺失什么能力
-  - 缺少 multi-label、type-selective 的 write trigger。
-  - 缺少“当前交互 -> 目标 memory type 集合”的触发结果格式。
-  - 缺少把路由决策继续传给各 store / agent 的显式控制边界。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：Meta Memory Manager Agent 决定 memory update 的类型分发。
-  - repo 实现可确认：`trigger_memory_update` 会先收集 memory types，再并行触发对应子 agent。
-  - 依据论文与 repo 做出的合理推断：在 MemPrimitive slot 里，这应落在 `write_trigger`，且现有触发器只覆盖“是否写”，未覆盖“写到哪些 type”。
-
+    - 鍙互鍊?LLM 鍋氣€滄槸鍚﹀€煎緱鍐欌€濆垽鏂紝浣嗗畠娌℃湁 MIRIX 鎵€闇€鐨?one-to-many memory-type routing 杈撳嚭銆?  - `MetadataGatedWriteTrigger`
+    - 濡傛灉涓婃父宸插啓濂界洰鏍?memory types锛屽彲鎸?metadata 杩囨护锛涗絾 MIRIX 鑷韩鍏抽敭鍦ㄤ簬瑙﹀彂鍣ㄥ唴閮ㄤ骇鍑鸿矾鐢辩粨鏋滐紝鑰屼笉鏄秷璐规棦鏈夋爣绛俱€?  - `AlwaysTrigger`
+    - 鍙兘琛ㄨ揪鈥滃叏閮ㄩ€佸叆鍚庣画娴佺▼鈥濓紝鏃犳硶琛ㄨ揪鈥滃彧鏇存柊 episodic + semantic锛屼笉鏇存柊 resource / vault鈥濄€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 multi-label銆乼ype-selective 鐨?write trigger銆?  - 缂哄皯鈥滃綋鍓嶄氦浜?-> 鐩爣 memory type 闆嗗悎鈥濈殑瑙﹀彂缁撴灉鏍煎紡銆?  - 缂哄皯鎶婅矾鐢卞喅绛栫户缁紶缁欏悇 store / agent 鐨勬樉寮忔帶鍒惰竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歁eta Memory Manager Agent 鍐冲畾 memory update 鐨勭被鍨嬪垎鍙戙€?  - repo 瀹炵幇鍙‘璁わ細`trigger_memory_update` 浼氬厛鏀堕泦 memory types锛屽啀骞惰瑙﹀彂瀵瑰簲瀛?agent銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細鍦?MemPrimitive slot 閲岋紝杩欏簲钀藉湪 `write_trigger`锛屼笖鐜版湁瑙﹀彂鍣ㄥ彧瑕嗙洊鈥滄槸鍚﹀啓鈥濓紝鏈鐩栤€滃啓鍒板摢浜?type鈥濄€?
 #### organization
 
-- 论文里做了什么
-  - MIRIX 不是单一 memory table，而是六类异构 memory store 并存。
-  - 其中 `Core Memory` 还是块状 memory block 管理；其他几类更像 typed record store，但字段、索引域、可更新方式都不同。
-  - 不同 memory 还带有 scope / owner / sensitivity 等过滤维度，尤其 knowledge vault 有额外访问边界。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 涓嶆槸鍗曚竴 memory table锛岃€屾槸鍏被寮傛瀯 memory store 骞跺瓨銆?  - 鍏朵腑 `Core Memory` 杩樻槸鍧楃姸 memory block 绠＄悊锛涘叾浠栧嚑绫绘洿鍍?typed record store锛屼絾瀛楁銆佺储寮曞煙銆佸彲鏇存柊鏂瑰紡閮戒笉鍚屻€?  - 涓嶅悓 memory 杩樺甫鏈?scope / owner / sensitivity 绛夎繃婊ょ淮搴︼紝灏ゅ叾 knowledge vault 鏈夐澶栬闂竟鐣屻€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `ConditionalLayerOrganization`
-    - 可近似表达“按类别分层”，但无法表达 MIRIX 这种 heterogeneous stores with distinct schemas 的组织方式。
-  - `AppendOrganization`
-    - 只能承载单一 record append，不足以表示 block memory 与 typed stores 并存。
-  - `PlacementWithoutAppendOrganization`
-    - 可表达路由/落位外观，但没有 MIRIX 所需的实际异构存储语义。
-- 当前缺失什么能力
-  - 缺少“异构多记忆库组织” primitive。
-  - 缺少 block-style core memory 与 record-style typed memories 并存的组织抽象。
-  - 缺少 per-type schema、scope、sensitivity、owner constraints 的组织边界。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：MIRIX 采用多种 memory types。
-  - repo 实现可确认：`ARCHITECTURE.md`、schemas、memory managers 都显示六种 memory store 分离；core memory 通过 blocks 管理，knowledge vault 带 sensitivity。
-  - 依据论文与 repo 做出的合理推断：MemPrimitive 当前 layer 概念只能部分近似 MIRIX 的 store 分化，不能忠实承载其异构组织。
-
+    - 鍙繎浼艰〃杈锯€滄寜绫诲埆鍒嗗眰鈥濓紝浣嗘棤娉曡〃杈?MIRIX 杩欑 heterogeneous stores with distinct schemas 鐨勭粍缁囨柟寮忋€?  - `AppendOrganization`
+    - 鍙兘鎵胯浇鍗曚竴 record append锛屼笉瓒充互琛ㄧず block memory 涓?typed stores 骞跺瓨銆?  - `PlacementWithoutAppendOrganization`
+    - 鍙〃杈捐矾鐢?钀戒綅澶栬锛屼絾娌℃湁 MIRIX 鎵€闇€鐨勫疄闄呭紓鏋勫瓨鍌ㄨ涔夈€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯鈥滃紓鏋勫璁板繂搴撶粍缁団€?primitive銆?  - 缂哄皯 block-style core memory 涓?record-style typed memories 骞跺瓨鐨勭粍缁囨娊璞°€?  - 缂哄皯 per-type schema銆乻cope銆乻ensitivity銆乷wner constraints 鐨勭粍缁囪竟鐣屻€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歁IRIX 閲囩敤澶氱 memory types銆?  - repo 瀹炵幇鍙‘璁わ細`ARCHITECTURE.md`銆乻chemas銆乵emory managers 閮芥樉绀哄叚绉?memory store 鍒嗙锛沜ore memory 閫氳繃 blocks 绠＄悊锛宬nowledge vault 甯?sensitivity銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細MemPrimitive 褰撳墠 layer 姒傚康鍙兘閮ㄥ垎杩戜技 MIRIX 鐨?store 鍒嗗寲锛屼笉鑳藉繝瀹炴壙杞藉叾寮傛瀯缁勭粐銆?
 #### evolution_trigger
 
-- 论文里做了什么
-  - MIRIX 的维护触发不是单一模式，而是至少有三类：
-  - `Core Memory` 在接近容量上限时触发 rewrite / condense。
-  - 各 typed memories 在检测到重复、重叠或同一对象时触发 update / merge / replace。
-  - `Reflexion Agent` 还会在额外时机对所有 memory types 做去重、整理与高层 pattern 提炼。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
-  - `ThresholdEvolutionTrigger`
-    - 可近似表达“达到阈值后触发”，但现有触发信号不是 core block fullness。
-  - `NewWriteEvolutionTrigger`
-    - 可表达“新写入后做维护”，但 MIRIX 中很多维护是 type-aware update / merge，而非统一后处理。
-  - `OutcomeConditionedEvolutionTrigger`
-    - 对 Reflexion 类触发有一点外形相似，但 MIRIX Reflexion 不是试错反馈触发，而是面向 memory hygiene 的整理触发。
-- 当前缺失什么能力
-  - 缺少容量驱动的 core-block rewrite trigger。
-  - 缺少类型化 memory update / merge trigger。
-  - 缺少 scheduled / per-query reflexion-style maintenance trigger。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：系统包含 Reflexion agent，并强调多 memory maintenance。
-  - repo 实现可确认：core tools 里存在 rewrite block；各 memory tools 存在 insert/update/merge；`reflexion_agent.txt` 明确写了 cleanup / dedup / pattern extraction。
-  - 依据论文与 repo 做出的合理推断：MIRIX 的 evolution trigger 明显是多源触发族，而不是当前单一阈值或单一新写入触发可覆盖。
-
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鐨勭淮鎶よЕ鍙戜笉鏄崟涓€妯″紡锛岃€屾槸鑷冲皯鏈変笁绫伙細
+  - `Core Memory` 鍦ㄦ帴杩戝閲忎笂闄愭椂瑙﹀彂 rewrite / condense銆?  - 鍚?typed memories 鍦ㄦ娴嬪埌閲嶅銆侀噸鍙犳垨鍚屼竴瀵硅薄鏃惰Е鍙?update / merge / replace銆?  - `Reflexion Agent` 杩樹細鍦ㄩ澶栨椂鏈哄鎵€鏈?memory types 鍋氬幓閲嶃€佹暣鐞嗕笌楂樺眰 pattern 鎻愮偧銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
+  - `ThresholdTrigger`
+    - 鍙繎浼艰〃杈锯€滆揪鍒伴槇鍊煎悗瑙﹀彂鈥濓紝浣嗙幇鏈夎Е鍙戜俊鍙蜂笉鏄?core block fullness銆?  - `NewWriteEvolutionTrigger`
+    - 鍙〃杈锯€滄柊鍐欏叆鍚庡仛缁存姢鈥濓紝浣?MIRIX 涓緢澶氱淮鎶ゆ槸 type-aware update / merge锛岃€岄潪缁熶竴鍚庡鐞嗐€?  - `OutcomeConditionedEvolutionTrigger`
+    - 瀵?Reflexion 绫昏Е鍙戞湁涓€鐐瑰褰㈢浉浼硷紝浣?MIRIX Reflexion 涓嶆槸璇曢敊鍙嶉瑙﹀彂锛岃€屾槸闈㈠悜 memory hygiene 鐨勬暣鐞嗚Е鍙戙€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯瀹归噺椹卞姩鐨?core-block rewrite trigger銆?  - 缂哄皯绫诲瀷鍖?memory update / merge trigger銆?  - 缂哄皯 scheduled / per-query reflexion-style maintenance trigger銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛氱郴缁熷寘鍚?Reflexion agent锛屽苟寮鸿皟澶?memory maintenance銆?  - repo 瀹炵幇鍙‘璁わ細core tools 閲屽瓨鍦?rewrite block锛涘悇 memory tools 瀛樺湪 insert/update/merge锛沗reflexion_agent.txt` 鏄庣‘鍐欎簡 cleanup / dedup / pattern extraction銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細MIRIX 鐨?evolution trigger 鏄庢樉鏄婧愯Е鍙戞棌锛岃€屼笉鏄綋鍓嶅崟涓€闃堝€兼垨鍗曚竴鏂板啓鍏ヨЕ鍙戝彲瑕嗙洊銆?
 #### memory_evolution
 
-- 论文里做了什么
-  - MIRIX 的 memory evolution 包括多类 type-specific 维护动作：
-  - core memory 会做 block rewrite / condense。
-  - episodic memory 会 merge / replace 事件条目。
-  - semantic / procedural / resource / knowledge vault 会对已有条目做 update，且会跳过重复项。
-  - Reflexion 还会做跨 memory types 的 dedupe、整理，以及从 episodic 中提炼 lifestyle / behavior pattern 写回更高层 memory。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鐨?memory evolution 鍖呮嫭澶氱被 type-specific 缁存姢鍔ㄤ綔锛?  - core memory 浼氬仛 block rewrite / condense銆?  - episodic memory 浼?merge / replace 浜嬩欢鏉＄洰銆?  - semantic / procedural / resource / knowledge vault 浼氬宸叉湁鏉＄洰鍋?update锛屼笖浼氳烦杩囬噸澶嶉」銆?  - Reflexion 杩樹細鍋氳法 memory types 鐨?dedupe銆佹暣鐞嗭紝浠ュ強浠?episodic 涓彁鐐?lifestyle / behavior pattern 鍐欏洖鏇撮珮灞?memory銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `SummaryRewriteEvolution`
-    - 与 core block rewrite 有表面相似，但它不是 block-capacity-conditioned rewrite，也不面向 persona/human blocks。
-  - `ReflectionGenerationEvolution`
-    - 对 Reflexion 式“从经历生成更高层洞见”有局部相似，但不支持跨 store dedupe 与 typed write-back。
-  - `AppendOnlyEvolution`
-    - 只能表达新增，无法表达 MIRIX 的 update / merge / replace / dedupe 主体。
-- 当前缺失什么能力
-  - 缺少 typed memory update / merge / replace primitive。
-  - 缺少跨 memory stores 的 deduplication / cleanup primitive。
-  - 缺少“从 episodic pattern 提炼 semantic insight 并写回”的跨类型演化能力。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：MIRIX 通过多类 memory 协同获得更强长期记忆管理。
-  - repo 实现可确认：memory tools 提供分类型 insert/update/merge/check；Reflexion prompt 明确要求 dedup、cleanup、pattern extraction。
-  - 依据论文与 repo 做出的合理推断：MIRIX 的核心维护语义落在 typed evolution，而不是当前 append/rewrite/graph-link 家族能完整覆盖的范围。
-
+    - 涓?core block rewrite 鏈夎〃闈㈢浉浼硷紝浣嗗畠涓嶆槸 block-capacity-conditioned rewrite锛屼篃涓嶉潰鍚?persona/human blocks銆?  - `ReflectionGenerationEvolution`
+    - 瀵?Reflexion 寮忊€滀粠缁忓巻鐢熸垚鏇撮珮灞傛礊瑙佲€濇湁灞€閮ㄧ浉浼硷紝浣嗕笉鏀寔璺?store dedupe 涓?typed write-back銆?  - `AppendOnlyEvolution`
+    - 鍙兘琛ㄨ揪鏂板锛屾棤娉曡〃杈?MIRIX 鐨?update / merge / replace / dedupe 涓讳綋銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 typed memory update / merge / replace primitive銆?  - 缂哄皯璺?memory stores 鐨?deduplication / cleanup primitive銆?  - 缂哄皯鈥滀粠 episodic pattern 鎻愮偧 semantic insight 骞跺啓鍥炩€濈殑璺ㄧ被鍨嬫紨鍖栬兘鍔涖€?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歁IRIX 閫氳繃澶氱被 memory 鍗忓悓鑾峰緱鏇村己闀挎湡璁板繂绠＄悊銆?  - repo 瀹炵幇鍙‘璁わ細memory tools 鎻愪緵鍒嗙被鍨?insert/update/merge/check锛汻eflexion prompt 鏄庣‘瑕佹眰 dedup銆乧leanup銆乸attern extraction銆?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細MIRIX 鐨勬牳蹇冪淮鎶よ涔夎惤鍦?typed evolution锛岃€屼笉鏄綋鍓?append/rewrite/graph-link 瀹舵棌鑳藉畬鏁磋鐩栫殑鑼冨洿銆?
 #### retrieval
 
-- 论文里做了什么
-  - MIRIX 查询时不是单一向量召回，而是按 memory type 分别检索。
-  - episodic memory 会同时区分 recent events 与 relevant events。
-  - 其他 memory types 使用字段感知的 BM25 / embedding / fuzzy matching；knowledge vault 还带敏感级别过滤，避免不该暴露给当前 agent 的秘密被读出。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鏌ヨ鏃朵笉鏄崟涓€鍚戦噺鍙洖锛岃€屾槸鎸?memory type 鍒嗗埆妫€绱€?  - episodic memory 浼氬悓鏃跺尯鍒?recent events 涓?relevant events銆?  - 鍏朵粬 memory types 浣跨敤瀛楁鎰熺煡鐨?BM25 / embedding / fuzzy matching锛沰nowledge vault 杩樺甫鏁忔劅绾у埆杩囨护锛岄伩鍏嶄笉璇ユ毚闇茬粰褰撳墠 agent 鐨勭瀵嗚璇诲嚭銆?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `BM25Retrieval`
-    - 可覆盖 MIRIX 检索中的一条主路径，但只面向统一记录语义。
-  - `EmbeddingSimilarityRetrieval`
-    - 可覆盖向量检索部分，但不表达 per-type fields、recent-vs-relevant dual view 与 sensitivity constraints。
-  - `LayerAwareRetrieval`
-    - 可做多层路由外壳，但离 MIRIX 的多 store、字段感知检索 orchestration 仍有明显距离。
-  - `RecencyRetrieval`
-    - 仅能覆盖 episodic recent branch 的一部分。
-- 当前缺失什么能力
-  - 缺少跨异构 stores 的联合检索 orchestrator。
-  - 缺少 per-type searchable fields、hybrid search policy 与 sensitivity filtering。
-  - 缺少“recent episodic + relevant episodic + other typed memories”并行召回的统一接口。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：MIRIX 用多类 memory 提供更完整上下文。
-  - repo 实现可确认：各 manager 支持 BM25 / embedding / fuzzy 等不同检索；agent 构 prompt 时分别拉取 episodic recent / relevant 与其他 memory types；knowledge vault 会限制敏感内容暴露。
-  - 依据论文与 repo 做出的合理推断：当前 MemPrimitive 的 retrieval family 可复用部分局部检索器，但缺少 MIRIX 风格的多 store orchestrator。
-
+    - 鍙鐩?MIRIX 妫€绱腑鐨勪竴鏉′富璺緞锛屼絾鍙潰鍚戠粺涓€璁板綍璇箟銆?  - `EmbeddingSimilarityRetrieval`
+    - 鍙鐩栧悜閲忔绱㈤儴鍒嗭紝浣嗕笉琛ㄨ揪 per-type fields銆乺ecent-vs-relevant dual view 涓?sensitivity constraints銆?  - `LayerAwareRetrieval`
+    - 鍙仛澶氬眰璺敱澶栧３锛屼絾绂?MIRIX 鐨勫 store銆佸瓧娈垫劅鐭ユ绱?orchestration 浠嶆湁鏄庢樉璺濈銆?  - `RecencyRetrieval`
+    - 浠呰兘瑕嗙洊 episodic recent branch 鐨勪竴閮ㄥ垎銆?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯璺ㄥ紓鏋?stores 鐨勮仈鍚堟绱?orchestrator銆?  - 缂哄皯 per-type searchable fields銆乭ybrid search policy 涓?sensitivity filtering銆?  - 缂哄皯鈥渞ecent episodic + relevant episodic + other typed memories鈥濆苟琛屽彫鍥炵殑缁熶竴鎺ュ彛銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛歁IRIX 鐢ㄥ绫?memory 鎻愪緵鏇村畬鏁翠笂涓嬫枃銆?  - repo 瀹炵幇鍙‘璁わ細鍚?manager 鏀寔 BM25 / embedding / fuzzy 绛変笉鍚屾绱紱agent 鏋?prompt 鏃跺垎鍒媺鍙?episodic recent / relevant 涓庡叾浠?memory types锛沰nowledge vault 浼氶檺鍒舵晱鎰熷唴瀹规毚闇层€?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細褰撳墠 MemPrimitive 鐨?retrieval family 鍙鐢ㄩ儴鍒嗗眬閮ㄦ绱㈠櫒锛屼絾缂哄皯 MIRIX 椋庢牸鐨勫 store orchestrator銆?
 #### readout
 
-- 论文里做了什么
-  - MIRIX 的读出不是简单拼接全部命中文本，而是按 memory type 分组装配到 system prompt。
-  - episodic memory 会分 recent 与 relevant 两块呈现；其他 memory 则按类型列出；部分场景还会保留 item id 供后续更新。
-  - knowledge vault 的读出受可见性与敏感度约束。
-- MemPrimitive 现有哪些模块可直接复用
-  - 无可直接完整复用模块。
-- 哪些模块只能部分复用
+- 璁烘枃閲屽仛浜嗕粈涔?  - MIRIX 鐨勮鍑轰笉鏄畝鍗曟嫾鎺ュ叏閮ㄥ懡涓枃鏈紝鑰屾槸鎸?memory type 鍒嗙粍瑁呴厤鍒?system prompt銆?  - episodic memory 浼氬垎 recent 涓?relevant 涓ゅ潡鍛堢幇锛涘叾浠?memory 鍒欐寜绫诲瀷鍒楀嚭锛涢儴鍒嗗満鏅繕浼氫繚鐣?item id 渚涘悗缁洿鏂般€?  - knowledge vault 鐨勮鍑哄彈鍙鎬т笌鏁忔劅搴︾害鏉熴€?- MemPrimitive 鐜版湁鍝簺妯″潡鍙洿鎺ュ鐢?  - 鏃犲彲鐩存帴瀹屾暣澶嶇敤妯″潡銆?- 鍝簺妯″潡鍙兘閮ㄥ垎澶嶇敤
   - `GroupedByLayerReadout`
-    - 可近似表达“分组呈现”，但组的语义只是 layer，不是 MIRIX 的 typed memory families。
-  - `PromptContextReadout`
-    - 可承载最终 prompt 注入外观，但不自带 MIRIX 那种 recent/relevant split 与敏感信息抑制。
-  - `ConcatenateReadout`
-    - 只能做最粗粒度拼接。
-- 当前缺失什么能力
-  - 缺少 typed memory prompt assembly primitive。
-  - 缺少 episodic recent/relevant 双区块 readout。
-  - 缺少与 sensitivity / owner filtering 协同的 readout contract。
-- 你的判断依据是什么（论文 / repo / 推断）
-  - 论文明说：系统在推理时调用不同 memory 以增强上下文。
-  - repo 实现可确认：`build_system_prompt_with_memories` 会按 memory type 构造不同片段，并对 knowledge vault 做限制。
-  - 依据论文与 repo 做出的合理推断：对 MemPrimitive 而言，readout 不是零难点，但它更像 retrieval 之后的 typed formatting 缺口。
-
-### 与 MemPrimitive 现有组件的对照结论
-
-| slot | 结论 | 说明 |
+    - 鍙繎浼艰〃杈锯€滃垎缁勫憟鐜扳€濓紝浣嗙粍鐨勮涔夊彧鏄?layer锛屼笉鏄?MIRIX 鐨?typed memory families銆?  - `PromptContextReadout`
+    - 鍙壙杞芥渶缁?prompt 娉ㄥ叆澶栬锛屼絾涓嶈嚜甯?MIRIX 閭ｇ recent/relevant split 涓庢晱鎰熶俊鎭姂鍒躲€?  - `ConcatenateReadout`
+    - 鍙兘鍋氭渶绮楃矑搴︽嫾鎺ャ€?- 褰撳墠缂哄け浠€涔堣兘鍔?  - 缂哄皯 typed memory prompt assembly primitive銆?  - 缂哄皯 episodic recent/relevant 鍙屽尯鍧?readout銆?  - 缂哄皯涓?sensitivity / owner filtering 鍗忓悓鐨?readout contract銆?- 浣犵殑鍒ゆ柇渚濇嵁鏄粈涔堬紙璁烘枃 / repo / 鎺ㄦ柇锛?  - 璁烘枃鏄庤锛氱郴缁熷湪鎺ㄧ悊鏃惰皟鐢ㄤ笉鍚?memory 浠ュ寮轰笂涓嬫枃銆?  - repo 瀹炵幇鍙‘璁わ細`build_system_prompt_with_memories` 浼氭寜 memory type 鏋勯€犱笉鍚岀墖娈碉紝骞跺 knowledge vault 鍋氶檺鍒躲€?  - 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂細瀵?MemPrimitive 鑰岃█锛宺eadout 涓嶆槸闆堕毦鐐癸紝浣嗗畠鏇村儚 retrieval 涔嬪悗鐨?typed formatting 缂哄彛銆?
+### 涓?MemPrimitive 鐜版湁缁勪欢鐨勫鐓х粨璁?
+| slot | 缁撹 | 璇存槑 |
 | --- | --- | --- |
-| `unit_formation` | 部分复用 | `PassThroughUnitFormation` 可勉强承载预打包交互，但缺 conversation bundle contract |
-| `representation` | 缺失 | 当前没有“一次交互 -> 多 memory schema typed payload”模块 |
-| `write_trigger` | 缺失 | 当前没有多标签 memory-type routing trigger |
-| `organization` | 部分复用 | 可用 layer/router 外壳近似，但缺异构多 store 与 core-block 组织 |
-| `evolution_trigger` | 部分复用 | 有阈值/新写入/结果驱动触发外壳，但缺 capacity-triggered rewrite 与 reflexion scheduling |
-| `memory_evolution` | 缺失 | 当前没有 typed update/merge/replace/dedupe 跨 store 维护 primitive |
-| `retrieval` | 部分复用 | BM25/embedding/recency 可局部复用，但缺多 store、字段感知、敏感度约束 orchestrator |
-| `readout` | 部分复用 | 现有 prompt/group readout 可做近似，但缺 typed prompt assembly 与 episodic dual-view readout |
+| `unit_formation` | 閮ㄥ垎澶嶇敤 | `PassThroughUnitFormation` 鍙媺寮烘壙杞介鎵撳寘浜や簰锛屼絾缂?conversation bundle contract |
+| `representation` | 缂哄け | 褰撳墠娌℃湁鈥滀竴娆′氦浜?-> 澶?memory schema typed payload鈥濇ā鍧?|
+| `write_trigger` | 缂哄け | 褰撳墠娌℃湁澶氭爣绛?memory-type routing trigger |
+| `organization` | 閮ㄥ垎澶嶇敤 | 鍙敤 layer/router 澶栧３杩戜技锛屼絾缂哄紓鏋勫 store 涓?core-block 缁勭粐 |
+| `evolution_trigger` | 閮ㄥ垎澶嶇敤 | 鏈夐槇鍊?鏂板啓鍏?缁撴灉椹卞姩瑙﹀彂澶栧３锛屼絾缂?capacity-triggered rewrite 涓?reflexion scheduling |
+| `memory_evolution` | 缂哄け | 褰撳墠娌℃湁 typed update/merge/replace/dedupe 璺?store 缁存姢 primitive |
+| `retrieval` | 閮ㄥ垎澶嶇敤 | BM25/embedding/recency 鍙眬閮ㄥ鐢紝浣嗙己澶?store銆佸瓧娈垫劅鐭ャ€佹晱鎰熷害绾︽潫 orchestrator |
+| `readout` | 閮ㄥ垎澶嶇敤 | 鐜版湁 prompt/group readout 鍙仛杩戜技锛屼絾缂?typed prompt assembly 涓?episodic dual-view readout |
 
-### 重表达判断
+### 閲嶈〃杈惧垽鏂?
+鍙兘閮ㄥ垎鏄犲皠銆?
+鍘熷洜涓嶅湪浜?MIRIX 鏃犳硶鏀捐繘鍏?slot 妗嗘灦锛岃€屽湪浜庡畠鐨勫叧閿満鍒跺苟涓嶆槸鍗曠偣缂哄彛锛岃€屾槸鏁存潯鈥滃绫诲瀷璺敱 -> 寮傛瀯缁勭粐 -> 绫诲瀷鍖栫淮鎶?-> 澶?store 妫€绱?璇诲嚭鈥濋摼鏉￠兘姣斿綋鍓嶆ā鍧楁棌鏇村己锛?
+- 鍓嶅崐娈电己 multi-memory-type routing trigger
+- 涓缂?heterogeneous memory-store organization
+- 鍚庡崐娈电己 typed update / dedupe / cross-store reflexion evolution
+- recall 渚ц櫧鑳藉鐢ㄩ儴鍒?BM25 / embedding / recency primitive锛屼絾绂?MIRIX 鐨?typed orchestration 浠嶆湁鏄庢樉宸窛
 
-只能部分映射。
+鍥犳锛屽綋鍓?MemPrimitive 鍙互琛ㄨ揪 MIRIX 鐨勪竴浜涘眬閮ㄦ€濇兂锛屼緥濡傦細
 
-原因不在于 MIRIX 无法放进八 slot 框架，而在于它的关键机制并不是单点缺口，而是整条“多类型路由 -> 异构组织 -> 类型化维护 -> 多 store 检索/读出”链条都比当前模块族更强：
-
-- 前半段缺 multi-memory-type routing trigger
-- 中段缺 heterogeneous memory-store organization
-- 后半段缺 typed update / dedupe / cross-store reflexion evolution
-- recall 侧虽能复用部分 BM25 / embedding / recency primitive，但离 MIRIX 的 typed orchestration 仍有明显差距
-
-因此，当前 MemPrimitive 可以表达 MIRIX 的一些局部思想，例如：
-
-- 用 layer-aware 路由近似多 memory categories
-- 用 embedding / BM25 recall 近似若干单 store 检索
-- 用 summary/rewrite/reflection 局部近似少数维护动作
-
-但还不能把 MIRIX 忠实重表达成一个“只靠现有模块组合即可成立”的完整系统。
-
-### 备注与证据边界
-
-- 论文明说
-  - MIRIX 采用 multi-agent memory architecture。
-  - 系统维护六类 memory，并用专门 agent 协同管理。
-  - 系统还包含 Reflexion 机制以提升长期记忆管理质量。
-- repo 实现可确认
-  - `ARCHITECTURE.md` 明确列出六类 memory 与 MetaAgent / Reflexion Agent。
-  - 各 schema 与 manager 明确显示 episodic / semantic / procedural / resource / knowledge vault 的真实字段、索引与检索方法。
-  - `memory_tools.py` 明确存在按 memory type 的 insert / update / merge / rewrite / dedupe 相关工具入口。
-  - `agent.py` 中的 prompt 构造逻辑确实按 memory type 读取，并把 episodic recent / relevant 分开呈现。
-- 依据论文与 repo 做出的合理推断
-  - 在 MemPrimitive slot 映射中，MetaAgent 的“决定写入哪些 memory types”最自然落在 `write_trigger` 而不是 `organization`。
-  - MIRIX 的主要缺口不在单个 retriever，而在 typed routing 与 heterogeneous organization。
-  - Reflexion 在 slot 上更适合作为 `evolution_trigger + memory_evolution` 的组合，而不是单独新增顶层 slot。
-- 当前证据不足、不能下结论的点
-  - 论文正文与 repo 文档都没有把“交互包的精确定义”形式化到可直接等价为某个 unit schema，故 `unit_formation` 的细粒度边界仍有解释空间。
-  - repo 某些检索路径当前默认更偏 BM25，而论文层面的 memory 使用描述更高层；不能据此反推“论文只主张 BM25”。
-  - Reflexion 的真实生产触发频率、调度策略、与在线推理的严格时序边界，在当前公开材料中证据不够充分，不能写死为唯一机制。
+- 鐢?layer-aware 璺敱杩戜技澶?memory categories
+- 鐢?embedding / BM25 recall 杩戜技鑻ュ共鍗?store 妫€绱?- 鐢?summary/rewrite/reflection 灞€閮ㄨ繎浼煎皯鏁扮淮鎶ゅ姩浣?
+浣嗚繕涓嶈兘鎶?MIRIX 蹇犲疄閲嶈〃杈炬垚涓€涓€滃彧闈犵幇鏈夋ā鍧楃粍鍚堝嵆鍙垚绔嬧€濈殑瀹屾暣绯荤粺銆?
+### 澶囨敞涓庤瘉鎹竟鐣?
+- 璁烘枃鏄庤
+  - MIRIX 閲囩敤 multi-agent memory architecture銆?  - 绯荤粺缁存姢鍏被 memory锛屽苟鐢ㄤ笓闂?agent 鍗忓悓绠＄悊銆?  - 绯荤粺杩樺寘鍚?Reflexion 鏈哄埗浠ユ彁鍗囬暱鏈熻蹇嗙鐞嗚川閲忋€?- repo 瀹炵幇鍙‘璁?  - `ARCHITECTURE.md` 鏄庣‘鍒楀嚭鍏被 memory 涓?MetaAgent / Reflexion Agent銆?  - 鍚?schema 涓?manager 鏄庣‘鏄剧ず episodic / semantic / procedural / resource / knowledge vault 鐨勭湡瀹炲瓧娈点€佺储寮曚笌妫€绱㈡柟娉曘€?  - `memory_tools.py` 鏄庣‘瀛樺湪鎸?memory type 鐨?insert / update / merge / rewrite / dedupe 鐩稿叧宸ュ叿鍏ュ彛銆?  - `agent.py` 涓殑 prompt 鏋勯€犻€昏緫纭疄鎸?memory type 璇诲彇锛屽苟鎶?episodic recent / relevant 鍒嗗紑鍛堢幇銆?- 渚濇嵁璁烘枃涓?repo 鍋氬嚭鐨勫悎鐞嗘帹鏂?  - 鍦?MemPrimitive slot 鏄犲皠涓紝MetaAgent 鐨勨€滃喅瀹氬啓鍏ュ摢浜?memory types鈥濇渶鑷劧钀藉湪 `write_trigger` 鑰屼笉鏄?`organization`銆?  - MIRIX 鐨勪富瑕佺己鍙ｄ笉鍦ㄥ崟涓?retriever锛岃€屽湪 typed routing 涓?heterogeneous organization銆?  - Reflexion 鍦?slot 涓婃洿閫傚悎浣滀负 `evolution_trigger + memory_evolution` 鐨勭粍鍚堬紝鑰屼笉鏄崟鐙柊澧為《灞?slot銆?- 褰撳墠璇佹嵁涓嶈冻銆佷笉鑳戒笅缁撹鐨勭偣
+  - 璁烘枃姝ｆ枃涓?repo 鏂囨。閮芥病鏈夋妸鈥滀氦浜掑寘鐨勭簿纭畾涔夆€濆舰寮忓寲鍒板彲鐩存帴绛変环涓烘煇涓?unit schema锛屾晠 `unit_formation` 鐨勭粏绮掑害杈圭晫浠嶆湁瑙ｉ噴绌洪棿銆?  - repo 鏌愪簺妫€绱㈣矾寰勫綋鍓嶉粯璁ゆ洿鍋?BM25锛岃€岃鏂囧眰闈㈢殑 memory 浣跨敤鎻忚堪鏇撮珮灞傦紱涓嶈兘鎹鍙嶆帹鈥滆鏂囧彧涓诲紶 BM25鈥濄€?  - Reflexion 鐨勭湡瀹炵敓浜цЕ鍙戦鐜囥€佽皟搴︾瓥鐣ャ€佷笌鍦ㄧ嚎鎺ㄧ悊鐨勪弗鏍兼椂搴忚竟鐣岋紝鍦ㄥ綋鍓嶅叕寮€鏉愭枡涓瘉鎹笉澶熷厖鍒嗭紝涓嶈兘鍐欐涓哄敮涓€鏈哄埗銆?
