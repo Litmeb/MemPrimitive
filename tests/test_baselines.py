@@ -32,6 +32,20 @@ def _stored_pipeline_packet(text: str, store: MemoryStore) -> tuple[Packet, Memo
     return packet, store
 
 
+def _represented_packet(
+    text: str,
+    *,
+    source: str = "dialogue",
+    observation_metadata: dict | None = None,
+) -> tuple[Packet, MemoryStore]:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    packet = Packet(observation=Observation(text=text, source=source, metadata=observation_metadata or {}))
+    packet, store = PassThroughUnitFormation().run(packet, MemoryStore())
+    packet, store = BasicRepresentation().run(packet, store)
+    return packet, store
+
+
 def _graph_store() -> MemoryStore:
     return MemoryStore(
         topology=StoreTopology.from_layers(
@@ -452,6 +466,183 @@ def test_threshold_evolution_trigger_writes_only_decisions() -> None:
     assert packet_out.trace["evolution_trigger"]["threshold"] == 2.0
     assert packet_out.trace["evolution_trigger"]["constant"] == 1.0
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
+
+
+def test_on_input_trigger_filters_by_observation_source() -> None:
+    from memprimitive.baselines import OnInputTrigger
+
+    packet, store = _represented_packet("Alice likes tea.", source="dialogue")
+
+    packet_out, _ = OnInputTrigger(allowed_sources=("dialogue",)).run(packet, store)
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["module"] == "on_input_write_trigger"
+    assert packet_out.trace["write_trigger"]["observation_source"] == "dialogue"
+
+    blocked_packet, _ = OnInputTrigger(allowed_sources=("notes",)).run(packet, store)
+    assert blocked_packet.decisions == [False]
+
+
+def test_boundary_event_trigger_matches_structural_events_for_both_slots() -> None:
+    from memprimitive.baselines import AppendOrganization, BoundaryEventTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"events": ["turn_end", "session_end"]}},
+    )
+    write_packet, store = BoundaryEventTrigger(accepted_events=("session_end",)).run(packet, store)
+
+    assert write_packet.decisions == [True]
+    assert write_packet.trace["write_trigger"]["source"] == "boundary"
+    assert write_packet.trace["write_trigger"]["matched_events"] == ["session_end"]
+
+    organized_packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+    evolution_packet, _ = BoundaryEventTrigger(
+        slot="evolution_trigger",
+        accepted_events=("session_end",),
+    ).run(organized_packet, store)
+
+    assert evolution_packet.decisions == [True]
+    assert evolution_packet.trace["evolution_trigger"]["source"] == "boundary"
+
+
+def test_runtime_event_trigger_uses_packet_events_when_trigger_metadata_missing() -> None:
+    from memprimitive.baselines import AppendOrganization, RuntimeEventTrigger
+
+    packet, store = _represented_packet("Alice likes tea.")
+    packet = replace(packet, events=["task_failed"])
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            events=packet.events,
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    packet_out, _ = RuntimeEventTrigger(accepted_events=("task_failed",)).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["evolution_trigger"]["source"] == "runtime"
+    assert packet_out.trace["evolution_trigger"]["observed_events"] == ["task_failed"]
+
+
+def test_scalar_rule_trigger_supports_broadcast_and_per_unit_modes() -> None:
+    from memprimitive.baselines import ScalarRuleTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"signals": {"importance": 0.82}}},
+    )
+    packet_out, _ = ScalarRuleTrigger(signal_key="importance", threshold=0.8).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["signal_key"] == "importance"
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["signal_value"] == 0.82
+
+    multi_unit = replace(
+        packet,
+        units=[
+            replace(packet.units[0], unit_id="unit-a", metadata={"importance": 0.9}),
+            replace(packet.units[0], unit_id="unit-b", metadata={"importance": 0.3}),
+        ],
+    )
+    per_unit_packet, _ = ScalarRuleTrigger(
+        signal_key="importance",
+        threshold=0.5,
+        aggregate="per_unit",
+    ).run(multi_unit, store)
+
+    assert per_unit_packet.decisions == [True, False]
+    assert per_unit_packet.trace["write_trigger"]["aggregate"] == "per_unit"
+
+
+def test_model_judge_trigger_supports_injected_per_unit_and_broadcast_modes() -> None:
+    from memprimitive.baselines import AppendOrganization, ModelJudgeTrigger
+
+    packet, store = _represented_packet("Alice likes tea.")
+
+    def per_unit_judge(payload: dict) -> dict:
+        return {"decision": "alice" in payload["unit"]["text"].casefold(), "score": 0.9, "label": "write"}
+
+    packet_out, _ = ModelJudgeTrigger(system_prompt="Judge writes.", judge_callable=per_unit_judge).run(packet, store)
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["source"] == "model_judge"
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] == 0.9
+
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    def broadcast_judge(payload: dict) -> dict:
+        assert payload["unit"] is None
+        return {"score": 0.75}
+
+    evolution_packet, _ = ModelJudgeTrigger(
+        slot="evolution_trigger",
+        system_prompt="Judge evolution.",
+        decision_mode="score",
+        threshold=0.7,
+        per_unit=False,
+        judge_callable=broadcast_judge,
+    ).run(packet, store)
+    assert evolution_packet.decisions == [True]
+    assert evolution_packet.trace["evolution_trigger"]["per_unit"][0]["score"] == 0.75
+
+
+def test_periodic_and_idle_maintenance_triggers_gate_evolution_from_schedule_metadata() -> None:
+    from memprimitive.baselines import AppendOrganization, IdleMaintenanceTrigger, PeriodicMaintenanceTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"schedule": {"tick": 12, "idle_seconds": 45.0}, "events": ["idle"]}},
+    )
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    periodic_packet, _ = PeriodicMaintenanceTrigger(every_n=3).run(packet, store)
+    assert periodic_packet.decisions == [True]
+    assert periodic_packet.trace["evolution_trigger"]["tick"] == 12
+
+    idle_packet, _ = IdleMaintenanceTrigger(min_idle_seconds=30.0).run(packet, store)
+    assert idle_packet.decisions == [True]
+    assert idle_packet.trace["evolution_trigger"]["idle_seconds"] == 45.0
+
+
+def test_new_trigger_classes_are_registered_in_baseline_exports() -> None:
+    exported = registered_baseline_class_names()
+
+    assert {
+        "OnInputTrigger",
+        "BoundaryEventTrigger",
+        "RuntimeEventTrigger",
+        "ScalarRuleTrigger",
+        "ModelJudgeTrigger",
+        "PeriodicMaintenanceTrigger",
+        "IdleMaintenanceTrigger",
+    }.issubset(exported)
 
 
 class _FakeAMEMRuntime:
