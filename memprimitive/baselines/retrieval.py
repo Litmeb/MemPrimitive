@@ -1082,9 +1082,9 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
             default_category="query",
         )
         if self.query_expand_with_llm:
-            from ..utils._runtime import get_classic_runtime
+            from ..utils._runtime import get_runtime
 
-            runtime = get_classic_runtime()
+            runtime = get_runtime()
             runtime.require_llm(capability="Vector graph seed-and-expand query expansion")
             raw = runtime.json(
                 system=(
@@ -1099,9 +1099,9 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
             query_embedding = list(packet.query.embedding)
         else:
             if runtime is None:
-                from ..utils._runtime import get_classic_runtime
+                from ..utils._runtime import get_runtime
 
-                runtime = get_classic_runtime()
+                runtime = get_runtime()
             embedding_text = (
                 build_enhanced_embedding_text(
                     content=query_payload["content"],
@@ -1152,9 +1152,9 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
 
         if self.agentic_search:
             if runtime is None:
-                from ..utils._runtime import get_classic_runtime
+                from ..utils._runtime import get_runtime
 
-                runtime = get_classic_runtime()
+                runtime = get_runtime()
             reranked = runtime.rerank(
                 query=query.text,
                 candidates=candidate_payload,

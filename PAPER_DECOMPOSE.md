@@ -1,3 +1,7 @@
+> Note
+> This file is a paper-to-primitive analysis note.
+> Richer trigger names mentioned here are literature-mapping labels, not the current public baseline trigger API.
+
 ## HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models
 
 论文链接: <https://arxiv.org/abs/2405.14831>

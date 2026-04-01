@@ -272,7 +272,6 @@ memory primitive 之间并非完全自由组合。
 - `MemoryPipeline` 仍然会在构造期检查 slot 抽象类型与 `ModuleSpec.slot` 是否对齐
 - 旧的 baseline 侧 store/topology eager compatibility check 已移除
 - baseline/runtime 侧现已改为以 `MemoryStore.check()` 为中心的组合合法性检验：`MemoryPipeline` 负责把模块声明的 `requires_contracts` / `produces_contracts` 注册到共享 store，随后由调用方在需要时显式执行 `store.check()`
-- `classic_modules` 内已有的兼容性约束暂时保留，不在这一轮重构清理范围内
 
 ---
 

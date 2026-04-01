@@ -112,6 +112,10 @@
 
 ## write_trigger
 
+> Note
+> This document discusses possible future trigger/module additions from the literature side.
+> It does not reflect the current public baseline trigger API, which has been simplified to basic slot triggers only.
+
 ### `BufferCapacityWriteTrigger`
 
 - 属于哪个 slot

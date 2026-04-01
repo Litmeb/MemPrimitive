@@ -37,7 +37,7 @@ def _coerce_json(content: str) -> Any:
         raise
 
 
-class ClassicRuntime:
+class Runtime:
     _embedding_cache: dict[str, SentenceTransformer] = {}
 
     def __init__(
@@ -70,7 +70,7 @@ class ClassicRuntime:
         )
 
     def _client(self) -> AsyncOpenAI:
-        self.require_llm(capability="Classic runtime LLM access")
+        self.require_llm(capability="MemPrimitive runtime LLM access")
         return AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def _model(self) -> OpenAIChatCompletionsModel:
@@ -221,11 +221,11 @@ class ClassicRuntime:
         return numerator / (left_norm * right_norm)
 
 
-_DEFAULT_RUNTIME: ClassicRuntime | None = None
+_DEFAULT_RUNTIME: Runtime | None = None
 
 
-def get_classic_runtime() -> ClassicRuntime:
+def get_runtime() -> Runtime:
     global _DEFAULT_RUNTIME
     if _DEFAULT_RUNTIME is None:
-        _DEFAULT_RUNTIME = ClassicRuntime()
+        _DEFAULT_RUNTIME = Runtime()
     return _DEFAULT_RUNTIME

@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 load_dotenv(MEMPRIMITIVE_ENV_PATH, override=False)
 
 
-def _has_real_classic_llm() -> bool:
+def _has_real_runtime_llm() -> bool:
     return all(
         bool(os.environ.get(key, "").strip())
         for key in ("MEMPRIMITIVE_API_KEY", "MEMPRIMITIVE_BASE_URL", "MEMPRIMITIVE_MODEL")
@@ -27,10 +27,10 @@ def _has_real_classic_llm() -> bool:
 
 
 @pytest.fixture
-def require_real_classic_runtime() -> None:
-    if not _has_real_classic_llm():
+def require_real_runtime() -> None:
+    if not _has_real_runtime_llm():
         pytest.skip(
-            "Classic integration tests require MEMPRIMITIVE_API_KEY, "
+            "Integration tests require MEMPRIMITIVE_API_KEY, "
             "MEMPRIMITIVE_BASE_URL, and MEMPRIMITIVE_MODEL."
         )
     _runtime._DEFAULT_RUNTIME = None

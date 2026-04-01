@@ -121,7 +121,7 @@ def test_basic_representation_rejects_legacy_triple_element() -> None:
         BasicRepresentation(elements=("text", "triple"))
 
 
-def test_triple_representation_direct_uses_real_llm(require_real_classic_runtime: None) -> None:
+def test_triple_representation_direct_uses_real_llm(require_real_runtime: None) -> None:
     from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
 
     unit_packet, store = PassThroughUnitFormation().run(
@@ -148,7 +148,7 @@ def test_triple_representation_direct_uses_real_llm(require_real_classic_runtime
     assert "alice" in flattened or "openai" in flattened or "bob" in flattened
 
 
-def test_triple_representation_two_stage_uses_real_llm(require_real_classic_runtime: None) -> None:
+def test_triple_representation_two_stage_uses_real_llm(require_real_runtime: None) -> None:
     from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
 
     unit_packet, store = PassThroughUnitFormation().run(
@@ -261,12 +261,9 @@ def test_write_trigger_aligns_decisions_with_units() -> None:
     packet_out, _ = AlwaysWriteTrigger().run(packet, store)
 
     assert packet_out.decisions == [True]
-    assert packet_out.trace["write_trigger"]["policy"] == "always"
-    assert packet_out.trace["write_trigger"]["scorer"] == "identity"
-    assert packet_out.trace["write_trigger"]["output_field"] == "decisions"
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"] == {"constant": 1.0}
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] == 1.0
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["gate"] is True
+    assert packet_out.trace["write_trigger"]["module"] == "always_write_trigger"
+    assert packet_out.trace["write_trigger"]["threshold"] is None
+    assert packet_out.trace["write_trigger"]["constant"] == 1.0
     assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is True
 
 
@@ -290,12 +287,10 @@ def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
     packet_out, _ = NeverEvolutionTrigger().run(packet, store)
 
     assert packet_out.evolution_decisions == [False]
-    assert packet_out.trace["evolution_trigger"]["policy"] == "never"
-    assert packet_out.trace["evolution_trigger"]["scorer"] == "identity"
+    assert packet_out.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
     assert packet_out.trace["evolution_trigger"]["evolution_decisions"] == [False]
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"] == {"constant": 1.0}
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["score"] == 1.0
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["gate"] is True
+    assert packet_out.trace["evolution_trigger"]["threshold"] is None
+    assert packet_out.trace["evolution_trigger"]["constant"] == 1.0
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
 
 
@@ -404,7 +399,8 @@ def test_write_and_evolution_trigger_are_independent_by_default() -> None:
 
     assert write_packet.decisions == [True]
     assert evolution_packet.evolution_decisions == [False]
-    assert write_packet.trace["write_trigger"]["family"] == evolution_packet.trace["evolution_trigger"]["family"]
+    assert write_packet.trace["write_trigger"]["module"] == "always_write_trigger"
+    assert evolution_packet.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
 
 
 def test_threshold_write_trigger_respects_threshold_policy() -> None:
@@ -418,9 +414,8 @@ def test_threshold_write_trigger_respects_threshold_policy() -> None:
 
     packet_out, _ = ThresholdWriteTrigger(threshold=0.8, constant=0.7).run(packet, store)
     assert packet_out.decisions == [False]
-    assert packet_out.trace["write_trigger"]["policy"] == "threshold"
-    assert packet_out.trace["write_trigger"]["scorer"] == "weighted_sum"
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] == 0.7
+    assert packet_out.trace["write_trigger"]["threshold"] == 0.8
+    assert packet_out.trace["write_trigger"]["constant"] == 0.7
     assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is False
 
     packet_out, _ = ThresholdWriteTrigger(threshold=0.7, constant=0.7).run(packet, store)
@@ -455,142 +450,9 @@ def test_threshold_evolution_trigger_writes_only_evolution_decisions() -> None:
 
     assert packet_out.decisions == [True]
     assert packet_out.evolution_decisions == [False]
-    assert packet_out.trace["evolution_trigger"]["policy"] == "threshold"
-    assert packet_out.trace["evolution_trigger"]["scorer"] == "weighted_sum"
-    assert packet_out.trace["evolution_trigger"]["output_field"] == "evolution_decisions"
+    assert packet_out.trace["evolution_trigger"]["threshold"] == 2.0
+    assert packet_out.trace["evolution_trigger"]["constant"] == 1.0
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
-
-
-def test_metadata_gated_write_trigger_reuses_unit_type_and_metadata_flag_signals() -> None:
-    from memprimitive.baselines import MetadataGatedWriteTrigger
-
-    packet = Packet(
-        units=[
-            MemoryUnit(
-                text="Remember Alice prefers jasmine tea.",
-                unit_id="unit-write",
-                unit_type="tim_thought",
-                metadata={"tim": {"write": True}},
-            ),
-            MemoryUnit(
-                text="Skip this disabled thought.",
-                unit_id="unit-skip",
-                unit_type="tim_thought",
-                metadata={"tim": {"write": False}},
-            ),
-        ]
-    )
-
-    packet_out, _ = MetadataGatedWriteTrigger().run(packet, MemoryStore())
-
-    assert packet_out.decisions == [True, False]
-    assert packet_out.trace["write_trigger"]["scorer"] == "min"
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"]["unit_type_ready"] == 1.0
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"]["metadata_write_flag"] == 1.0
-    assert packet_out.trace["write_trigger"]["per_unit"][1]["signals"]["metadata_write_flag"] == 0.0
-
-
-def test_key_ready_write_trigger_writes_only_units_with_required_key() -> None:
-    from memprimitive.baselines import KeyReadyWriteTrigger
-
-    packet = Packet(
-        units=[
-            MemoryUnit(
-                text="Working summary block",
-                unit_id="unit-key",
-                metadata={"memgpt_key": "working_summary"},
-            ),
-            MemoryUnit(
-                text="Unnamed block",
-                unit_id="unit-missing",
-                metadata={},
-            ),
-        ]
-    )
-
-    packet_out, _ = KeyReadyWriteTrigger().run(packet, MemoryStore())
-
-    assert packet_out.decisions == [True, False]
-    assert packet_out.trace["write_trigger"]["policy"] == "threshold"
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["signals"]["key_ready"] == 1.0
-    assert packet_out.trace["write_trigger"]["per_unit"][1]["signals"]["key_ready"] == 0.0
-
-
-def test_outcome_conditioned_evolution_trigger_triggers_only_for_failed_trials() -> None:
-    from memprimitive.baselines import OutcomeConditionedEvolutionTrigger
-
-    failed_packet = Packet(
-        observation=Observation(
-            text="Trial scratchpad",
-            source="dialogue",
-            metadata={"is_correct": False, "feedback": "The answer missed the edge case."},
-        ),
-        units=[MemoryUnit(text="trial unit", unit_id="unit-failed")],
-        placements=[Placement(unit_id="unit-failed", target_layer="trial_buffer")],
-    )
-    success_packet = Packet(
-        observation=Observation(
-            text="Trial scratchpad",
-            source="dialogue",
-            metadata={"is_correct": True, "feedback": "The answer is correct."},
-        ),
-        units=[MemoryUnit(text="trial unit", unit_id="unit-success")],
-        placements=[Placement(unit_id="unit-success", target_layer="trial_buffer")],
-    )
-
-    failed_out, _ = OutcomeConditionedEvolutionTrigger().run(failed_packet, MemoryStore())
-    success_out, _ = OutcomeConditionedEvolutionTrigger().run(success_packet, MemoryStore())
-
-    assert failed_out.evolution_decisions == [True]
-    assert failed_out.trace["evolution_trigger"]["scorer"] == "weighted_sum"
-    assert failed_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["trial_failed"] == 1.0
-    assert failed_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["feedback_present"] == 1.0
-    assert success_out.evolution_decisions == [False]
-    assert success_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["trial_failed"] == 0.0
-
-
-def test_reflection_generation_evolution_skips_success_trial_with_outcome_trigger() -> None:
-    from memprimitive import MemoryPipeline
-    from memprimitive.baselines import (
-        AlwaysWriteTrigger,
-        BasicRepresentation,
-        OutcomeConditionedEvolutionTrigger,
-        PassThroughUnitFormation,
-        PlacementWithoutAppendOrganization,
-        ReflectionGenerationEvolution,
-    )
-
-    pipeline = MemoryPipeline(
-        store=MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")])),
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text",)),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=PlacementWithoutAppendOrganization(target_layer="trial_buffer"),
-        evolution_trigger=OutcomeConditionedEvolutionTrigger(),
-        memory_evolution=ReflectionGenerationEvolution(
-            target_layer="reflections",
-            reflection_generator=lambda payload: f"Reflection: avoid {payload.evaluator_feedback}",
-        ),
-    )
-
-    packet = pipeline.ingest(
-        Observation(
-            text="Trial scratchpad",
-            source="dialogue",
-            metadata={
-                "reflexion": {
-                    "question": "Parse the input stream",
-                    "scratchpad": "Attempt handled the edge case correctly.",
-                    "is_correct": True,
-                    "evaluator_feedback": "Correct answer.",
-                }
-            },
-        )
-    )
-
-    assert packet.evolution_decisions == [False]
-    assert pipeline.store.count("reflections") == 0
-    assert packet.trace["memory_evolution"]["effects"] == []
 
 
 class _FakeAMEMRuntime:
@@ -691,156 +553,6 @@ class _WrapperShapeAMEMRuntime(_FakeAMEMRuntime):
         return payload
 
 
-def test_reflection_generation_evolution_appends_reflection_for_failed_trial() -> None:
-    from memprimitive import MemoryPipeline
-    from memprimitive.baselines import (
-        AlwaysWriteTrigger,
-        BasicRepresentation,
-        OutcomeConditionedEvolutionTrigger,
-        PassThroughUnitFormation,
-        PlacementWithoutAppendOrganization,
-        ReflectionGenerationEvolution,
-    )
-
-    pipeline = MemoryPipeline(
-        store=MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="reflections")])),
-        unit_formation=PassThroughUnitFormation(),
-        representation=BasicRepresentation(elements=("text",)),
-        write_trigger=AlwaysWriteTrigger(),
-        organization=PlacementWithoutAppendOrganization(target_layer="trial_buffer"),
-        evolution_trigger=OutcomeConditionedEvolutionTrigger(),
-        memory_evolution=ReflectionGenerationEvolution(
-            target_layer="reflections",
-            reflection_generator=lambda payload: f"Reflection: avoid {payload.evaluator_feedback}",
-        ),
-    )
-
-    packet = pipeline.ingest(
-        Observation(
-            text="Trial scratchpad",
-            source="dialogue",
-            metadata={
-                "reflexion": {
-                    "question": "Parse the input stream",
-                    "scratchpad": "Attempt missed the empty-input edge case.",
-                    "is_correct": False,
-                    "evaluator_feedback": "the empty-input edge case",
-                    "trial_index": 2,
-                }
-            },
-        )
-    )
-
-    assert packet.evolution_decisions == [True]
-    assert pipeline.store.count("reflections") == 1
-    reflection_record = pipeline.store.iter_records("reflections")[0]
-    assert reflection_record.text == "Reflection: avoid the empty-input edge case"
-    assert reflection_record.metadata["reflection"]["question"] == "Parse the input stream"
-    assert packet.trace["memory_evolution"]["effects"][0]["effect_type"] == "reflection_append"
-    assert packet.trace["memory_evolution"]["residual_boundary"]["skeleton"] == "generic reflection generation evolution"
-
-
-def test_new_write_evolution_trigger_requires_partition_ready_local_write_context() -> None:
-    from memprimitive.baselines import NewWriteEvolutionTrigger
-
-    packet = Packet(
-        units=[
-            MemoryUnit(
-                text="Alice prefers jasmine tea.",
-                unit_id="unit-ready",
-                unit_type="tim_thought",
-                metadata={"tim": {"group_id": "alice-profile"}},
-            ),
-            MemoryUnit(
-                text="Thought without partition key.",
-                unit_id="unit-missing-key",
-                unit_type="tim_thought",
-                metadata={"tim": {}},
-            ),
-            MemoryUnit(
-                text="Thought routed to the wrong layer.",
-                unit_id="unit-wrong-layer",
-                unit_type="tim_thought",
-                metadata={"tim": {"group_id": "alice-profile"}},
-            ),
-        ],
-        placements=[
-            Placement(unit_id="unit-ready", target_layer="thought_memory"),
-            Placement(unit_id="unit-missing-key", target_layer="thought_memory"),
-            Placement(unit_id="unit-wrong-layer", target_layer="default"),
-        ],
-    )
-
-    packet_out, _ = NewWriteEvolutionTrigger().run(packet, MemoryStore())
-
-    assert packet_out.evolution_decisions == [True, False, False]
-    assert packet_out.trace["evolution_trigger"]["scorer"] == "min"
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["partition_key_ready"] == 1.0
-    assert packet_out.trace["evolution_trigger"]["per_unit"][1]["signals"]["partition_key_ready"] == 0.0
-    assert packet_out.trace["evolution_trigger"]["per_unit"][2]["gate"] is False
-
-
-def test_composed_write_trigger_validates_input_requirements_at_entry() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
-    from memprimitive.baselines._trigger_family import (
-        AlwaysOpenGate,
-        ConstantSignal,
-        ThresholdPolicy,
-        WeightedSumScorer,
-    )
-    from memprimitive.baselines.write_trigger import compose_write_trigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
-        MemoryStore(),
-    )
-    packet, store = BasicRepresentation().run(packet, store)
-    trigger = compose_write_trigger(
-        name="query_aware_write_trigger",
-        signal_providers=(ConstantSignal(signal_name="constant", value=1.0),),
-        scorer=WeightedSumScorer(weights={"constant": 1.0}),
-        gate=AlwaysOpenGate(),
-        policy=ThresholdPolicy(threshold=0.5),
-        input_requirements=("units", "query"),
-    )
-
-    with pytest.raises(ValueError, match="query is required for trigger execution"):
-        trigger.run(packet, store)
-
-
-def test_composed_evolution_trigger_validates_custom_input_requirements_at_entry() -> None:
-    from memprimitive.baselines import (
-        AlwaysWriteTrigger,
-        AppendOrganization,
-        BasicRepresentation,
-        PassThroughUnitFormation,
-    )
-    from memprimitive.baselines._trigger_family import (
-        AlwaysOpenGate,
-        ConstantSignal,
-        ThresholdPolicy,
-        WeightedSumScorer,
-    )
-    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
-        MemoryStore(),
-    )
-    packet, store = BasicRepresentation().run(packet, store)
-    packet, store = AlwaysWriteTrigger().run(packet, store)
-    packet, store = AppendOrganization().run(packet, store)
-    trigger = compose_evolution_trigger(
-        name="query_aware_evolution_trigger",
-        signal_providers=(ConstantSignal(signal_name="constant", value=1.0),),
-        scorer=WeightedSumScorer(weights={"constant": 1.0}),
-        gate=AlwaysOpenGate(),
-        policy=ThresholdPolicy(threshold=0.5),
-        input_requirements=("units", "placements", "query"),
-    )
-
-    with pytest.raises(ValueError, match="query is required for trigger execution"):
-        trigger.run(packet, store)
 
 
 def test_retrieval_honors_top_k() -> None:
@@ -1445,6 +1157,19 @@ def test_baselines_all_matches_registered_baseline_classes() -> None:
     assert set(pkg.__all__) == registered_baseline_class_names()
 
 
+def test_removed_trigger_family_symbols_are_not_registered() -> None:
+    removed = {
+        "MetadataGatedWriteTrigger",
+        "KeyReadyWriteTrigger",
+        "LLMJudgedWriteTrigger",
+        "OutcomeConditionedEvolutionTrigger",
+        "NewWriteEvolutionTrigger",
+        "NeighborExistsEvolutionTrigger",
+    }
+
+    assert registered_baseline_class_names().isdisjoint(removed)
+
+
 def test_write_false_skips_normal_write_and_leaves_evolution_noop() -> None:
     from memprimitive.baselines import (
         AppendOnlyEvolution,
@@ -1583,599 +1308,6 @@ def test_keyword_representation_exposes_keyword_summary_without_embedding() -> N
     assert packet.units[0].embedding is None
 
 
-def test_trigger_family_new_components_compute_scores_and_gates() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
-    from memprimitive.baselines._trigger_family import (
-        AverageScorer,
-        HasEntitySignal,
-        QueryOverlapSignal,
-        QueryPresentGate,
-        ThresholdOrGatePolicy,
-    )
-    from memprimitive.baselines.write_trigger import compose_write_trigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice studies memory graphs", source="dialogue")),
-        MemoryStore(),
-    )
-    packet, store = BasicRepresentation(elements=("text", "entities")).run(packet, store)
-    packet = Packet(observation=packet.observation, units=packet.units, query=Query(text="Alice memory"), trace=packet.trace)
-    trigger = compose_write_trigger(
-        name="query_overlap_gate_trigger",
-        signal_providers=(HasEntitySignal(), QueryOverlapSignal()),
-        scorer=AverageScorer(sources=("has_entity", "query_overlap")),
-        gate=QueryPresentGate(),
-        policy=ThresholdOrGatePolicy(threshold=1.5),
-        input_requirements=("units", "query"),
-    )
-
-    packet_out, _ = trigger.run(packet, store)
-
-    assert packet_out.decisions == [True]
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] >= 1.0
-
-
-def test_reflexion_style_trigger_family_signals_fire_for_failed_trial_feedback() -> None:
-    from memprimitive.baselines import PassThroughUnitFormation
-    from memprimitive.baselines._trigger_family import (
-        FeedbackPresenceSignal,
-        FeedbackSchemaGate,
-        OutcomeCorrectnessSignal,
-        ThresholdPolicy,
-        WeightedSumScorer,
-    )
-    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(
-            observation=Observation(
-                text="trial trace",
-                source="dialogue",
-                metadata={"reflexion": {"is_correct": False, "evaluator_feedback": "missing edge case"}},
-            )
-        ),
-        MemoryStore(),
-    )
-    trigger = compose_evolution_trigger(
-        name="reflexion_failed_trial_trigger",
-        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
-        scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
-        gate=FeedbackSchemaGate(),
-        policy=ThresholdPolicy(threshold=1.0),
-        input_requirements=("units", "observation"),
-    )
-
-    packet_out, _ = trigger.run(packet, store)
-
-    assert packet_out.evolution_decisions == [True]
-    per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
-    assert per_unit["signals"] == {"trial_failed": 1.0, "feedback_present": 1.0}
-    assert per_unit["gate"] is True
-    assert per_unit["score"] == pytest.approx(1.1)
-
-
-def test_reflexion_style_trigger_family_signals_do_not_fire_for_successful_trial() -> None:
-    from memprimitive.baselines import PassThroughUnitFormation
-    from memprimitive.baselines._trigger_family import (
-        FeedbackPresenceSignal,
-        FeedbackSchemaGate,
-        OutcomeCorrectnessSignal,
-        ThresholdPolicy,
-        WeightedSumScorer,
-    )
-    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(
-            observation=Observation(
-                text="trial trace",
-                source="dialogue",
-                metadata={"is_correct": True, "feedback": "answer matches expected output"},
-            )
-        ),
-        MemoryStore(),
-    )
-    trigger = compose_evolution_trigger(
-        name="reflexion_success_trial_trigger",
-        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
-        scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
-        gate=FeedbackSchemaGate(),
-        policy=ThresholdPolicy(threshold=1.0),
-        input_requirements=("units", "observation"),
-    )
-
-    packet_out, _ = trigger.run(packet, store)
-
-    assert packet_out.evolution_decisions == [False]
-    per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
-    assert per_unit["signals"] == {"trial_failed": 0.0, "feedback_present": 1.0}
-    assert per_unit["gate"] is True
-
-
-def test_feedback_schema_gate_blocks_when_outcome_and_feedback_schema_are_missing() -> None:
-    from memprimitive.baselines import PassThroughUnitFormation
-    from memprimitive.baselines._trigger_family import (
-        FeedbackPresenceSignal,
-        FeedbackSchemaGate,
-        OutcomeCorrectnessSignal,
-        ThresholdPolicy,
-        WeightedSumScorer,
-    )
-    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(
-            observation=Observation(
-                text="trial trace",
-                source="dialogue",
-                metadata={"note": "no outcome schema here"},
-            )
-        ),
-        MemoryStore(),
-    )
-    trigger = compose_evolution_trigger(
-        name="reflexion_schema_guarded_trigger",
-        signal_providers=(OutcomeCorrectnessSignal(), FeedbackPresenceSignal()),
-        scorer=WeightedSumScorer(weights={"trial_failed": 1.0, "feedback_present": 0.1}),
-        gate=FeedbackSchemaGate(),
-        policy=ThresholdPolicy(threshold=0.0),
-        input_requirements=("units", "observation"),
-    )
-
-    packet_out, _ = trigger.run(packet, store)
-
-    assert packet_out.evolution_decisions == [False]
-    per_unit = packet_out.trace["evolution_trigger"]["per_unit"][0]
-    assert per_unit["signals"] == {"trial_failed": 0.0, "feedback_present": 0.0}
-    assert per_unit["gate"] is False
-
-
-def test_metadata_flag_signal_reads_nested_unit_metadata_flag() -> None:
-    from memprimitive.baselines._trigger_family import MetadataFlagSignal, TriggerContext
-
-    packet = Packet(
-        units=[MemoryUnit(text="tim thought", unit_type="tim_thought", metadata={"tim": {"write": True}})]
-    )
-    signals = MetadataFlagSignal(path="tim.write", signal_name="write_flag").provide(
-        TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
-        0,
-    )
-
-    assert signals == {"write_flag": 1.0}
-
-
-def test_metadata_flag_signal_raises_for_missing_required_path() -> None:
-    from memprimitive.baselines._trigger_family import MetadataFlagSignal, TriggerContext
-
-    packet = Packet(units=[MemoryUnit(text="tim thought", unit_type="tim_thought", metadata={})])
-
-    with pytest.raises(ValueError, match="required path"):
-        MetadataFlagSignal(path="tim.write", signal_name="write_flag").provide(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
-            0,
-        )
-
-
-def test_unit_type_signal_matches_expected_type() -> None:
-    from memprimitive.baselines._trigger_family import TriggerContext, UnitTypeSignal
-
-    packet = Packet(units=[MemoryUnit(text="tim thought", unit_type="tim_thought")])
-    signals = UnitTypeSignal(expected_unit_type="tim_thought", signal_name="is_tim_thought").provide(
-        TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
-        0,
-    )
-
-    assert signals == {"is_tim_thought": 1.0}
-
-
-def test_placement_exists_signal_requires_aligned_placements() -> None:
-    from memprimitive.baselines._trigger_family import PlacementExistsSignal, TriggerContext
-
-    packet = Packet(units=[MemoryUnit(text="Alice note", unit_id="unit-1")])
-
-    with pytest.raises(ValueError, match="placements is required"):
-        PlacementExistsSignal().provide(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-            0,
-        )
-
-
-def test_partition_key_present_signal_detects_available_partition_key() -> None:
-    from memprimitive.baselines._trigger_family import PartitionKeyPresentSignal, TriggerContext
-
-    packet = Packet(
-        units=[MemoryUnit(text="tim thought", metadata={"tim": {"group_id": "bucket-1"}})]
-    )
-    signals = PartitionKeyPresentSignal(
-        paths=("tim.group_id", "tim.hash_index"),
-        signal_name="has_partition_key",
-    ).provide(
-        TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-        0,
-    )
-
-    assert signals == {"has_partition_key": 1.0}
-
-
-def test_partition_key_present_signal_can_raise_when_all_paths_are_missing() -> None:
-    from memprimitive.baselines._trigger_family import PartitionKeyPresentSignal, TriggerContext
-
-    packet = Packet(units=[MemoryUnit(text="tim thought", metadata={})])
-
-    with pytest.raises(ValueError, match="could not find any configured paths"):
-        PartitionKeyPresentSignal(
-            paths=("tim.group_id", "tim.hash_index"),
-            strict_missing=True,
-        ).provide(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-            0,
-        )
-
-
-def test_neighbor_count_and_top_similarity_signals_read_graph_vector_candidates() -> None:
-    from memprimitive.baselines._trigger_family import NeighborCountSignal, TopNeighborSimilaritySignal, TriggerContext
-
-    store = _graph_vector_store()
-    store.append(
-        MemoryRecord(
-            record_id="rec-1",
-            unit_id="unit-existing",
-            layer="knowledge_graph",
-            text="Alice studies graph memory",
-            timestamp="2026-03-27T00:00:00+00:00",
-            embedding=[1.0, 0.0],
-        )
-    )
-    packet = Packet(
-        units=[MemoryUnit(text="Alice graphs", unit_id="unit-new", embedding=[0.8, 0.2])],
-        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
-    )
-    context = TriggerContext(packet=packet, store=store, output_field="evolution_decisions", trace_key="evolution_trigger")
-
-    count_signals = NeighborCountSignal(top_k=3).provide(context, 0)
-    similarity_signals = TopNeighborSimilaritySignal(top_k=3).provide(context, 0)
-
-    assert count_signals == {"neighbor_count": 1.0}
-    assert similarity_signals["top_neighbor_similarity"] > 0.9
-
-
-def test_neighbor_signals_return_zero_without_target_layer_context() -> None:
-    from memprimitive.baselines._trigger_family import NeighborCountSignal, TopNeighborSimilaritySignal, TriggerContext
-
-    packet = Packet(units=[MemoryUnit(text="Alice graphs", embedding=[1.0, 0.0])])
-    context = TriggerContext(packet=packet, store=_graph_vector_store(), output_field="evolution_decisions", trace_key="evolution_trigger")
-
-    assert NeighborCountSignal().provide(context, 0) == {"neighbor_count": 0.0}
-    assert TopNeighborSimilaritySignal().provide(context, 0) == {"top_neighbor_similarity": 0.0}
-
-
-def test_neighbor_signals_prefer_explicit_layer_over_packet_placement() -> None:
-    from memprimitive.baselines._trigger_family import NeighborCountSignal, TopNeighborSimilaritySignal, TriggerContext
-
-    store = _mixed_graph_vector_store()
-    store.append(
-        MemoryRecord(
-            record_id="rec-knowledge",
-            unit_id="unit-knowledge",
-            layer="knowledge_graph",
-            text="Alice knowledge graph note",
-            timestamp="2026-03-27T00:00:00+00:00",
-            embedding=[1.0, 0.0],
-        )
-    )
-    store.append(
-        MemoryRecord(
-            record_id="rec-other",
-            unit_id="unit-other",
-            layer="other_graph",
-            text="Alice other graph note",
-            timestamp="2026-03-27T00:01:00+00:00",
-            embedding=[0.0, 1.0],
-        )
-    )
-    packet = Packet(
-        units=[MemoryUnit(text="Alice mixed-layer graph note", unit_id="unit-new", embedding=[0.9, 0.1])],
-        placements=[Placement(unit_id="unit-new", target_layer="other_graph")],
-    )
-    context = TriggerContext(packet=packet, store=store, output_field="evolution_decisions", trace_key="evolution_trigger")
-
-    count_signals = NeighborCountSignal(top_k=3, layer="knowledge_graph").provide(context, 0)
-    similarity_signals = TopNeighborSimilaritySignal(top_k=3, layer="knowledge_graph").provide(context, 0)
-
-    assert count_signals == {"neighbor_count": 1.0}
-    assert similarity_signals["top_neighbor_similarity"] > 0.9
-    assert NeighborCountSignal(top_k=3).provide(context, 0) == {"neighbor_count": 1.0}
-    assert TopNeighborSimilaritySignal(top_k=3).provide(context, 0)["top_neighbor_similarity"] < 0.2
-
-
-def test_schema_present_gate_validates_required_unit_schema() -> None:
-    from memprimitive.baselines._trigger_family import SchemaPresentGate, TriggerContext
-
-    packet = Packet(
-        units=[
-            MemoryUnit(
-                text="graph note",
-                metadata={"note": {"summary": "Alice studies graph memory", "keywords": ["alice", "graph"]}},
-            )
-        ]
-    )
-    gate = SchemaPresentGate(paths=("note.summary", "note.keywords"), source="unit.metadata")
-
-    assert (
-        gate.evaluate(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
-            0,
-            signals={},
-            score=0.0,
-        )
-        is True
-    )
-
-
-def test_schema_present_gate_blocks_when_required_schema_is_missing() -> None:
-    from memprimitive.baselines._trigger_family import SchemaPresentGate, TriggerContext
-
-    packet = Packet(units=[MemoryUnit(text="graph note", metadata={"note": {"summary": "only summary"}})])
-    gate = SchemaPresentGate(paths=("note.summary", "note.keywords"), source="unit.metadata")
-
-    assert (
-        gate.evaluate(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="decisions", trace_key="write_trigger"),
-            0,
-            signals={},
-            score=0.0,
-        )
-        is False
-    )
-
-
-def test_has_embedding_gate_checks_current_unit_embedding() -> None:
-    from memprimitive.baselines._trigger_family import HasEmbeddingGate, TriggerContext
-
-    packet = Packet(units=[MemoryUnit(text="embedded", embedding=[1.0, 0.0])])
-    gate = HasEmbeddingGate()
-
-    assert (
-        gate.evaluate(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-            0,
-            signals={},
-            score=0.0,
-        )
-        is True
-    )
-
-
-def test_vector_index_ready_gate_blocks_when_target_layer_lacks_vector_index() -> None:
-    from memprimitive.baselines._trigger_family import TriggerContext, VectorIndexReadyGate
-
-    packet = Packet(
-        units=[MemoryUnit(text="graph note", unit_id="unit-1", embedding=[1.0, 0.0])],
-        placements=[Placement(unit_id="unit-1", target_layer="knowledge_graph")],
-    )
-    gate = VectorIndexReadyGate()
-
-    assert (
-        gate.evaluate(
-            TriggerContext(packet=packet, store=_graph_store(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-            0,
-            signals={},
-            score=0.0,
-        )
-        is False
-    )
-
-
-def test_graph_layer_gate_checks_target_layer_shape() -> None:
-    from memprimitive.baselines._trigger_family import GraphLayerGate, TriggerContext
-
-    packet = Packet(
-        units=[MemoryUnit(text="graph note", unit_id="unit-1", embedding=[1.0, 0.0])],
-        placements=[Placement(unit_id="unit-1", target_layer="knowledge_graph")],
-    )
-
-    assert (
-        GraphLayerGate().evaluate(
-            TriggerContext(packet=packet, store=_graph_vector_store(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-            0,
-            signals={},
-            score=0.0,
-        )
-        is True
-    )
-
-    assert (
-        GraphLayerGate().evaluate(
-            TriggerContext(packet=packet, store=MemoryStore(), output_field="evolution_decisions", trace_key="evolution_trigger"),
-            0,
-            signals={},
-            score=0.0,
-        )
-        is False
-    )
-
-
-def test_vector_and_graph_readiness_gates_prefer_explicit_layer_over_packet_placement() -> None:
-    from memprimitive.baselines._trigger_family import GraphLayerGate, TriggerContext, VectorIndexReadyGate
-
-    packet = Packet(
-        units=[MemoryUnit(text="graph note", unit_id="unit-1", embedding=[1.0, 0.0])],
-        placements=[Placement(unit_id="unit-1", target_layer="default")],
-    )
-    context = TriggerContext(packet=packet, store=_graph_vector_store(), output_field="evolution_decisions", trace_key="evolution_trigger")
-
-    assert VectorIndexReadyGate().evaluate(context, 0, signals={}, score=0.0) is False
-    assert GraphLayerGate().evaluate(context, 0, signals={}, score=0.0) is False
-    assert VectorIndexReadyGate(layer="knowledge_graph").evaluate(context, 0, signals={}, score=0.0) is True
-    assert GraphLayerGate(layer="knowledge_graph").evaluate(context, 0, signals={}, score=0.0) is True
-
-
-def test_amem_style_trigger_family_components_gate_neighbor_trigger_on_vector_graph_readiness() -> None:
-    from memprimitive.baselines._trigger_family import (
-        BooleanGatePolicy,
-        GraphLayerGate,
-        HasEmbeddingGate,
-        MinScorer,
-        NeighborCountSignal,
-        TopNeighborSimilaritySignal,
-        TriggerContext,
-        VectorIndexReadyGate,
-    )
-    from memprimitive.baselines.evolution_trigger import compose_evolution_trigger
-
-    ready_store = _graph_vector_store()
-    ready_store.append(
-        MemoryRecord(
-            record_id="rec-1",
-            unit_id="unit-existing",
-            layer="knowledge_graph",
-            text="Alice studies graph memory",
-            timestamp="2026-03-27T00:00:00+00:00",
-            embedding=[1.0, 0.0],
-        )
-    )
-    ready_packet = Packet(
-        units=[MemoryUnit(text="Alice graph note", unit_id="unit-new", embedding=[0.9, 0.1])],
-        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
-    )
-    trigger = compose_evolution_trigger(
-        name="amem_neighbor_trigger",
-        signal_providers=(NeighborCountSignal(top_k=2), TopNeighborSimilaritySignal(top_k=2)),
-        scorer=MinScorer(sources=("neighbor_count", "top_neighbor_similarity")),
-        gate=GraphLayerGate(),
-        policy=BooleanGatePolicy(),
-    )
-
-    packet_out, _ = trigger.run(ready_packet, ready_store)
-    assert packet_out.evolution_decisions == [True]
-
-    not_ready_packet = Packet(
-        units=[MemoryUnit(text="Alice flat note", unit_id="unit-flat", embedding=[0.9, 0.1])],
-        placements=[Placement(unit_id="unit-flat", target_layer="default")],
-    )
-    not_ready_trigger = compose_evolution_trigger(
-        name="amem_neighbor_trigger_with_full_gates",
-        signal_providers=(NeighborCountSignal(top_k=2), TopNeighborSimilaritySignal(top_k=2)),
-        scorer=MinScorer(sources=("neighbor_count", "top_neighbor_similarity")),
-        gate=GraphLayerGate(),
-        policy=BooleanGatePolicy(),
-    )
-    packet_out, _ = not_ready_trigger.run(not_ready_packet, ready_store)
-    assert packet_out.evolution_decisions == [False]
-
-    assert HasEmbeddingGate().evaluate(
-        TriggerContext(packet=ready_packet, store=ready_store, output_field="evolution_decisions", trace_key="evolution_trigger"),
-        0,
-        signals={},
-        score=0.0,
-    )
-    assert VectorIndexReadyGate().evaluate(
-        TriggerContext(packet=ready_packet, store=ready_store, output_field="evolution_decisions", trace_key="evolution_trigger"),
-        0,
-        signals={},
-        score=0.0,
-    )
-
-
-def test_compose_graph_neighbor_evolution_trigger_fires_when_neighbors_exist() -> None:
-    from memprimitive.baselines.evolution_trigger import compose_graph_neighbor_evolution_trigger
-
-    store = _graph_vector_store()
-    store.append(
-        MemoryRecord(
-            record_id="rec-1",
-            unit_id="unit-1",
-            layer="knowledge_graph",
-            text="Alice studies graph memory",
-            timestamp="2026-03-27T00:00:00+00:00",
-            embedding=[1.0, 0.0],
-            metadata={"graph": {"entities": ["Alice"], "links": []}},
-        )
-    )
-    packet = Packet(
-        units=[MemoryUnit(text="Alice graph note", unit_id="unit-new", embedding=[0.95, 0.05])],
-        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
-    )
-
-    packet_out, _ = compose_graph_neighbor_evolution_trigger(
-        name="graph_neighbor_exists_trigger",
-        layer="knowledge_graph",
-        candidate_top_k=2,
-    ).run(packet, store)
-
-    assert packet_out.evolution_decisions == [True]
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 1.0
-
-
-def test_neighbor_exists_evolution_trigger_blocks_without_neighbor_candidates() -> None:
-    from memprimitive.baselines import NeighborExistsEvolutionTrigger
-
-    store = _graph_vector_store()
-    packet = Packet(
-        units=[MemoryUnit(text="Alice isolated note", unit_id="unit-new", embedding=[1.0, 0.0])],
-        placements=[Placement(unit_id="unit-new", target_layer="knowledge_graph")],
-    )
-
-    packet_out, _ = NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(packet, store)
-
-    assert packet_out.evolution_decisions == [False]
-    assert packet_out.trace["evolution_trigger"]["gate"] == "all"
-
-
-def test_neighbor_exists_evolution_trigger_prefers_configured_target_layer_over_packet_placement() -> None:
-    from memprimitive.baselines import NeighborExistsEvolutionTrigger
-
-    store = _mixed_graph_vector_store()
-    store.append(
-        MemoryRecord(
-            record_id="rec-other",
-            unit_id="unit-other",
-            layer="other_graph",
-            text="Alice other graph note",
-            timestamp="2026-03-27T00:00:00+00:00",
-            embedding=[0.99, 0.01],
-            metadata={"graph": {"entities": ["Alice"], "links": []}},
-        )
-    )
-    packet = Packet(
-        units=[MemoryUnit(text="Alice mixed-layer note", unit_id="unit-new", embedding=[1.0, 0.0])],
-        placements=[Placement(unit_id="unit-new", target_layer="other_graph")],
-    )
-
-    packet_out, _ = NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(packet, store)
-    assert packet_out.evolution_decisions == [False]
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 0.0
-
-    store.append(
-        MemoryRecord(
-            record_id="rec-knowledge",
-            unit_id="unit-knowledge",
-            layer="knowledge_graph",
-            text="Alice knowledge graph note",
-            timestamp="2026-03-27T00:01:00+00:00",
-            embedding=[0.98, 0.02],
-            metadata={"graph": {"entities": ["Alice"], "links": []}},
-        )
-    )
-
-    packet_out, _ = NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(packet, store)
-    assert packet_out.evolution_decisions == [True]
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["signals"]["neighbor_count"] == 1.0
-
-
-def test_neighbor_exists_evolution_trigger_validates_placements_even_with_explicit_target_layer() -> None:
-    from memprimitive.baselines import NeighborExistsEvolutionTrigger
-
-    packet = Packet(
-        units=[MemoryUnit(text="Alice mixed-layer note", unit_id="unit-new", embedding=[1.0, 0.0])],
-        placements=[Placement(unit_id="unit-wrong", target_layer="other_graph")],
-    )
-
-    with pytest.raises(ValueError, match="placements must align"):
-        NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2).run(
-            packet,
-            _mixed_graph_vector_store(),
-        )
 
 
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
@@ -2481,7 +1613,7 @@ def test_graph_readout_renders_graph_metadata() -> None:
     assert packet_out.readout.metadata["graph_item_count"] == 1
 
 
-def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieval_and_readout() -> None:
+def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution_retrieval_and_readout() -> None:
     from memprimitive import MemoryPipeline
     from memprimitive.baselines import (
         BasicRepresentation,
@@ -2490,8 +1622,8 @@ def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieva
         GraphNeighborContextTraceEvolution,
         GraphReadout,
         GraphSeedAndExpandRetrieval,
-        NeighborExistsEvolutionTrigger,
         PassThroughUnitFormation,
+        ThresholdEvolutionTrigger,
         TripleRepresentation,
     )
 
@@ -2519,7 +1651,7 @@ def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieva
             BasicRepresentation(elements=("tags", "keywords")),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
-        evolution_trigger=NeighborExistsEvolutionTrigger(target_layer="knowledge_graph", candidate_top_k=2),
+        evolution_trigger=ThresholdEvolutionTrigger(threshold=0.5, constant=1.0),
         memory_evolution=(
             GraphLinkEvolution(target_layer="knowledge_graph", neighbor_limit=2, rewrite_neighbor_metadata=True),
             GraphNeighborContextTraceEvolution(target_layer="knowledge_graph", rewrite_metadata=True),
@@ -2537,7 +1669,7 @@ def test_graph_dependent_pipeline_end_to_end_supports_trigger_evolution_retrieva
     graph_records = pipeline.store.iter_records("knowledge_graph")
     linked_record = [record for record in graph_records if record.unit_id == second_packet.units[0].unit_id][0]
 
-    assert first_packet.evolution_decisions == [False]
+    assert first_packet.evolution_decisions == [True]
     assert second_packet.evolution_decisions == [True]
     assert linked_record.metadata["graph"]["links"]
     assert linked_record.metadata["graph"]["neighbor_context"]["neighbor_record_ids"]
