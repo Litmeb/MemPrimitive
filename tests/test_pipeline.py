@@ -15,6 +15,7 @@ from memprimitive.baselines import (
     AppendOnlyEvolution,
     AppendOrganization,
     BasicRepresentation,
+    BufferRetrieval,
     ConcatenateReadout,
     BulletListReadout,
     EmbeddingSimilarityRetrieval,
@@ -27,11 +28,14 @@ from memprimitive.baselines import (
     GraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
     LinkStrengtheningEvolution,
+    ModelJudgeTrigger,
     NeverTrigger,
     NeighborContextUpdateEvolution,
     PassThroughUnitFormation,
+    PromptContextReadout,
     KeywordRepresentation,
     RecencyRetrieval,
+    ReflectionGenerationEvolution,
     RetrievalOrientedEmbeddingRepresentation,
     SemanticFieldEnrichmentRepresentation,
     TagRetrieval,
@@ -308,6 +312,165 @@ def test_pipeline_supports_runtime_and_scalar_trigger_combinations() -> None:
     assert packet.trace["write_trigger"]["decisions"] == [True]
     assert packet.trace["evolution_trigger"]["module"] == "runtime_event_evolution_trigger"
     assert packet.trace["evolution_trigger"]["decisions"] == [True]
+
+
+def test_pipeline_end_to_end_supports_model_judge_trigger_with_reflection_generation() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="reflections", theme="semantic"),
+            ]
+        )
+    )
+
+    def judge_failure(payload: dict[str, object]) -> dict[str, object]:
+        observation = payload.get("observation", {})
+        metadata = observation.get("metadata", {}) if isinstance(observation, dict) else {}
+        reflexion = metadata.get("reflexion", {}) if isinstance(metadata, dict) else {}
+        return {
+            "decision": False,
+            "score": 0.92,
+            "label": "trigger",
+            "reason": reflexion.get("evaluator_feedback", ""),
+        }
+
+    def generate_reflection(payload) -> str:
+        return (
+            "Reflection: verify the boundary condition first, then cross-check the returned index "
+            "against the query before finalizing the answer."
+        )
+
+    pipeline = MemoryPipeline(
+        write_trigger=AlwaysTrigger(),
+        evolution_trigger=ModelJudgeTrigger(
+            slot="evolution_trigger",
+            system_prompt="Decide whether this failed trial needs reflection.",
+            decision_mode="score",
+            threshold=0.8,
+            per_unit=False,
+            judge_callable=judge_failure,
+        ),
+        memory_evolution=ReflectionGenerationEvolution(
+            target_layer="reflections",
+            memory_size=2,
+            reflection_generator=generate_reflection,
+        ),
+        retrieval=BufferRetrieval(top_k=2, layer="reflections"),
+        readout=PromptContextReadout(
+            memory_layer="reflections",
+            default_strategy="last_trial_and_reflexion",
+            top_k=2,
+        ),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Tried scanning from the second element and returned index 3, but the expected answer was 2.",
+            source="reasoning_trial",
+            metadata={
+                "reflexion": {
+                    "question": "Find the first matching index in the stream.",
+                    "last_attempt": "I started from position 1 and skipped the first candidate.",
+                    "scratchpad": "I started from position 1 and skipped the first candidate.",
+                    "evaluator_feedback": "You ignored the earliest valid match.",
+                    "trial_index": 2,
+                }
+            },
+        )
+    )
+
+    readout = pipeline.recall(
+        Query(
+            text="Find the first matching index in the stream.",
+            metadata={
+                "reflexion": {
+                    "strategy": "last_trial_and_reflexion",
+                    "last_attempt": "I started from position 1 and skipped the first candidate.",
+                }
+            },
+        )
+    )
+
+    assert packet.trace["evolution_trigger"]["module"] == "model_judge_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["decisions"] == [True]
+    assert packet.trace["evolution_trigger"]["judge_per_unit"] is False
+    assert packet.trace["evolution_trigger"]["per_unit"][0]["score"] == 0.92
+    assert packet.trace["memory_evolution"]["module"] == "reflection_generation_evolution"
+    assert packet.trace["memory_evolution"]["generation_mode"] == "callable_override"
+    assert packet.trace["memory_evolution"]["record_ids"]
+    assert packet.trace["memory_evolution"]["effects"][0]["effect_type"] == "reflection_append"
+    assert pipeline.store.count("default") == 1
+    assert pipeline.store.count("reflections") == 1
+
+    reflection_record = pipeline.store.iter_records("reflections")[0]
+    assert reflection_record.metadata["reflection"]["source_layer"] == "default"
+    assert reflection_record.metadata["reflection"]["trial_index"] == 2
+    assert "verify the boundary condition first" in reflection_record.text
+
+    assert "Below is the last trial you attempted" in readout.text
+    assert "Reflection 1:" in readout.text
+    assert "verify the boundary condition first" in readout.text
+    assert readout.source_ids == [reflection_record.record_id]
+    assert readout.metadata["reflection_count"] == 1
+
+
+def test_pipeline_model_judge_can_block_reflection_generation_end_to_end() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="reflections", theme="semantic"),
+            ]
+        )
+    )
+
+    pipeline = MemoryPipeline(
+        write_trigger=AlwaysTrigger(),
+        evolution_trigger=ModelJudgeTrigger(
+            slot="evolution_trigger",
+            system_prompt="Decide whether reflection is needed.",
+            decision_mode="score",
+            threshold=0.8,
+            per_unit=False,
+            judge_callable=lambda payload: {"score": 0.2, "label": "skip"},
+        ),
+        memory_evolution=ReflectionGenerationEvolution(
+            target_layer="reflections",
+            reflection_generator=lambda payload: "Reflection: this should not be written.",
+        ),
+        retrieval=BufferRetrieval(top_k=2, layer="reflections"),
+        readout=PromptContextReadout(memory_layer="reflections", default_strategy="reflexion", top_k=2),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Attempted answer still failed.",
+            source="reasoning_trial",
+            metadata={
+                "reflexion": {
+                    "question": "Recover the first valid index.",
+                    "last_attempt": "I guessed without checking the earliest candidate.",
+                    "evaluator_feedback": "The attempt was weak, but we do not want to store a reflection yet.",
+                    "trial_index": 1,
+                }
+            },
+        )
+    )
+    readout = pipeline.recall(Query(text="Recover the first valid index."))
+
+    assert packet.trace["evolution_trigger"]["module"] == "model_judge_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["decisions"] == [False]
+    assert packet.trace["memory_evolution"]["active_unit_ids"] == []
+    assert packet.trace["memory_evolution"]["effects"] == []
+    assert packet.trace["memory_evolution"]["record_ids"] == []
+    assert pipeline.store.count("default") == 1
+    assert pipeline.store.count("reflections") == 0
+    assert readout.text == ""
+    assert readout.source_ids == []
+    assert readout.metadata["reflection_count"] == 0
 
 
 def test_memory_pipeline_allows_graph_organization_without_eager_store_validation() -> None:
