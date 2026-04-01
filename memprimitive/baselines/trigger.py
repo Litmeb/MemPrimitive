@@ -167,6 +167,85 @@ def _global_signal_value(packet: Packet, store: MemoryStore, signal_key: str, si
     return None
 
 
+def _resolve_pressure_layer(
+    packet: Packet,
+    *,
+    slot: str,
+    explicit_target_layer: str | None,
+    unit_index: int | None = None,
+) -> tuple[str, str]:
+    if explicit_target_layer is not None:
+        normalized_layer = str(explicit_target_layer).strip()
+        if not normalized_layer:
+            raise ValueError("target_layer must be non-empty when provided.")
+        return normalized_layer, "explicit"
+
+    if slot == "write_trigger":
+        raise ValueError("memory_pressure requires explicit target_layer for write_trigger.")
+
+    if packet.placements is None or not packet.placements:
+        raise ValueError("memory_pressure requires packet.placements for evolution_trigger.")
+
+    if unit_index is not None:
+        if unit_index >= len(packet.placements):
+            raise ValueError("memory_pressure requires aligned packet.placements for per-unit resolution.")
+        return packet.placements[unit_index].target_layer, "placement"
+
+    target_layers = {placement.target_layer for placement in packet.placements}
+    if len(target_layers) != 1:
+        raise ValueError("memory_pressure broadcast resolution requires a single target layer in packet.placements.")
+    return next(iter(target_layers)), "placement"
+
+
+def _layer_pressure_snapshot(store: MemoryStore, layer: str) -> dict[str, Any]:
+    spec = store.layer_spec(layer)
+    record_count = store.count(layer)
+    token_count = store.layer_token_count(layer)
+
+    record_budget_raw = spec.get_setting("record_budget")
+    token_budget_raw = spec.get_setting("token_budget")
+    record_budget = record_budget_raw if isinstance(record_budget_raw, int) and record_budget_raw > 0 else None
+    token_budget = token_budget_raw if isinstance(token_budget_raw, int) and token_budget_raw > 0 else None
+
+    record_pressure = (record_count / record_budget) if record_budget is not None else None
+    token_pressure = (token_count / token_budget) if token_budget is not None else None
+
+    pressure_values = [value for value in (record_pressure, token_pressure) if value is not None]
+    active_budget_types: list[str] = []
+    if record_budget is not None:
+        active_budget_types.append("record_budget")
+    if token_budget is not None:
+        active_budget_types.append("token_budget")
+
+    return {
+        "target_layer": layer,
+        "record_count": record_count,
+        "token_count": token_count,
+        "record_budget": record_budget,
+        "token_budget": token_budget,
+        "record_pressure": record_pressure,
+        "token_pressure": token_pressure,
+        "memory_pressure": max(pressure_values) if pressure_values else None,
+        "active_budget_types": active_budget_types,
+        "capacity": spec.capacity,
+    }
+
+
+def _pressure_trace_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target_layer": snapshot["target_layer"],
+        "record_count": snapshot["record_count"],
+        "token_count": snapshot["token_count"],
+        "record_budget": snapshot["record_budget"],
+        "token_budget": snapshot["token_budget"],
+        "record_pressure": snapshot["record_pressure"],
+        "token_pressure": snapshot["token_pressure"],
+        "memory_pressure": snapshot["memory_pressure"],
+        "active_budget_types": list(snapshot["active_budget_types"]),
+        "capacity": snapshot["capacity"],
+    }
+
+
 def _write_trace(
     packet: Packet,
     *,
@@ -456,6 +535,82 @@ class RuntimeEventTrigger(_EventTrigger):
     _NAME_PREFIX = "runtime_event"
     _EVENT_SOURCE = "runtime"
 
+    def __init__(
+        self,
+        *,
+        slot: str | None = None,
+        accepted_events: tuple[str, ...],
+        match_mode: str = "any",
+        default_decision: bool = False,
+        invert: bool = False,
+        target_layer: str | None = None,
+        pressure_threshold: float | None = None,
+    ) -> None:
+        super().__init__(
+            slot=slot,
+            accepted_events=accepted_events,
+            match_mode=match_mode,
+            default_decision=default_decision,
+            invert=invert,
+        )
+        self.target_layer = None if target_layer is None else str(target_layer).strip()
+        if self.target_layer == "":
+            raise ValueError("target_layer must be non-empty when provided.")
+        self.pressure_threshold = None if pressure_threshold is None else float(pressure_threshold)
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        units = self._require_units(packet)
+        observed_events = _resolve_events(packet)
+        effective_events = list(observed_events)
+        computed_runtime_events: list[str] = []
+        pressure_payload: dict[str, Any] = {}
+
+        if "memory_pressure" in self.accepted_events and self.pressure_threshold is not None:
+            target_layer, target_layer_mode = _resolve_pressure_layer(
+                packet,
+                slot=self.slot,
+                explicit_target_layer=self.target_layer,
+            )
+            snapshot = _layer_pressure_snapshot(store, target_layer)
+            memory_pressure = snapshot["memory_pressure"]
+            if memory_pressure is not None and memory_pressure >= self.pressure_threshold:
+                computed_runtime_events.append("memory_pressure")
+                effective_events.append("memory_pressure")
+            pressure_payload = {
+                "target_layer_mode": target_layer_mode,
+                "pressure_threshold": self.pressure_threshold,
+                "computed_runtime_events": list(computed_runtime_events),
+                **_pressure_trace_payload(snapshot),
+            }
+        else:
+            pressure_payload = {
+                "pressure_threshold": self.pressure_threshold,
+                "computed_runtime_events": [],
+            }
+
+        matched = self._match(effective_events)
+        decisions = _broadcast_decisions(len(units), matched)
+        matched_events = [event for event in self.accepted_events if event in set(effective_events)]
+        return (
+            _write_trace(
+                packet,
+                module_name=self.spec.name,
+                trace_key=self._trace_key(),
+                decisions=decisions,
+                trace_payload={
+                    "source": self._EVENT_SOURCE,
+                    "accepted_events": list(self.accepted_events),
+                    "matched_events": matched_events,
+                    "observed_events": list(observed_events),
+                    "match_mode": self.match_mode,
+                    "default_decision": self.default_decision,
+                    "invert": self.invert,
+                    **pressure_payload,
+                },
+            ),
+            store,
+        )
+
 
 class ScalarRuleTrigger(_BaseTrigger):
     """Compare explicit scalar signals against a threshold."""
@@ -473,6 +628,7 @@ class ScalarRuleTrigger(_BaseTrigger):
         signal_source: str = "auto",
         aggregate: str = "broadcast",
         missing_value: float | None = None,
+        target_layer: str | None = None,
     ) -> None:
         super().__init__(slot=slot)
         normalized_signal_key = str(signal_key).strip()
@@ -484,6 +640,9 @@ class ScalarRuleTrigger(_BaseTrigger):
         self.signal_source = _require_choice(signal_source, field_name="signal_source", allowed=_VALID_SIGNAL_SOURCES)
         self.aggregate = _require_choice(aggregate, field_name="aggregate", allowed=_VALID_AGGREGATES)
         self.missing_value = None if missing_value is None else float(missing_value)
+        self.target_layer = None if target_layer is None else str(target_layer).strip()
+        if self.target_layer == "":
+            raise ValueError("target_layer must be non-empty when provided.")
 
     def _value_or_missing(self, value: float | None) -> tuple[float | None, bool]:
         if value is not None:
@@ -495,6 +654,104 @@ class ScalarRuleTrigger(_BaseTrigger):
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         units = self._require_units(packet)
         per_unit_payload: list[dict[str, Any]] = []
+        trace_payload = {
+            "source": "scalar_rule",
+            "signal_key": self.signal_key,
+            "threshold": self.threshold,
+            "comparator": self.comparator,
+            "signal_source": self.signal_source,
+            "aggregate": self.aggregate,
+            "missing_value": self.missing_value,
+        }
+
+        if self.signal_key == "memory_pressure":
+            snapshot_cache: dict[str, dict[str, Any]] = {}
+
+            def snapshot_for(unit_index: int | None = None) -> tuple[dict[str, Any], str]:
+                target_layer, target_layer_mode = _resolve_pressure_layer(
+                    packet,
+                    slot=self.slot,
+                    explicit_target_layer=self.target_layer,
+                    unit_index=unit_index,
+                )
+                snapshot = snapshot_cache.get(target_layer)
+                if snapshot is None:
+                    snapshot = _layer_pressure_snapshot(store, target_layer)
+                    snapshot_cache[target_layer] = snapshot
+                return snapshot, target_layer_mode
+
+            if self.aggregate == "broadcast":
+                snapshot, target_layer_mode = snapshot_for()
+                value, used_missing = self._value_or_missing(snapshot["memory_pressure"])
+                if value is None:
+                    raise ValueError(f"{self.spec.name} could not resolve signal {self.signal_key!r}.")
+                decision = _compare_scalar(value, self.threshold, self.comparator)
+                decisions = _broadcast_decisions(len(units), decision)
+                payload = {
+                    "signal_value": value,
+                    "used_missing_value": used_missing,
+                    **_pressure_trace_payload(snapshot),
+                }
+                per_unit_payload = [dict(payload) for _ in decisions]
+                trace_payload.update(
+                    {
+                        "target_layer_mode": target_layer_mode,
+                        **_pressure_trace_payload(snapshot),
+                    }
+                )
+            else:
+                normalized_values: list[float] = []
+                missing_flags: list[bool] = []
+                target_layer_mode: str | None = None
+                unique_layers: set[str] = set()
+                for index, _unit in enumerate(units):
+                    snapshot, current_mode = snapshot_for(index)
+                    if target_layer_mode is None:
+                        target_layer_mode = current_mode
+                    unique_layers.add(snapshot["target_layer"])
+                    value, used_missing = self._value_or_missing(snapshot["memory_pressure"])
+                    if value is None:
+                        raise ValueError(
+                            f"{self.spec.name} aggregate={self.aggregate!r} requires resolvable memory_pressure."
+                        )
+                    normalized_values.append(value)
+                    missing_flags.append(used_missing)
+                    per_unit_payload.append(
+                        {
+                            "signal_value": value,
+                            "used_missing_value": used_missing,
+                            **_pressure_trace_payload(snapshot),
+                        }
+                    )
+
+                if self.aggregate == "per_unit":
+                    decisions = [_compare_scalar(value, self.threshold, self.comparator) for value in normalized_values]
+                elif self.aggregate == "any_unit":
+                    decisions = _broadcast_decisions(
+                        len(units),
+                        any(_compare_scalar(value, self.threshold, self.comparator) for value in normalized_values),
+                    )
+                else:
+                    decisions = _broadcast_decisions(
+                        len(units),
+                        all(_compare_scalar(value, self.threshold, self.comparator) for value in normalized_values),
+                    )
+
+                trace_payload["target_layer_mode"] = target_layer_mode
+                if len(unique_layers) == 1 and per_unit_payload:
+                    trace_payload.update(_pressure_trace_payload(per_unit_payload[0]))
+
+            return (
+                _write_trace(
+                    packet,
+                    module_name=self.spec.name,
+                    trace_key=self._trace_key(),
+                    decisions=decisions,
+                    trace_payload=trace_payload,
+                    per_unit_payload=per_unit_payload,
+                ),
+                store,
+            )
 
         if self.aggregate == "broadcast":
             value, used_missing = self._value_or_missing(_global_signal_value(packet, store, self.signal_key, self.signal_source))
@@ -539,15 +796,7 @@ class ScalarRuleTrigger(_BaseTrigger):
                 module_name=self.spec.name,
                 trace_key=self._trace_key(),
                 decisions=decisions,
-                trace_payload={
-                    "source": "scalar_rule",
-                    "signal_key": self.signal_key,
-                    "threshold": self.threshold,
-                    "comparator": self.comparator,
-                    "signal_source": self.signal_source,
-                    "aggregate": self.aggregate,
-                    "missing_value": self.missing_value,
-                },
+                trace_payload=trace_payload,
                 per_unit_payload=per_unit_payload,
             ),
             store,

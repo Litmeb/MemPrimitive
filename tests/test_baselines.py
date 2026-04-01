@@ -80,6 +80,39 @@ def _mixed_graph_vector_store() -> MemoryStore:
     )
 
 
+def _budgeted_store(
+    *,
+    layer_name: str = "episodic",
+    record_budget: int | None = None,
+    token_budget: int | None = None,
+) -> MemoryStore:
+    settings: dict[str, int] = {}
+    if record_budget is not None:
+        settings["record_budget"] = record_budget
+    if token_budget is not None:
+        settings["token_budget"] = token_budget
+    capacity = "unlimited"
+    return MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name=layer_name, capacity=capacity, settings=settings),
+            ]
+        )
+    )
+
+
+def _seed_layer(store: MemoryStore, layer: str, texts: list[str]) -> None:
+    for index, text in enumerate(texts, start=1):
+        unit = MemoryUnit(
+            unit_id=f"seed-{index}",
+            text=text,
+            timestamp=f"2026-01-01T00:00:{index:02d}Z",
+            metadata={},
+        )
+        store.append(MemoryRecord.from_unit(unit=unit, layer=layer, sequence_id=store.next_sequence_id()))
+
+
 def test_unit_formation_returns_one_unit_with_provenance() -> None:
     from memprimitive.baselines import PassThroughUnitFormation
 
@@ -522,6 +555,89 @@ def test_runtime_event_trigger_uses_packet_events_when_trigger_metadata_missing(
     assert packet_out.trace["evolution_trigger"]["observed_events"] == ["task_failed"]
 
 
+def test_runtime_event_trigger_computes_memory_pressure_event_from_record_budget() -> None:
+    from memprimitive.baselines import AppendOrganization, RuntimeEventTrigger
+
+    store = _budgeted_store(layer_name="episodic", record_budget=2)
+    _seed_layer(store, "episodic", ["one", "two"])
+    packet, _ = _represented_packet("Alice likes tea.")
+    packet, store = AppendOrganization(target_layer="episodic").run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    packet_out, _ = RuntimeEventTrigger(
+        accepted_events=("memory_pressure",),
+        pressure_threshold=1.0,
+    ).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["evolution_trigger"]["matched_events"] == ["memory_pressure"]
+    assert packet_out.trace["evolution_trigger"]["computed_runtime_events"] == ["memory_pressure"]
+    assert packet_out.trace["evolution_trigger"]["record_pressure"] == 1.5
+    assert packet_out.trace["evolution_trigger"]["token_pressure"] is None
+    assert packet_out.trace["evolution_trigger"]["target_layer"] == "episodic"
+
+
+def test_runtime_event_trigger_keeps_literal_memory_pressure_event_without_threshold() -> None:
+    from memprimitive.baselines import AppendOrganization, RuntimeEventTrigger
+
+    store = _budgeted_store(layer_name="episodic", record_budget=10)
+    packet, _ = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"events": ["memory_pressure"]}},
+    )
+    packet, store = AppendOrganization(target_layer="episodic").run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    packet_out, _ = RuntimeEventTrigger(accepted_events=("memory_pressure",)).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["evolution_trigger"]["observed_events"] == ["memory_pressure"]
+    assert packet_out.trace["evolution_trigger"]["computed_runtime_events"] == []
+    assert packet_out.trace["evolution_trigger"]["pressure_threshold"] is None
+
+
+def test_runtime_event_trigger_memory_pressure_requires_single_layer_for_broadcast_resolution() -> None:
+    from memprimitive.baselines import RuntimeEventTrigger
+
+    packet, store = _represented_packet("Alice likes tea.")
+    packet = replace(
+        packet,
+        placements=[
+            Placement(unit_id="unit-a", target_layer="default"),
+            Placement(unit_id="unit-b", target_layer="episodic"),
+        ],
+        units=[replace(packet.units[0], unit_id="unit-a"), replace(packet.units[0], unit_id="unit-b")],
+    )
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default", capacity="unlimited", settings={"record_budget": 2}),
+                StoreLayerSpec(name="episodic", capacity="unlimited", settings={"record_budget": 2}),
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="single target layer"):
+        RuntimeEventTrigger(
+            accepted_events=("memory_pressure",),
+            pressure_threshold=0.5,
+        ).run(packet, store)
+
+
 def test_scalar_rule_trigger_supports_broadcast_and_per_unit_modes() -> None:
     from memprimitive.baselines import ScalarRuleTrigger
 
@@ -550,6 +666,78 @@ def test_scalar_rule_trigger_supports_broadcast_and_per_unit_modes() -> None:
 
     assert per_unit_packet.decisions == [True, False]
     assert per_unit_packet.trace["write_trigger"]["aggregate"] == "per_unit"
+
+
+def test_scalar_rule_trigger_memory_pressure_supports_record_and_token_budgets() -> None:
+    from memprimitive.baselines import ScalarRuleTrigger
+
+    store = _budgeted_store(layer_name="episodic", record_budget=4, token_budget=3)
+    _seed_layer(store, "episodic", ["alpha beta", "gamma delta"])
+    packet, _ = _represented_packet("Alice likes tea.")
+
+    packet_out, _ = ScalarRuleTrigger(
+        signal_key="memory_pressure",
+        threshold=1.0,
+        target_layer="episodic",
+    ).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.trace["write_trigger"]["target_layer_mode"] == "explicit"
+    assert packet_out.trace["write_trigger"]["record_pressure"] == 0.5
+    assert packet_out.trace["write_trigger"]["token_pressure"] == pytest.approx(4 / 3)
+    assert packet_out.trace["write_trigger"]["memory_pressure"] == pytest.approx(4 / 3)
+    assert packet_out.trace["write_trigger"]["active_budget_types"] == ["record_budget", "token_budget"]
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["target_layer"] == "episodic"
+
+
+def test_scalar_rule_trigger_memory_pressure_supports_per_unit_resolution_from_placements() -> None:
+    from memprimitive.baselines import ScalarRuleTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="working", capacity="unlimited", settings={"record_budget": 4}),
+                StoreLayerSpec(name="semantic", capacity="unlimited", settings={"record_budget": 2}),
+            ]
+        )
+    )
+    _seed_layer(store, "working", ["one"])
+    _seed_layer(store, "semantic", ["one", "two"])
+    packet, _ = _represented_packet("Alice likes tea.")
+    packet = replace(
+        packet,
+        units=[
+            replace(packet.units[0], unit_id="unit-a"),
+            replace(packet.units[0], unit_id="unit-b"),
+        ],
+        placements=[
+            Placement(unit_id="unit-a", target_layer="working"),
+            Placement(unit_id="unit-b", target_layer="semantic"),
+        ],
+    )
+
+    packet_out, _ = ScalarRuleTrigger(
+        slot="evolution_trigger",
+        signal_key="memory_pressure",
+        threshold=0.75,
+        aggregate="per_unit",
+    ).run(packet, store)
+
+    assert packet_out.decisions == [False, True]
+    assert packet_out.trace["evolution_trigger"]["target_layer_mode"] == "placement"
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["target_layer"] == "working"
+    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["record_pressure"] == 0.25
+    assert packet_out.trace["evolution_trigger"]["per_unit"][1]["target_layer"] == "semantic"
+    assert packet_out.trace["evolution_trigger"]["per_unit"][1]["record_pressure"] == 1.0
+
+
+def test_scalar_rule_trigger_memory_pressure_requires_explicit_write_layer() -> None:
+    from memprimitive.baselines import ScalarRuleTrigger
+
+    packet, store = _represented_packet("Alice likes tea.")
+
+    with pytest.raises(ValueError, match="explicit target_layer"):
+        ScalarRuleTrigger(signal_key="memory_pressure", threshold=0.8).run(packet, store)
 
 
 def test_model_judge_trigger_supports_injected_per_unit_and_broadcast_modes() -> None:
