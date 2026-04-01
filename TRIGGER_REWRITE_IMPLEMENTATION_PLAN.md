@@ -18,9 +18,11 @@
 - `OnInputWriteTrigger`
 - `OnInputEvolutionTrigger`
 
-而是建议统一为：
+而是曾建议统一为：
 
-- `OnInputTrigger(slot="write_trigger" | "evolution_trigger")`
+- `AlwaysTrigger(slot="write_trigger")`
+- `NeverTrigger(slot="evolution_trigger")`
+- 其余 richer trigger 继续统一采用 `同一类 + slot` 的模式
 
 同理适用于：
 
@@ -277,19 +279,20 @@ SomeTrigger(slot="evolution_trigger")
 
 ## 6. 各 trigger 家族的更新计划
 
-## 6.1 OnInputTrigger
+## 6.1 OnInputTrigger（历史方案，已移除）
 
 ### 功能定位
 
-覆盖 survey 中的 `PassThroughHook`。
+原本用于覆盖 survey 中的 `PassThroughHook`。
 
 语义：
 
 - 只要当前 ingest 有输入并且通过当前 slot 的输入校验，就触发
+- 但该默认语义与当前 baseline 中的 `AlwaysTrigger` 重复，因此已从代码中删除
 
 ### 实现建议
 
-类名：
+历史类名：
 
 - `OnInputTrigger`
 
@@ -297,7 +300,7 @@ SomeTrigger(slot="evolution_trigger")
 
 - [memprimitive/baselines/trigger.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/memprimitive/baselines/trigger.py)
 
-接口建议：
+历史接口建议：
 
 ```python
 def __init__(
@@ -318,8 +321,8 @@ def __init__(
 
 备注：
 
-- `AlwaysTrigger` 可以继续保留为最小 baseline
-- `OnInputTrigger` 是更语义化的版本，但并不要求替换默认行为
+- `AlwaysTrigger` 继续保留为最小 baseline
+- `OnInputTrigger` 已被证实主要是语义别名，因此不再保留为当前 API
 
 ## 6.2 BoundaryEventTrigger
 

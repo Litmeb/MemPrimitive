@@ -468,20 +468,6 @@ def test_threshold_evolution_trigger_writes_only_decisions() -> None:
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
 
 
-def test_on_input_trigger_filters_by_observation_source() -> None:
-    from memprimitive.baselines import OnInputTrigger
-
-    packet, store = _represented_packet("Alice likes tea.", source="dialogue")
-
-    packet_out, _ = OnInputTrigger(allowed_sources=("dialogue",)).run(packet, store)
-    assert packet_out.decisions == [True]
-    assert packet_out.trace["write_trigger"]["module"] == "on_input_write_trigger"
-    assert packet_out.trace["write_trigger"]["observation_source"] == "dialogue"
-
-    blocked_packet, _ = OnInputTrigger(allowed_sources=("notes",)).run(packet, store)
-    assert blocked_packet.decisions == [False]
-
-
 def test_boundary_event_trigger_matches_structural_events_for_both_slots() -> None:
     from memprimitive.baselines import AppendOrganization, BoundaryEventTrigger
 
@@ -635,7 +621,6 @@ def test_new_trigger_classes_are_registered_in_baseline_exports() -> None:
     exported = registered_baseline_class_names()
 
     assert {
-        "OnInputTrigger",
         "BoundaryEventTrigger",
         "RuntimeEventTrigger",
         "ScalarRuleTrigger",
