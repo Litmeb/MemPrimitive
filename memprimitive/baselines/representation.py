@@ -386,9 +386,9 @@ class BasicRepresentation(RepresentationModule):
                 "(or pass api_key, base_url, model to the constructor). "
                 "Heuristic fallback is not supported."
             )
-        from ..utils._runtime import ClassicRuntime
+        from ..utils._runtime import Runtime
 
-        runtime = ClassicRuntime(
+        runtime = Runtime(
             api_key=self.api_key,
             base_url=self.base_url,
             model=self.model,
@@ -628,9 +628,9 @@ class TripleRepresentation(RepresentationModule):
         )
 
     def _runtime(self):
-        from ..utils._runtime import ClassicRuntime
+        from ..utils._runtime import Runtime
 
-        return ClassicRuntime(
+        return Runtime(
             api_key=self.api_key,
             base_url=self.base_url,
             model=self.model,
@@ -828,9 +828,9 @@ class SemanticFieldEnrichmentRepresentation(RepresentationModule):
         return replace(packet, units=represented_units, trace=trace), store
 
     def _analyze_unit(self, unit: MemoryUnit) -> dict[str, Any]:
-        from ..utils._runtime import get_classic_runtime
+        from ..utils._runtime import get_runtime
 
-        runtime = get_classic_runtime()
+        runtime = get_runtime()
         runtime.require_llm(capability="SemanticFieldEnrichmentRepresentation")
         raw = runtime.json(
             system=(
@@ -970,9 +970,9 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
         return replace(packet, units=represented_units, trace=trace), store
 
     def _embed_text(self, text: str) -> list[float]:
-        from ..utils._runtime import get_classic_runtime
+        from ..utils._runtime import get_runtime
 
-        return list(get_classic_runtime().embed(text))
+        return list(get_runtime().embed(text))
 
 
 BASELINE_SLOT: Final[str] = "representation"

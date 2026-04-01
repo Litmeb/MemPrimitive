@@ -16,7 +16,7 @@ from dataclasses import replace
 from typing import Any, Final
 
 from ..core import MemoryRecord, MemoryStore
-from ._runtime import ClassicRuntime, get_classic_runtime
+from ._runtime import Runtime, get_runtime
 
 
 DEFAULT_NOTE_NAMESPACE: Final[str] = "note"
@@ -202,14 +202,14 @@ def rewrite_record_from_note_payload(
     note_namespace: str = DEFAULT_NOTE_NAMESPACE,
     default_category: str = DEFAULT_CATEGORY,
     embedding_version: str = DEFAULT_EMBEDDING_VERSION,
-    runtime: ClassicRuntime | None = None,
+    runtime: Runtime | None = None,
     preserve_graph: bool = True,
 ) -> MemoryRecord:
     """Rewrite a note-bearing record while preserving non-note metadata."""
 
     repaired = repair_note_payload(payload, fallback_content=record.text, default_category=default_category)
     representation = representation_from_note_payload(repaired, embedding_version=embedding_version)
-    engine = runtime or get_classic_runtime()
+    engine = runtime or get_runtime()
     updated = replace(
         record,
         text=repaired["content"],
@@ -265,7 +265,7 @@ def retrieve_candidates_by_embedding(
 
     scored: list[tuple[float, MemoryRecord]] = []
     for record in store.iter_records(layer):
-        score = ClassicRuntime.cosine_similarity(query_embedding, record.embedding)
+        score = Runtime.cosine_similarity(query_embedding, record.embedding)
         scored.append((float(score), record))
     scored.sort(key=lambda item: (-item[0], item[1].timestamp, item[1].record_id))
     return scored[:top_k]

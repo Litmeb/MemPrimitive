@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Final
 
-from ._runtime import get_classic_runtime
+from ._runtime import get_runtime
 
 
 DEFAULT_REFLECTION_LAYER: Final[str] = "reflections"
@@ -236,4 +236,4 @@ def runtime_reflection_generator(
     """Generate a reflection using the classic runtime and a prompt residual."""
 
     system, user = (prompt_builder or default_reflection_prompt_builder)(payload)
-    return get_classic_runtime().text(system=system, user=user).strip()
+    return get_runtime().text(system=system, user=user).strip()

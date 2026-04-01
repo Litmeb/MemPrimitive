@@ -3,9 +3,9 @@
 Submodules
 ----------
 _runtime
-    ``ClassicRuntime`` wrapper around OpenAI-compatible LLM and
+    ``Runtime`` wrapper around OpenAI-compatible LLM and
     sentence-transformer embedding backends, plus the module-level
-    singleton ``get_classic_runtime()``.
+    singleton ``get_runtime()``.
 
 _amem_family
     A-MEM-style note helpers: note-payload schema repair, retrieval-oriented

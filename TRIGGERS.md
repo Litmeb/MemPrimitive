@@ -1,5 +1,9 @@
 # Trigger Survey for MemPrimitive
 
+> Note
+> This file is a literature-survey / design-space note, not a description of the current public baseline API.
+> The baseline runtime has been simplified and now only publicly exposes `AlwaysWriteTrigger`, `ThresholdWriteTrigger`, `NeverEvolutionTrigger`, and `ThresholdEvolutionTrigger`.
+
 更新时间：2026-03-31
 
 ## 这份文档是做什么的

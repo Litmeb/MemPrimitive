@@ -704,9 +704,9 @@ class LinkStrengtheningEvolution(MemoryEvolutionModule):
         if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
             raise ValueError("LinkStrengtheningEvolution requires aligned units, placements, and evolution decisions.")
 
-        from ..utils._runtime import get_classic_runtime
+        from ..utils._runtime import get_runtime
 
-        runtime = get_classic_runtime()
+        runtime = get_runtime()
         runtime.require_llm(capability="LinkStrengtheningEvolution")
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
@@ -873,9 +873,9 @@ class NeighborContextUpdateEvolution(MemoryEvolutionModule):
         if not (len(packet.units) == len(packet.placements) == len(packet.evolution_decisions)):
             raise ValueError("NeighborContextUpdateEvolution requires aligned units, placements, and evolution decisions.")
 
-        from ..utils._runtime import get_classic_runtime
+        from ..utils._runtime import get_runtime
 
-        runtime = get_classic_runtime()
+        runtime = get_runtime()
         runtime.require_llm(capability="NeighborContextUpdateEvolution")
         effects: list[dict[str, Any]] = []
         active_unit_ids: list[str] = []
@@ -1054,7 +1054,7 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
         generator = self.reflection_generator or (
             lambda payload: runtime_reflection_generator(payload, prompt_builder=self.prompt_builder)
         )
-        generation_mode = "callable_override" if self.reflection_generator is not None else "classic_runtime"
+        generation_mode = "callable_override" if self.reflection_generator is not None else "runtime"
 
         active_unit_ids: list[str] = []
         record_ids: list[str] = []
@@ -1091,7 +1091,6 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
                         "generation_mode": generation_mode,
                         "inferred_decomposition": True,
                     },
-                    # Backward-compatible namespace for existing classic tests/examples.
                     "reflexion": {
                         "triggered": True,
                         "question": question,
