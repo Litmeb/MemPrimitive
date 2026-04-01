@@ -11,8 +11,8 @@
 
 现在更符合 repo 现状的是：
 
-- `OnInputTrigger(slot="write_trigger")`
-- `OnInputTrigger(slot="evolution_trigger")`
+- `AlwaysTrigger(slot="write_trigger")`
+- `NeverTrigger(slot="evolution_trigger")`
 
 同理适用于其他 trigger 家族。
 

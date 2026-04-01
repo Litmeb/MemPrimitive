@@ -44,7 +44,6 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
         IdleMaintenanceTrigger,
         ModelJudgeTrigger,
         NeverTrigger,
-        OnInputTrigger,
         PeriodicMaintenanceTrigger,
         RuntimeEventTrigger,
         ScalarRuleTrigger,
@@ -75,7 +74,6 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
 
     by_slot["write_trigger"] = [
         AlwaysTrigger,
-        OnInputTrigger,
         BoundaryEventTrigger,
         RuntimeEventTrigger,
         ScalarRuleTrigger,
@@ -84,7 +82,6 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
     ]
     by_slot["evolution_trigger"] = [
         NeverTrigger,
-        OnInputTrigger,
         BoundaryEventTrigger,
         RuntimeEventTrigger,
         ScalarRuleTrigger,

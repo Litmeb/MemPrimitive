@@ -341,7 +341,7 @@
 
 ### 最小接口集合
 
-1. `OnInputTrigger`
+1. `AlwaysTrigger`
    - 默认直通写入
 2. `BoundaryEventTrigger`
    - 接收外部边界事件

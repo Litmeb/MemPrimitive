@@ -384,47 +384,6 @@ class ThresholdTrigger(_BaseTrigger):
         )
 
 
-class OnInputTrigger(_BaseTrigger):
-    """Trigger when the current packet contains eligible input units."""
-
-    _DEFAULT_SLOT = "write_trigger"
-    _NAME_PREFIX = "on_input"
-
-    def __init__(
-        self,
-        *,
-        slot: str | None = None,
-        allowed_sources: tuple[str, ...] | None = None,
-        require_non_empty_units: bool = True,
-    ) -> None:
-        super().__init__(slot=slot)
-        self.allowed_sources = None if allowed_sources is None else tuple(str(item).strip() for item in allowed_sources if str(item).strip())
-        self.require_non_empty_units = bool(require_non_empty_units)
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        units = self._require_units(packet)
-        observation_source = packet.observation.source if packet.observation is not None else None
-        source_allowed = self.allowed_sources is None or observation_source in self.allowed_sources
-        has_input = bool(units) if self.require_non_empty_units else packet.units is not None
-        decision = bool(source_allowed and has_input)
-        decisions = _broadcast_decisions(len(units), decision)
-        return (
-            _write_trace(
-                packet,
-                module_name=self.spec.name,
-                trace_key=self._trace_key(),
-                decisions=decisions,
-                trace_payload={
-                    "source": "input",
-                    "allowed_sources": None if self.allowed_sources is None else list(self.allowed_sources),
-                    "observation_source": observation_source,
-                    "require_non_empty_units": self.require_non_empty_units,
-                },
-            ),
-            store,
-        )
-
-
 class _EventTrigger(_BaseTrigger):
     _EVENT_SOURCE = "events"
 
@@ -780,7 +739,6 @@ __all__ = [
     "IdleMaintenanceTrigger",
     "ModelJudgeTrigger",
     "NeverTrigger",
-    "OnInputTrigger",
     "PeriodicMaintenanceTrigger",
     "RuntimeEventTrigger",
     "ScalarRuleTrigger",
