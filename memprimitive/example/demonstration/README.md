@@ -1,57 +1,48 @@
 # `memprimitive.example.demonstration`
 
-这个目录放的是可直接运行的 demonstration 脚本，用来展示 `MemoryPipeline`、`MemoryStore`、baseline primitives，以及 layered store / graph family 等机制如何以最小闭环方式组合起来。
-
-建议在仓库根目录运行：
-
+鏉╂瑤閲滈惄顔肩秿閺€鍓ф畱閺勵垰褰查惄瀛樺复鏉╂劘顢戦惃?demonstration 閼存碍婀伴敍宀€鏁ら弶銉ョ潔缁€?`MemoryPipeline`閵嗕梗MemoryStore`閵嗕攻aseline primitives閿涘奔浜掗崣?layered store / graph family 缁涘婧€閸掕泛顩ф担鏇氫簰閺堚偓鐏忓繘妫撮悳顖涙煙瀵繒绮嶉崥鍫ｆ崳閺夈儯鈧?
+瀵ら缚顔呴崷銊ょ波鎼存挻鐗撮惄顔肩秿鏉╂劘顢戦敍?
 ```text
-python -m memprimitive.example.demonstration.<模块名>
+python -m memprimitive.example.demonstration.<濡€虫健閸?
 ```
 
-例如：
-
+娓氬顩ч敍?
 ```text
 python -m memprimitive.example.demonstration.minimal_pipeline
 ```
 
-## 当前说明
+## 瑜版挸澧犵拠瀛樻
 
-trigger 子系统已经暂时收缩为基础 slot trigger：
+trigger 鐎涙劗閮寸紒鐔峰嚒缂佸繑娈忛弮鑸垫暪缂傗晙璐熼崺铏诡攨 slot trigger閿?
+- `AlwaysTrigger`
+- `ThresholdTrigger`
+- `NeverTrigger`
+- `ThresholdTrigger`
 
-- `AlwaysWriteTrigger`
-- `ThresholdWriteTrigger`
-- `NeverEvolutionTrigger`
-- `ThresholdEvolutionTrigger`
-
-此前基于 `signal / scorer / gate / policy` 的 trigger-family 组合示例，以及依赖这些细分 trigger 的 Reflexion / TiM / A-MEM 风格 demonstration，已经从本目录移除。
-
-## 基础 pipeline / store 演示
-
-| 模块文件 | 说明 |
+濮濄倕澧犻崺杞扮艾 `signal / scorer / gate / policy` 閻?trigger-family 缂佸嫬鎮庣粈杞扮伐閿涘奔浜掗崣濠佺贩鐠ф牞绻栨禍娑氱矎閸?trigger 閻?Reflexion / TiM / A-MEM 妞嬪孩鐗?demonstration閿涘苯鍑＄紒蹇庣矤閺堫剛娲拌ぐ鏇犘╅梽銈冣偓?
+## 閸╄櫣顢?pipeline / store 濠曟梻銇?
+| 濡€虫健閺傚洣娆?| 鐠囧瓨妲?|
 | --- | --- |
-| `minimal_pipeline.py` | 最小 ingest -> recall 闭环。 |
-| `topology_store.py` | 展示 `StoreTopology` / `MemoryStore` 的多层拓扑声明、按层写入和按层查询。 |
-| `embedding_similarity_retrieval.py` | 展示带 `embedding` 的表示层，以及 `EmbeddingSimilarityRetrieval` 的检索行为。 |
+| `minimal_pipeline.py` | 閺堚偓鐏?ingest -> recall 闂傤厾骞嗛妴?|
+| `topology_store.py` | 鐏炴洜銇?`StoreTopology` / `MemoryStore` 閻ㄥ嫬顦跨仦鍌涘珖閹垫垵锛愰弰搴涒偓浣瑰瘻鐏炲倸鍟撻崗銉ユ嫲閹稿鐪伴弻銉嚄閵?|
+| `embedding_similarity_retrieval.py` | 鐏炴洜銇氱敮?`embedding` 閻ㄥ嫯銆冪粈鍝勭湴閿涘奔浜掗崣?`EmbeddingSimilarityRetrieval` 閻ㄥ嫭顥呯槐銏ｎ攽娑撴亽鈧?|
 
-## Layered / routing / dispatch 演示
-
-| 模块文件 | 说明 |
+## Layered / routing / dispatch 濠曟梻銇?
+| 濡€虫健閺傚洣娆?| 鐠囧瓨妲?|
 | --- | --- |
-| `layer_aware_semantic_working.py` | 写入 `working` / `semantic` 两层，并用 `LayerAwareRetrieval` 按层组合不同检索器。 |
-| `layer_aware_working_graph.py` | 分离 working layer 和 graph layer，再通过 layer-aware retrieval 统一召回。 |
-| `conditional_layer_routing.py` | `ConditionalLayerOrganization` 按规则把不同 unit 路由到不同 layer。 |
-| `dispatch_organization_recall.py` | `DispatchOrganization` 同时驱动多个 organization child。 |
-| `dispatch_organization_trace.py` | 与上例类似，但更强调 trace 输出。 |
+| `layer_aware_semantic_working.py` | 閸愭瑥鍙?`working` / `semantic` 娑撱倕鐪伴敍灞借嫙閻?`LayerAwareRetrieval` 閹稿鐪扮紒鍕値娑撳秴鎮撳Λ鈧槐銏犳珤閵?|
+| `layer_aware_working_graph.py` | 閸掑棛顬?working layer 閸?graph layer閿涘苯鍟€闁俺绻?layer-aware retrieval 缂佺喍绔撮崣顒€娲栭妴?|
+| `conditional_layer_routing.py` | `ConditionalLayerOrganization` 閹稿顫夐崚娆愬Ω娑撳秴鎮?unit 鐠侯垳鏁遍崚棰佺瑝閸?layer閵?|
+| `dispatch_organization_recall.py` | `DispatchOrganization` 閸氬本妞傛す鍗炲З婢舵矮閲?organization child閵?|
+| `dispatch_organization_trace.py` | 娑撳簼绗傛笟瀣娴肩》绱濇担鍡樻纯瀵缚鐨?trace 鏉堟挸鍤妴?|
 
-## Graph baseline 演示
-
-| 模块文件 | 说明 |
+## Graph baseline 濠曟梻銇?
+| 濡€虫健閺傚洣娆?| 鐠囧瓨妲?|
 | --- | --- |
-| `graph_append_entity_retrieval.py` | `GraphAppendOrganization` + `EntityRetrieval` 的轻量 graph 示例。 |
-| `graph_baseline_pipeline.py` | graph baseline 闭环：`GraphAppendOrganization -> ThresholdEvolutionTrigger -> GraphNeighborAppendEvolution -> GraphSeedAndExpandRetrieval -> GraphReadout`。 |
+| `graph_append_entity_retrieval.py` | `GraphAppendOrganization` + `EntityRetrieval` 閻ㄥ嫯浜ら柌?graph 缁€杞扮伐閵?|
+| `graph_baseline_pipeline.py` | graph baseline 闂傤厾骞嗛敍姝欸raphAppendOrganization -> ThresholdTrigger -> GraphNeighborAppendEvolution -> GraphSeedAndExpandRetrieval -> GraphReadout`閵?|
 
-## 推荐阅读顺序
-
+## 閹恒劏宕橀梼鍛邦嚢妞ゅ搫绨?
 1. `minimal_pipeline.py`
 2. `topology_store.py`
 3. `layer_aware_semantic_working.py`

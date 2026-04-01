@@ -8,15 +8,14 @@ from typing import ClassVar, Final
 
 from .core import MemoryRecord, MemoryStore, Observation, Packet, Query, Readout
 from .interfaces import (
-    EvolutionTriggerModule,
     MemoryEvolutionModule,
     OrganizationModule,
     PrimitiveModule,
     ReadoutModule,
     RepresentationModule,
     RetrievalModule,
+    TriggerModule,
     UnitFormationModule,
-    WriteTriggerModule,
 )
 from .pipeline_slots import INGEST_SLOTS, RECALL_SLOTS
 
@@ -24,9 +23,9 @@ from .pipeline_slots import INGEST_SLOTS, RECALL_SLOTS
 _INGEST_SLOT_CHECK: Final[tuple[tuple[str, str, type], ...]] = (
     ("unit_formation", "unit_formation", UnitFormationModule),
     ("representation", "representation", RepresentationModule),
-    ("write_trigger", "write_trigger", WriteTriggerModule),
+    ("write_trigger", "write_trigger", TriggerModule),
     ("organization", "organization", OrganizationModule),
-    ("evolution_trigger", "evolution_trigger", EvolutionTriggerModule),
+    ("evolution_trigger", "evolution_trigger", TriggerModule),
     ("memory_evolution", "memory_evolution", MemoryEvolutionModule),
 )
 _RECALL_SLOT_CHECK: Final[tuple[tuple[str, str, type], ...]] = (
@@ -93,9 +92,9 @@ class MemoryPipeline:
         *,
         unit_formation: UnitFormationModule | Iterable[UnitFormationModule] | None = None,
         representation: RepresentationModule | Iterable[RepresentationModule] | None = None,
-        write_trigger: WriteTriggerModule | Iterable[WriteTriggerModule] | None = None,
+        write_trigger: TriggerModule | Iterable[TriggerModule] | None = None,
         organization: OrganizationModule | Iterable[OrganizationModule] | None = None,
-        evolution_trigger: EvolutionTriggerModule | Iterable[EvolutionTriggerModule] | None = None,
+        evolution_trigger: TriggerModule | Iterable[TriggerModule] | None = None,
         memory_evolution: MemoryEvolutionModule | Iterable[MemoryEvolutionModule] | None = None,
         retrieval: RetrievalModule | Iterable[RetrievalModule] | None = None,
         readout: ReadoutModule | Iterable[ReadoutModule] | None = None,
@@ -220,10 +219,10 @@ def _default_representation() -> RepresentationModule:
     return BasicRepresentation()
 
 
-def _default_write_trigger() -> WriteTriggerModule:
-    from .baselines import AlwaysWriteTrigger
+def _default_write_trigger() -> TriggerModule:
+    from .baselines import AlwaysTrigger
 
-    return AlwaysWriteTrigger()
+    return AlwaysTrigger()
 
 
 def _default_organization() -> OrganizationModule:
@@ -232,10 +231,10 @@ def _default_organization() -> OrganizationModule:
     return AppendOrganization()
 
 
-def _default_evolution_trigger() -> EvolutionTriggerModule:
-    from .baselines import NeverEvolutionTrigger
+def _default_evolution_trigger() -> TriggerModule:
+    from .baselines import NeverTrigger
 
-    return NeverEvolutionTrigger()
+    return NeverTrigger()
 
 
 def _default_memory_evolution() -> MemoryEvolutionModule:

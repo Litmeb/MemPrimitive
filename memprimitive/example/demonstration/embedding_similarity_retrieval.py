@@ -20,7 +20,7 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, Observation, Query
 from memprimitive.baselines import (
-    AlwaysWriteTrigger,
+    AlwaysTrigger,
     AppendOrganization,
     BasicRepresentation,
     ConcatenateReadout,
@@ -33,7 +33,7 @@ def main() -> None:
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=BasicRepresentation(elements=("text", "embedding")),
-        write_trigger=AlwaysWriteTrigger(),
+        write_trigger=AlwaysTrigger(),
         organization=AppendOrganization(),
         retrieval=EmbeddingSimilarityRetrieval(top_k=2),
         readout=ConcatenateReadout(),

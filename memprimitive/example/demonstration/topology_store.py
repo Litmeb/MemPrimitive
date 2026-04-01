@@ -21,7 +21,7 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
-    AlwaysWriteTrigger,
+    AlwaysTrigger,
     AppendOrganization,
     BasicRepresentation,
     ConcatenateReadout,
@@ -43,7 +43,7 @@ def main() -> None:
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=BasicRepresentation(),
-        write_trigger=AlwaysWriteTrigger(),
+        write_trigger=AlwaysTrigger(),
         organization=AppendOrganization(target_layer="episodic"),
         retrieval=RecencyRetrieval(top_k=2, layer="episodic"),
         readout=ConcatenateReadout(),

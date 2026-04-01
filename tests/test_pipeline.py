@@ -11,7 +11,7 @@ from memprimitive import (
     create_baseline_pipeline,
 )
 from memprimitive.baselines import (
-    AlwaysWriteTrigger,
+    AlwaysTrigger,
     AppendOnlyEvolution,
     AppendOrganization,
     BasicRepresentation,
@@ -27,7 +27,7 @@ from memprimitive.baselines import (
     GraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
     LinkStrengtheningEvolution,
-    NeverEvolutionTrigger,
+    NeverTrigger,
     NeighborContextUpdateEvolution,
     PassThroughUnitFormation,
     KeywordRepresentation,
@@ -136,16 +136,16 @@ def test_memory_pipeline_rejects_wrong_module_spec_slot() -> None:
 
 
 def test_memory_pipeline_rejects_write_trigger_instance_in_evolution_trigger_slot() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger
+    from memprimitive.baselines import AlwaysTrigger
 
     m = instantiate_default_baseline_modules(top_k=2)
-    with pytest.raises(TypeError, match="EvolutionTriggerModule"):
+    with pytest.raises(ValueError, match=r"expects ModuleSpec\.slot='evolution_trigger'"):
         MemoryPipeline(
             unit_formation=m["unit_formation"],
             representation=m["representation"],
             write_trigger=m["write_trigger"],
             organization=m["organization"],
-            evolution_trigger=AlwaysWriteTrigger(),
+            evolution_trigger=AlwaysTrigger(),
             memory_evolution=m["memory_evolution"],
             retrieval=m["retrieval"],
             readout=m["readout"],
@@ -157,8 +157,9 @@ def test_default_pipeline_includes_evolution_trigger_trace_and_preserves_behavio
     packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
 
     assert "evolution_trigger" in packet.trace
-    assert packet.trace["evolution_trigger"]["policy"] == "never"
-    assert packet.evolution_decisions == [False]
+    assert packet.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["decisions"] == [False]
+    assert packet.decisions == [False]
     assert pipeline.store.count() == 1
 
 
@@ -167,9 +168,9 @@ def test_memory_pipeline_zero_arg_constructor_populates_all_default_modules() ->
 
     assert isinstance(pipeline.unit_formation, PassThroughUnitFormation)
     assert isinstance(pipeline.representation, BasicRepresentation)
-    assert isinstance(pipeline.write_trigger, AlwaysWriteTrigger)
+    assert isinstance(pipeline.write_trigger, AlwaysTrigger)
     assert isinstance(pipeline.organization, AppendOrganization)
-    assert isinstance(pipeline.evolution_trigger, NeverEvolutionTrigger)
+    assert isinstance(pipeline.evolution_trigger, NeverTrigger)
     assert isinstance(pipeline.memory_evolution, AppendOnlyEvolution)
     assert isinstance(pipeline.retrieval, RecencyRetrieval)
     assert pipeline.retrieval.top_k == 3
@@ -180,14 +181,14 @@ def test_memory_pipeline_defaults_all_modules_when_only_ingest_side_overrides_ar
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=BasicRepresentation(),
-        write_trigger=AlwaysWriteTrigger(),
+        write_trigger=AlwaysTrigger(),
         organization=AppendOrganization(),
     )
 
     packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
 
-    assert packet.evolution_decisions == [False]
-    assert packet.trace["evolution_trigger"]["policy"] == "never"
+    assert packet.decisions == [False]
+    assert packet.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
     assert pipeline.store.count() == 1
 
 
@@ -209,25 +210,25 @@ def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() 
     from dataclasses import replace
 
     from memprimitive.baselines import (
-        AlwaysWriteTrigger,
+        AlwaysTrigger,
         AppendOnlyEvolution,
         AppendOrganization,
         BasicRepresentation,
         ConcatenateReadout,
-        NeverEvolutionTrigger,
+        NeverTrigger,
         PassThroughUnitFormation,
         RecencyRetrieval,
     )
 
-    class PartialEvolutionTrigger(NeverEvolutionTrigger):
+    class PartialEvolutionTrigger(NeverTrigger):
         def run(self, packet: Packet, store):
             packet, store = super().run(packet, store)
-            return replace(packet, evolution_decisions=[False for _ in packet.units], trace=packet.trace), store
+            return replace(packet, decisions=[False for _ in packet.units], trace=packet.trace), store
 
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=BasicRepresentation(),
-        write_trigger=AlwaysWriteTrigger(),
+        write_trigger=AlwaysTrigger(),
         organization=AppendOrganization(),
         evolution_trigger=PartialEvolutionTrigger(),
         memory_evolution=AppendOnlyEvolution(),
@@ -237,9 +238,9 @@ def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() 
 
     packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
 
-    assert packet.decisions == [True]
+    assert packet.trace["write_trigger"]["decisions"] == [True]
     assert packet.placements is not None
-    assert packet.evolution_decisions == [False]
+    assert packet.decisions == [False]
     assert pipeline.store.count() == 1
     assert packet.trace["memory_evolution"]["effects"] == []
 
@@ -249,8 +250,8 @@ def test_default_ingest_writes_before_optional_evolution_runs() -> None:
 
     packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
 
-    assert packet.decisions == [True]
-    assert packet.evolution_decisions == [False]
+    assert packet.trace["write_trigger"]["decisions"] == [True]
+    assert packet.decisions == [False]
     assert pipeline.store.count() == 1
     assert packet.trace["organization"]["written_record_ids"]
     assert packet.trace["memory_evolution"]["active_unit_ids"] == []
@@ -505,9 +506,9 @@ def _register_sparse_pipeline_for_check(
     kwargs = {
         "unit_formation": PassThroughUnitFormation(),
         "representation": BasicRepresentation(elements=("text",)),
-        "write_trigger": AlwaysWriteTrigger(),
+        "write_trigger": AlwaysTrigger(),
         "organization": AppendOrganization(),
-        "evolution_trigger": NeverEvolutionTrigger(),
+        "evolution_trigger": NeverTrigger(),
         "memory_evolution": AppendOnlyEvolution(),
         "retrieval": RecencyRetrieval(top_k=2),
         "readout": ConcatenateReadout(),

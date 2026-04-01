@@ -250,7 +250,7 @@ def test_representation_can_generate_real_summary_via_api() -> None:
 
 
 def test_write_trigger_aligns_decisions_with_units() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, PassThroughUnitFormation
+    from memprimitive.baselines import AlwaysTrigger, BasicRepresentation, PassThroughUnitFormation
 
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
@@ -258,7 +258,7 @@ def test_write_trigger_aligns_decisions_with_units() -> None:
     )
     packet, store = BasicRepresentation().run(packet, store)
 
-    packet_out, _ = AlwaysWriteTrigger().run(packet, store)
+    packet_out, _ = AlwaysTrigger().run(packet, store)
 
     assert packet_out.decisions == [True]
     assert packet_out.trace["write_trigger"]["module"] == "always_write_trigger"
@@ -267,12 +267,12 @@ def test_write_trigger_aligns_decisions_with_units() -> None:
     assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is True
 
 
-def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
+def test_evolution_trigger_aligns_decisions_with_units() -> None:
     from memprimitive.baselines import (
-        AlwaysWriteTrigger,
+        AlwaysTrigger,
         AppendOrganization,
         BasicRepresentation,
-        NeverEvolutionTrigger,
+        NeverTrigger,
         PassThroughUnitFormation,
     )
 
@@ -281,14 +281,14 @@ def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
         MemoryStore(),
     )
     packet, store = BasicRepresentation().run(packet, store)
-    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
     packet, store = AppendOrganization().run(packet, store)
 
-    packet_out, _ = NeverEvolutionTrigger().run(packet, store)
+    packet_out, _ = NeverTrigger().run(packet, store)
 
-    assert packet_out.evolution_decisions == [False]
+    assert packet_out.decisions == [False]
     assert packet_out.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
-    assert packet_out.trace["evolution_trigger"]["evolution_decisions"] == [False]
+    assert packet_out.trace["evolution_trigger"]["decisions"] == [False]
     assert packet_out.trace["evolution_trigger"]["threshold"] is None
     assert packet_out.trace["evolution_trigger"]["constant"] == 1.0
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
@@ -296,7 +296,7 @@ def test_evolution_trigger_aligns_evolution_decisions_with_units() -> None:
 
 def test_organization_aligns_placements_with_units_and_commits_normal_write() -> None:
     from memprimitive.baselines import (
-        AlwaysWriteTrigger,
+        AlwaysTrigger,
         AppendOrganization,
         BasicRepresentation,
         PassThroughUnitFormation,
@@ -307,7 +307,7 @@ def test_organization_aligns_placements_with_units_and_commits_normal_write() ->
         MemoryStore(),
     )
     packet, store = BasicRepresentation().run(packet, store)
-    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
 
     packet_out, updated_store = AppendOrganization().run(packet, store)
 
@@ -320,13 +320,13 @@ def test_organization_aligns_placements_with_units_and_commits_normal_write() ->
     assert packet_out.trace["organization"]["skipped_unit_count"] == 0
 
 
-def test_append_only_evolution_is_noop_when_evolution_decisions_are_false() -> None:
+def test_append_only_evolution_is_noop_when_decisions_are_false() -> None:
     from memprimitive.baselines import AppendOnlyEvolution
 
     packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
     packet = Packet(
         units=packet.units,
-        evolution_decisions=[False],
+        decisions=[False],
         placements=packet.placements,
         trace=packet.trace,
     )
@@ -342,7 +342,7 @@ def test_append_only_evolution_records_active_unit_ids_without_mutating_store() 
     packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
     packet = Packet(
         units=packet.units,
-        evolution_decisions=[True],
+        decisions=[True],
         placements=packet.placements,
         trace=packet.trace,
     )
@@ -350,12 +350,12 @@ def test_append_only_evolution_records_active_unit_ids_without_mutating_store() 
     packet_out, updated_store = AppendOnlyEvolution().run(packet, store)
 
     assert updated_store.count() == 1
-    assert packet_out.trace["memory_evolution"]["decision_source"] == "evolution_decisions"
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions"
     assert packet_out.trace["memory_evolution"]["active_unit_ids"] == [packet.units[0].unit_id]
     assert packet_out.trace["memory_evolution"]["effects"] == []
 
 
-def test_append_only_evolution_requires_explicit_evolution_decisions() -> None:
+def test_append_only_evolution_requires_explicit_decisions() -> None:
     from memprimitive.baselines import AppendOnlyEvolution
 
     packet, store = _stored_pipeline_packet("Alice likes tea.", MemoryStore())
@@ -365,7 +365,7 @@ def test_append_only_evolution_requires_explicit_evolution_decisions() -> None:
         trace=packet.trace,
     )
 
-    with pytest.raises(ValueError, match="packet.evolution_decisions"):
+    with pytest.raises(ValueError, match="packet.decisions"):
         AppendOnlyEvolution().run(packet, store)
 
 
@@ -374,17 +374,17 @@ def test_append_only_evolution_requires_aligned_inputs() -> None:
 
     with pytest.raises(ValueError, match="aligned units"):
         AppendOnlyEvolution().run(
-            Packet(units=[], evolution_decisions=[True], placements=[]),
+            Packet(units=[], decisions=[True], placements=[]),
             MemoryStore(),
         )
 
 
 def test_write_and_evolution_trigger_are_independent_by_default() -> None:
     from memprimitive.baselines import (
-        AlwaysWriteTrigger,
+        AlwaysTrigger,
         AppendOrganization,
         BasicRepresentation,
-        NeverEvolutionTrigger,
+        NeverTrigger,
         PassThroughUnitFormation,
     )
 
@@ -393,18 +393,18 @@ def test_write_and_evolution_trigger_are_independent_by_default() -> None:
         MemoryStore(),
     )
     packet, store = BasicRepresentation().run(packet, store)
-    write_packet, store = AlwaysWriteTrigger().run(packet, store)
+    write_packet, store = AlwaysTrigger().run(packet, store)
     write_packet, store = AppendOrganization().run(write_packet, store)
-    evolution_packet, _ = NeverEvolutionTrigger().run(write_packet, store)
+    evolution_packet, _ = NeverTrigger().run(write_packet, store)
 
     assert write_packet.decisions == [True]
-    assert evolution_packet.evolution_decisions == [False]
+    assert evolution_packet.decisions == [False]
     assert write_packet.trace["write_trigger"]["module"] == "always_write_trigger"
     assert evolution_packet.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
 
 
 def test_threshold_write_trigger_respects_threshold_policy() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation, ThresholdWriteTrigger
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation, ThresholdTrigger
 
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
@@ -412,23 +412,23 @@ def test_threshold_write_trigger_respects_threshold_policy() -> None:
     )
     packet, store = BasicRepresentation().run(packet, store)
 
-    packet_out, _ = ThresholdWriteTrigger(threshold=0.8, constant=0.7).run(packet, store)
+    packet_out, _ = ThresholdTrigger(threshold=0.8, constant=0.7).run(packet, store)
     assert packet_out.decisions == [False]
     assert packet_out.trace["write_trigger"]["threshold"] == 0.8
     assert packet_out.trace["write_trigger"]["constant"] == 0.7
     assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is False
 
-    packet_out, _ = ThresholdWriteTrigger(threshold=0.7, constant=0.7).run(packet, store)
+    packet_out, _ = ThresholdTrigger(threshold=0.7, constant=0.7).run(packet, store)
     assert packet_out.decisions == [True]
     assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is True
 
 
-def test_threshold_evolution_trigger_writes_only_evolution_decisions() -> None:
+def test_threshold_evolution_trigger_writes_only_decisions() -> None:
     from memprimitive.baselines import (
         AppendOrganization,
         BasicRepresentation,
         PassThroughUnitFormation,
-        ThresholdEvolutionTrigger,
+        ThresholdTrigger,
     )
 
     packet, store = PassThroughUnitFormation().run(
@@ -446,10 +446,9 @@ def test_threshold_evolution_trigger_writes_only_evolution_decisions() -> None:
         store,
     )
 
-    packet_out, _ = ThresholdEvolutionTrigger(threshold=2.0, constant=1.0).run(packet, store)
+    packet_out, _ = ThresholdTrigger(slot="evolution_trigger", threshold=2.0, constant=1.0).run(packet, store)
 
-    assert packet_out.decisions == [True]
-    assert packet_out.evolution_decisions == [False]
+    assert packet_out.decisions == [False]
     assert packet_out.trace["evolution_trigger"]["threshold"] == 2.0
     assert packet_out.trace["evolution_trigger"]["constant"] == 1.0
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
@@ -882,7 +881,15 @@ def test_organization_can_write_into_declared_non_default_topology_layer() -> No
     )
     store = MemoryStore(topology=topology)
     packet, store = _stored_pipeline_packet("Alice likes tea.", store)
-    packet, store = AppendOrganization(target_layer="episodic").run(packet, store)
+    packet, store = AppendOrganization(target_layer="episodic").run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True for _ in packet.units or []],
+            trace=packet.trace,
+        ),
+        store,
+    )
 
     assert store.count("episodic") == 1
     assert store.iter_records("episodic")[0].layer == "episodic"
@@ -900,7 +907,15 @@ def test_retrieval_can_target_declared_topology_layer() -> None:
     store = MemoryStore(topology=topology)
     for text in ("episodic first", "episodic second"):
         packet, store = _stored_pipeline_packet(text, store)
-        packet, store = AppendOrganization(target_layer="episodic").run(packet, store)
+        packet, store = AppendOrganization(target_layer="episodic").run(
+            Packet(
+                observation=packet.observation,
+                units=packet.units,
+                decisions=[True for _ in packet.units or []],
+                trace=packet.trace,
+            ),
+            store,
+        )
 
     packet_out, _ = RecencyRetrieval(top_k=1, layer="episodic").run(Packet(query=Query(text="episodic")), store)
 
@@ -1193,8 +1208,7 @@ def test_write_false_skips_normal_write_and_leaves_evolution_noop() -> None:
     packet, store = AppendOrganization().run(packet, store)
     packet = Packet(
         units=packet.units,
-        decisions=packet.decisions,
-        evolution_decisions=[False],
+        decisions=[False],
         placements=packet.placements,
         trace=packet.trace,
     )
@@ -1264,7 +1278,7 @@ def test_metadata_hint_unit_formation_prefers_hint_and_can_set_unit_type() -> No
 
 
 def test_representation_supports_new_elements_and_persists_them_into_record_metadata() -> None:
-    from memprimitive.baselines import AppendOrganization, AlwaysWriteTrigger, BasicRepresentation, PassThroughUnitFormation
+    from memprimitive.baselines import AppendOrganization, AlwaysTrigger, BasicRepresentation, PassThroughUnitFormation
 
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice studies graph memory on 2026-03-24.", source="notes")),
@@ -1283,7 +1297,7 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
     packet, store = BasicRepresentation(
         elements=("text", "entities", "tags", "keywords", "summary", "time_anchor", "relation_tags", "source_type")
     ).run(packet, store)
-    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
     _, store = AppendOrganization().run(packet, store)
 
     record = store.iter_records()[0]
@@ -1311,7 +1325,7 @@ def test_keyword_representation_exposes_keyword_summary_without_embedding() -> N
 
 
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
+    from memprimitive.baselines import AlwaysTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
 
     store = MemoryStore(
         topology=StoreTopology.from_layers(
@@ -1326,7 +1340,7 @@ def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -
         store,
     )
     packet, store = BasicRepresentation(elements=("text", "entities", "tags")).run(packet, store)
-    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
     packet, store = ConditionalLayerOrganization(
         default_layer="working",
         rules=({"has_entity": True, "target_layer": "semantic"},),
@@ -1337,7 +1351,7 @@ def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -
 
 
 def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadata() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger, GraphAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+    from memprimitive.baselines import AlwaysTrigger, GraphAppendOrganization, PassThroughUnitFormation, TripleRepresentation
 
     class SeededTripleRepresentation(TripleRepresentation):
         def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
@@ -1352,7 +1366,7 @@ def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadat
         store,
     )
     packet, store = SeededTripleRepresentation().run(packet, store)
-    packet, store = AlwaysWriteTrigger().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
     packet, store = GraphAppendOrganization(target_layer="knowledge_graph").run(packet, store)
 
     record = store.iter_records("knowledge_graph")[0]
@@ -1498,7 +1512,7 @@ def test_graph_neighbor_append_evolution_only_modifies_graph_layer() -> None:
     packet = Packet(
         units=[MemoryUnit(text="Alice studies graph memory", unit_id="unit-2")],
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
-        evolution_decisions=[True],
+        decisions=[True],
     )
 
     packet_out, store = GraphNeighborAppendEvolution(target_layer="knowledge_graph", neighbor_limit=1).run(packet, store)
@@ -1538,7 +1552,7 @@ def test_graph_link_evolution_rewrites_only_graph_metadata_namespace() -> None:
     packet = Packet(
         units=[MemoryUnit(text="Alice studies graph memory", unit_id="unit-2", embedding=[0.95, 0.05])],
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
-        evolution_decisions=[True],
+        decisions=[True],
     )
 
     packet_out, store = GraphLinkEvolution(
@@ -1580,7 +1594,7 @@ def test_graph_neighbor_context_trace_evolution_can_run_trace_only_or_rewrite() 
     packet = Packet(
         units=[MemoryUnit(text="Alice studies graph memory", unit_id="unit-2")],
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
-        evolution_decisions=[True],
+        decisions=[True],
     )
 
     trace_packet, store = GraphNeighborContextTraceEvolution(target_layer="knowledge_graph").run(packet, store)
@@ -1623,7 +1637,7 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
         GraphReadout,
         GraphSeedAndExpandRetrieval,
         PassThroughUnitFormation,
-        ThresholdEvolutionTrigger,
+        ThresholdTrigger,
         TripleRepresentation,
     )
 
@@ -1651,7 +1665,7 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
             BasicRepresentation(elements=("tags", "keywords")),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
-        evolution_trigger=ThresholdEvolutionTrigger(threshold=0.5, constant=1.0),
+        evolution_trigger=ThresholdTrigger(slot="evolution_trigger", threshold=0.5, constant=1.0),
         memory_evolution=(
             GraphLinkEvolution(target_layer="knowledge_graph", neighbor_limit=2, rewrite_neighbor_metadata=True),
             GraphNeighborContextTraceEvolution(target_layer="knowledge_graph", rewrite_metadata=True),
@@ -1669,8 +1683,10 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
     graph_records = pipeline.store.iter_records("knowledge_graph")
     linked_record = [record for record in graph_records if record.unit_id == second_packet.units[0].unit_id][0]
 
-    assert first_packet.evolution_decisions == [True]
-    assert second_packet.evolution_decisions == [True]
+    assert first_packet.trace["write_trigger"]["decisions"] == [True]
+    assert second_packet.trace["write_trigger"]["decisions"] == [True]
+    assert first_packet.decisions == [True]
+    assert second_packet.decisions == [True]
     assert linked_record.metadata["graph"]["links"]
     assert linked_record.metadata["graph"]["neighbor_context"]["neighbor_record_ids"]
     assert "Alice studies graph memory systems." in readout.text or "Alice likes jasmine tea." in readout.text
@@ -1850,7 +1866,7 @@ def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metada
     packet = Packet(
         units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2", embedding=second_embedding)],
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
-        evolution_decisions=[True],
+        decisions=[True],
     )
 
     packet, store = LinkStrengtheningEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
@@ -1920,7 +1936,7 @@ def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.Monk
     packet = Packet(
         units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2", embedding=second_embedding)],
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
-        evolution_decisions=[True],
+        decisions=[True],
     )
 
     packet, store = LinkStrengtheningEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
@@ -1945,7 +1961,7 @@ def test_summary_rewrite_evolution_appends_summary_record() -> None:
     packet = Packet(
         units=packet.units,
         placements=packet.placements,
-        evolution_decisions=[True],
+        decisions=[True],
         trace=packet.trace,
     )
 
@@ -1967,7 +1983,7 @@ def test_layer_move_evolution_copy_appends_unit_to_target_layer() -> None:
     packet = Packet(
         units=packet.units,
         placements=packet.placements,
-        evolution_decisions=[True],
+        decisions=[True],
         trace=packet.trace,
     )
 
@@ -2076,13 +2092,13 @@ def test_bm25_retrieval_falls_back_to_recency_when_all_scores_are_zero() -> None
 
 
 def test_tag_retrieval_prefers_matching_tags() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation, TagRetrieval
+    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation, TagRetrieval
 
     store = MemoryStore()
     for text in ("Alice likes tea", "Alice studies graph memory", "Bob likes coffee"):
         packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
         packet, store = BasicRepresentation(elements=("text", "tags")).run(packet, store)
-        packet, store = AlwaysWriteTrigger().run(packet, store)
+        packet, store = AlwaysTrigger().run(packet, store)
         _, store = AppendOrganization().run(packet, store)
 
     packet_out, _ = TagRetrieval(top_k=1).run(Packet(query=Query(text="graph")), store)
@@ -2091,13 +2107,13 @@ def test_tag_retrieval_prefers_matching_tags() -> None:
 
 
 def test_entity_retrieval_prefers_entity_overlap() -> None:
-    from memprimitive.baselines import AlwaysWriteTrigger, AppendOrganization, BasicRepresentation, EntityRetrieval, PassThroughUnitFormation
+    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, BasicRepresentation, EntityRetrieval, PassThroughUnitFormation
 
     store = MemoryStore()
     for text in ("Alice likes tea", "Bob likes coffee", "Alice studies graph memory"):
         packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
         packet, store = BasicRepresentation(elements=("text", "entities")).run(packet, store)
-        packet, store = AlwaysWriteTrigger().run(packet, store)
+        packet, store = AlwaysTrigger().run(packet, store)
         _, store = AppendOrganization().run(packet, store)
 
     packet_out, _ = EntityRetrieval(top_k=2).run(Packet(query=Query(text="Alice")), store)
