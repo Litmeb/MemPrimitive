@@ -361,11 +361,15 @@ class Packet:
     ``write_trigger`` first fills it before organization; later
     ``evolution_trigger`` may overwrite it before ``memory_evolution`` runs.
     Earlier write-side decisions remain available in ``trace["write_trigger"]``.
+    ``decisions_store`` is an optional parallel store-side selection artifact
+    used by richer trigger families to describe which existing records in the
+    store were selected by the current trigger pass.
     """
 
     observation: Observation | None = None
     units: list[MemoryUnit] | None = None
     decisions: list[bool] | None = None
+    decisions_store: dict[str, dict[str, Any]] | None = None
     placements: list[Placement] | None = None
     query: Query | None = None
     retrieved: RetrievedSet | None = None
