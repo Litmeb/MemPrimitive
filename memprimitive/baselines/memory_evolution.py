@@ -30,6 +30,13 @@ from ..utils._amem_family import (
     stringify_note_candidates,
 )
 from ..utils._graph_family import graph_metadata_from_record, rewrite_graph_record
+from ..utils._hierarchical_family import (
+    append_hierarchical_records,
+    group_records,
+    require_aligned_units_decisions,
+    resolve_source_records,
+    validate_hierarchical_config,
+)
 from ..utils._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
     DEFAULT_REFLECTION_LAYER,
@@ -1148,6 +1155,79 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
         return replace(packet, trace=trace), store
 
 
+class HierarchicalEvolution(MemoryEvolutionModule):
+    """Aggregate selected source-layer records into higher-level target records."""
+
+    spec = ModuleSpec(
+        name="hierarchical_evolution",
+        slot="memory_evolution",
+        input_requirements=("units", "placements", "decisions"),
+        output_guarantees=("trace.memory_evolution.effects",),
+        side_effects=("modify_store", "append_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        source_layer: str,
+        target_layer: str,
+        extract_mode: str,
+        extract_fields: tuple[str, ...],
+        group_by: tuple[str, ...] = (),
+        prompt: str | None = None,
+    ) -> None:
+        config = validate_hierarchical_config(
+            source_layer=source_layer,
+            target_layer=target_layer,
+            extract_mode=extract_mode,
+            extract_fields=extract_fields,
+            group_by=group_by,
+            prompt=prompt,
+        )
+        self.source_layer = config["source_layer"]
+        self.target_layer = config["target_layer"]
+        self.extract_mode = config["extract_mode"]
+        self.extract_fields = config["extract_fields"]
+        self.group_by = config["group_by"]
+        self.prompt = config["prompt"]
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        require_aligned_units_decisions(packet, include_placements=True)
+
+        selected_records, selection_source = resolve_source_records(
+            packet,
+            store,
+            source_layer=self.source_layer,
+        )
+        grouped = group_records(selected_records, group_by=self.group_by)
+        effects = append_hierarchical_records(
+            store,
+            source_layer=self.source_layer,
+            target_layer=self.target_layer,
+            extract_mode=self.extract_mode,
+            extract_fields=self.extract_fields,
+            group_by=self.group_by,
+            grouped_records=grouped,
+            prompt=self.prompt,
+        )
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "decision_source": selection_source,
+            "source_layer": self.source_layer,
+            "target_layer": self.target_layer,
+            "extract_mode": self.extract_mode,
+            "extract_fields": list(self.extract_fields),
+            "group_by": list(self.group_by),
+            "selected_record_count": len(selected_records),
+            "group_count": len(grouped),
+            "active_group_keys": [effect["group_key"] for effect in effects],
+            "effects": effects,
+        }
+        return replace(packet, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "memory_evolution"
 BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     AppendOnlyEvolution,
@@ -1160,4 +1240,5 @@ BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     LinkStrengtheningEvolution,
     NeighborContextUpdateEvolution,
     ReflectionGenerationEvolution,
+    HierarchicalEvolution,
 )

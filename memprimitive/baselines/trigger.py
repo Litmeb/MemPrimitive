@@ -19,6 +19,25 @@ _VALID_AGGREGATES = frozenset({"broadcast", "per_unit", "any_unit", "all_units"}
 _VALID_DECISION_MODES = frozenset({"bool", "score", "label"})
 _VALID_MAINTENANCE_MODES = frozenset({"broadcast", "per_unit"})
 _POSITIVE_LABELS = frozenset({"allow", "go", "ok", "positive", "true", "write", "evolve", "yes", "y", "trigger"})
+_BOUNDARY_KIND_TO_MATCH_KEY = {
+    "session": "session_id",
+    "turn": "turn_id",
+    "chunk": "chunk_id",
+    "subgoal": "subgoal_id",
+    "episode": "episode_id",
+}
+_BOUNDARY_EVENT_ALIASES = {
+    "session": frozenset({"session", "session_boundary", "session_end"}),
+    "turn": frozenset({"turn", "turn_boundary", "turn_end"}),
+    "chunk": frozenset({"chunk", "chunk_boundary", "chunk_end"}),
+    "subgoal": frozenset({"subgoal", "subgoal_end", "subgoal_complete"}),
+    "episode": frozenset({"episode", "episode_boundary", "episode_end"}),
+}
+_BOUNDARY_EVENT_TO_KIND = {
+    alias: kind
+    for kind, aliases in _BOUNDARY_EVENT_ALIASES.items()
+    for alias in aliases
+}
 
 
 def _require_trigger_slot(slot: str) -> str:
@@ -246,12 +265,108 @@ def _pressure_trace_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalized_boundary_event_name(event: str) -> str:
+    normalized = str(event).strip()
+    if not normalized:
+        return ""
+    return _BOUNDARY_EVENT_TO_KIND.get(normalized, normalized)
+
+
+def _observation_metadata(packet: Packet) -> dict[str, Any]:
+    if packet.observation is None or not isinstance(packet.observation.metadata, dict):
+        return {}
+    return packet.observation.metadata
+
+
+def _resolve_boundary_match_value(packet: Packet, match_key: str) -> Any:
+    payload = _trigger_payload(packet)
+    if match_key in payload:
+        return payload.get(match_key)
+
+    observation_metadata = _observation_metadata(packet)
+    if match_key in observation_metadata:
+        return observation_metadata.get(match_key)
+
+    unit_values: list[Any] = []
+    for unit in packet.units or []:
+        if match_key in unit.metadata:
+            unit_values.append(unit.metadata.get(match_key))
+    if unit_values:
+        first_value = unit_values[0]
+        if all(value == first_value for value in unit_values[1:]):
+            return first_value
+    return None
+
+
+def _build_store_decisions_summary(decisions_store: dict[str, dict[str, Any]] | None) -> tuple[list[str], dict[str, int]]:
+    if not decisions_store:
+        return [], {}
+    layers = list(decisions_store)
+    counts = {
+        layer: len(entry.get("record_ids", []))
+        for layer, entry in decisions_store.items()
+    }
+    return layers, counts
+
+
+def _select_store_records_by_metadata(
+    store: MemoryStore,
+    *,
+    event: str,
+    boundary_kind: str,
+    match_key: str,
+    match_value: Any,
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for layer in store.topology.layer_names:
+        record_ids = [
+            record.record_id
+            for record in store.iter_records(layer)
+            if record.metadata.get(match_key) == match_value
+        ]
+        if not record_ids:
+            continue
+        out[layer] = {
+            "decision": True,
+            "record_ids": record_ids,
+            "selector": {
+                "kind": "boundary_match",
+                "event": event,
+                "boundary_kind": boundary_kind,
+                "match_key": match_key,
+                "match_value": match_value,
+                "count": len(record_ids),
+            },
+        }
+    return out
+
+
+def _select_store_records_for_layer(
+    store: MemoryStore,
+    *,
+    layer: str,
+    selector: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    record_ids = [record.record_id for record in store.iter_records(layer)]
+    return {
+        layer: {
+            "decision": True,
+            "record_ids": record_ids,
+            "selector": {
+                **selector,
+                "count": len(record_ids),
+            },
+        }
+    }
+
+
 def _write_trace(
     packet: Packet,
     *,
     module_name: str,
     trace_key: str,
     decisions: list[bool],
+    decisions_store: dict[str, dict[str, Any]] | None = None,
     trace_payload: dict[str, Any] | None = None,
     per_unit_payload: list[dict[str, Any]] | None = None,
 ) -> Packet:
@@ -270,10 +385,14 @@ def _write_trace(
         "decisions": list(decisions),
         "per_unit": per_unit,
     }
+    decisions_store_layers, decisions_store_counts = _build_store_decisions_summary(decisions_store)
+    payload["decisions_store_layers"] = decisions_store_layers
+    payload["decisions_store_counts"] = decisions_store_counts
     if trace_payload:
         payload.update(trace_payload)
     trace[trace_key] = payload
-    return replace(packet, decisions=list(decisions), trace=trace)
+    next_decisions_store = decisions_store if decisions_store is not None else packet.decisions_store
+    return replace(packet, decisions=list(decisions), decisions_store=next_decisions_store, trace=trace)
 
 
 def _normalize_model_judge_output(output: Any, *, decision_mode: str, threshold: float) -> tuple[bool, dict[str, Any]]:
@@ -527,6 +646,83 @@ class BoundaryEventTrigger(_EventTrigger):
     _NAME_PREFIX = "boundary_event"
     _EVENT_SOURCE = "boundary"
 
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        units = self._require_units(packet)
+        observed_events = _resolve_events(packet)
+        normalized_observed = [_normalized_boundary_event_name(event) for event in observed_events]
+        normalized_accepted = [_normalized_boundary_event_name(event) for event in self.accepted_events]
+
+        if not observed_events:
+            matched = self.default_decision
+            matched_events: list[str] = []
+        else:
+            observed_set = set(normalized_observed)
+            accepted_set = set(normalized_accepted)
+            if self.match_mode == "all":
+                matched = accepted_set.issubset(observed_set)
+            else:
+                matched = bool(accepted_set & observed_set)
+            if self.invert:
+                matched = not matched
+            matched_events = [
+                event
+                for event, normalized in zip(observed_events, normalized_observed, strict=True)
+                if normalized in accepted_set
+            ]
+
+        decisions = _broadcast_decisions(len(units), matched)
+        matched_boundary_kinds = list(
+            dict.fromkeys(
+                normalized
+                for normalized in normalized_observed
+                if normalized in set(normalized_accepted) and normalized in _BOUNDARY_KIND_TO_MATCH_KEY
+            )
+        )
+
+        decisions_store: dict[str, dict[str, Any]] | None = None
+        boundary_kind: str | None = matched_boundary_kinds[0] if matched_boundary_kinds else None
+        match_key: str | None = None
+        match_value: Any = None
+        missing_match_key = False
+        if matched and boundary_kind is not None:
+            match_key = _BOUNDARY_KIND_TO_MATCH_KEY[boundary_kind]
+            match_value = _resolve_boundary_match_value(packet, match_key)
+            if match_value is None:
+                missing_match_key = True
+            else:
+                primary_event = matched_events[0] if matched_events else boundary_kind
+                decisions_store = _select_store_records_by_metadata(
+                    store,
+                    event=primary_event,
+                    boundary_kind=boundary_kind,
+                    match_key=match_key,
+                    match_value=match_value,
+                )
+
+        return (
+            _write_trace(
+                packet,
+                module_name=self.spec.name,
+                trace_key=self._trace_key(),
+                decisions=decisions,
+                decisions_store=decisions_store,
+                trace_payload={
+                    "source": self._EVENT_SOURCE,
+                    "accepted_events": list(self.accepted_events),
+                    "matched_events": matched_events,
+                    "observed_events": list(observed_events),
+                    "match_mode": self.match_mode,
+                    "default_decision": self.default_decision,
+                    "invert": self.invert,
+                    "boundary_kind": boundary_kind,
+                    "match_key": match_key,
+                    "match_value": match_value,
+                    "missing_match_key": missing_match_key,
+                },
+            ),
+            store,
+        )
+
 
 class RuntimeEventTrigger(_EventTrigger):
     """Trigger from externally provided runtime callback events."""
@@ -564,6 +760,8 @@ class RuntimeEventTrigger(_EventTrigger):
         effective_events = list(observed_events)
         computed_runtime_events: list[str] = []
         pressure_payload: dict[str, Any] = {}
+        pressure_snapshot: dict[str, Any] | None = None
+        pressure_target_layer: str | None = None
 
         if "memory_pressure" in self.accepted_events and self.pressure_threshold is not None:
             target_layer, target_layer_mode = _resolve_pressure_layer(
@@ -572,6 +770,8 @@ class RuntimeEventTrigger(_EventTrigger):
                 explicit_target_layer=self.target_layer,
             )
             snapshot = _layer_pressure_snapshot(store, target_layer)
+            pressure_snapshot = snapshot
+            pressure_target_layer = target_layer
             memory_pressure = snapshot["memory_pressure"]
             if memory_pressure is not None and memory_pressure >= self.pressure_threshold:
                 computed_runtime_events.append("memory_pressure")
@@ -583,20 +783,56 @@ class RuntimeEventTrigger(_EventTrigger):
                 **_pressure_trace_payload(snapshot),
             }
         else:
-            pressure_payload = {
-                "pressure_threshold": self.pressure_threshold,
-                "computed_runtime_events": [],
-            }
+            if "memory_pressure" in self.accepted_events:
+                try:
+                    pressure_target_layer, target_layer_mode = _resolve_pressure_layer(
+                        packet,
+                        slot=self.slot,
+                        explicit_target_layer=self.target_layer,
+                    )
+                    pressure_snapshot = _layer_pressure_snapshot(store, pressure_target_layer)
+                    pressure_payload = {
+                        "target_layer_mode": target_layer_mode,
+                        "pressure_threshold": self.pressure_threshold,
+                        "computed_runtime_events": [],
+                        **_pressure_trace_payload(pressure_snapshot),
+                    }
+                except ValueError:
+                    pressure_payload = {
+                        "pressure_threshold": self.pressure_threshold,
+                        "computed_runtime_events": [],
+                    }
+            else:
+                pressure_payload = {
+                    "pressure_threshold": self.pressure_threshold,
+                    "computed_runtime_events": [],
+                }
 
         matched = self._match(effective_events)
         decisions = _broadcast_decisions(len(units), matched)
         matched_events = [event for event in self.accepted_events if event in set(effective_events)]
+        decisions_store: dict[str, dict[str, Any]] | None = None
+        if matched and "memory_pressure" in matched_events and pressure_target_layer is not None:
+            selector = {
+                "kind": "layer_all",
+                "event": "memory_pressure",
+                "match_key": "layer",
+                "match_value": pressure_target_layer,
+            }
+            if pressure_snapshot is not None:
+                selector.update(_pressure_trace_payload(pressure_snapshot))
+            decisions_store = _select_store_records_for_layer(
+                store,
+                layer=pressure_target_layer,
+                selector=selector,
+            )
         return (
             _write_trace(
                 packet,
                 module_name=self.spec.name,
                 trace_key=self._trace_key(),
                 decisions=decisions,
+                decisions_store=decisions_store,
                 trace_payload={
                     "source": self._EVENT_SOURCE,
                     "accepted_events": list(self.accepted_events),
@@ -666,6 +902,7 @@ class ScalarRuleTrigger(_BaseTrigger):
 
         if self.signal_key == "memory_pressure":
             snapshot_cache: dict[str, dict[str, Any]] = {}
+            decisions_store: dict[str, dict[str, Any]] | None = None
 
             def snapshot_for(unit_index: int | None = None) -> tuple[dict[str, Any], str]:
                 target_layer, target_layer_mode = _resolve_pressure_layer(
@@ -699,6 +936,19 @@ class ScalarRuleTrigger(_BaseTrigger):
                         **_pressure_trace_payload(snapshot),
                     }
                 )
+                if decision:
+                    decisions_store = _select_store_records_for_layer(
+                        store,
+                        layer=snapshot["target_layer"],
+                        selector={
+                            "kind": "layer_all",
+                            "event": "memory_pressure",
+                            "match_key": "layer",
+                            "match_value": snapshot["target_layer"],
+                            "source": "scalar_rule",
+                            **_pressure_trace_payload(snapshot),
+                        },
+                    )
             else:
                 normalized_values: list[float] = []
                 missing_flags: list[bool] = []
@@ -740,6 +990,29 @@ class ScalarRuleTrigger(_BaseTrigger):
                 trace_payload["target_layer_mode"] = target_layer_mode
                 if len(unique_layers) == 1 and per_unit_payload:
                     trace_payload.update(_pressure_trace_payload(per_unit_payload[0]))
+                selected_layers = {
+                    payload["target_layer"]
+                    for payload, decision in zip(per_unit_payload, decisions, strict=True)
+                    if decision
+                }
+                if selected_layers:
+                    decisions_store = {}
+                    for layer in sorted(selected_layers):
+                        snapshot = snapshot_cache[layer]
+                        decisions_store.update(
+                            _select_store_records_for_layer(
+                                store,
+                                layer=layer,
+                                selector={
+                                    "kind": "layer_all",
+                                    "event": "memory_pressure",
+                                    "match_key": "layer",
+                                    "match_value": layer,
+                                    "source": "scalar_rule",
+                                    **_pressure_trace_payload(snapshot),
+                                },
+                            )
+                        )
 
             return (
                 _write_trace(
@@ -747,6 +1020,7 @@ class ScalarRuleTrigger(_BaseTrigger):
                     module_name=self.spec.name,
                     trace_key=self._trace_key(),
                     decisions=decisions,
+                    decisions_store=decisions_store,
                     trace_payload=trace_payload,
                     per_unit_payload=per_unit_payload,
                 ),

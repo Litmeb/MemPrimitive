@@ -15,6 +15,7 @@ from memprimitive.baselines import (
     AppendOnlyEvolution,
     AppendOrganization,
     BasicRepresentation,
+    BoundaryEventTrigger,
     BufferRetrieval,
     ConcatenateReadout,
     BulletListReadout,
@@ -26,6 +27,7 @@ from memprimitive.baselines import (
     GraphNeighborContextTraceEvolution,
     GraphNeighborRetrieval,
     GraphSeedAndExpandRetrieval,
+    HierarchicalEvolution,
     LayerAwareRetrieval,
     LinkStrengtheningEvolution,
     ModelJudgeTrigger,
@@ -45,7 +47,7 @@ from memprimitive.baselines import (
 from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
 )
-from memprimitive.core import MemoryStore, ModuleSpec, Packet, StoreLayerSpec, StoreTopology
+from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet, StoreLayerSpec, StoreTopology
 from memprimitive.interfaces import RetrievalModule
 from memprimitive.pipeline import MemoryPipeline
 
@@ -270,6 +272,20 @@ def test_pipeline_supports_unified_trigger_classes_across_write_and_evolution_sl
             [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
         )
     )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior default memory", metadata={"session_id": "sess-1"}),
+            layer="default",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior semantic memory", metadata={"session_id": "sess-1"}),
+            layer="semantic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
     pipeline = MemoryPipeline(
         write_trigger=BoundaryEventTrigger(accepted_events=("session_end",)),
         evolution_trigger=BoundaryEventTrigger(slot="evolution_trigger", accepted_events=("session_end",)),
@@ -281,15 +297,18 @@ def test_pipeline_supports_unified_trigger_classes_across_write_and_evolution_sl
         Observation(
             text="Alice likes jasmine tea.",
             source="dialogue",
-            metadata={"trigger": {"events": ["session_end"]}},
+            metadata={"session_id": "sess-1", "trigger": {"events": ["session_end"], "session_id": "sess-1"}},
         )
     )
 
     assert packet.trace["write_trigger"]["module"] == "boundary_event_write_trigger"
     assert packet.trace["evolution_trigger"]["module"] == "boundary_event_evolution_trigger"
     assert packet.decisions == [True]
-    assert pipeline.store.count("default") == 1
-    assert pipeline.store.count("semantic") == 1
+    assert packet.decisions_store is not None
+    assert packet.trace["write_trigger"]["decisions_store_counts"] == {"default": 1, "semantic": 1}
+    assert packet.trace["evolution_trigger"]["decisions_store_counts"] == {"default": 2, "semantic": 1}
+    assert pipeline.store.count("default") == 2
+    assert pipeline.store.count("semantic") == 2
 
 
 def test_pipeline_supports_runtime_and_scalar_trigger_combinations() -> None:
@@ -312,6 +331,155 @@ def test_pipeline_supports_runtime_and_scalar_trigger_combinations() -> None:
     assert packet.trace["write_trigger"]["decisions"] == [True]
     assert packet.trace["evolution_trigger"]["module"] == "runtime_event_evolution_trigger"
     assert packet.trace["evolution_trigger"]["decisions"] == [True]
+
+
+def test_pipeline_boundary_trigger_can_feed_hierarchical_evolution() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="profile", theme="semantic"),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(
+                text="prior session note",
+                metadata={"session_id": "sess-1", "doc_id": "doc-a", "subgoal_id": "sg-1"},
+            ),
+            layer="default",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=BoundaryEventTrigger(accepted_events=("session_end",)),
+        organization=AppendOrganization(target_layer="default"),
+        evolution_trigger=BoundaryEventTrigger(slot="evolution_trigger", accepted_events=("session_end",)),
+        memory_evolution=HierarchicalEvolution(
+            source_layer="default",
+            target_layer="profile",
+            extract_mode="copy",
+            extract_fields=("doc_id", "subgoal_id"),
+            group_by=("session_id",),
+        ),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="new session note",
+            source="dialogue",
+            metadata={
+                "session_id": "sess-1",
+                "doc_id": "doc-b",
+                "subgoal_id": "sg-2",
+                "trigger": {"events": ["session_end"], "session_id": "sess-1"},
+            },
+        )
+    )
+
+    assert packet.decisions_store is not None
+    assert packet.trace["evolution_trigger"]["decisions_store_counts"] == {"default": 2}
+    assert packet.trace["memory_evolution"]["module"] == "hierarchical_evolution"
+    assert packet.trace["memory_evolution"]["group_count"] == 1
+    assert pipeline.store.count("profile") == 1
+    profile_record = pipeline.store.iter_records("profile")[0]
+    assert profile_record.metadata["hierarchical"]["source_record_ids"] == ["rec-1", "rec-2"]
+    assert profile_record.metadata["hierarchical"]["field_payload"]["doc_id"] == ["doc-a", "doc-b"]
+    assert profile_record.metadata["hierarchical"]["group_key"] == {"session_id": "sess-1"}
+
+
+def test_pipeline_runtime_memory_pressure_records_decisions_store_summary() -> None:
+    from memprimitive.baselines import RuntimeEventTrigger, ScalarRuleTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic", settings={"record_budget": 2}),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior one"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior two"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=ScalarRuleTrigger(signal_key="importance", threshold=0.7),
+        organization=AppendOrganization(target_layer="episodic"),
+        evolution_trigger=RuntimeEventTrigger(accepted_events=("memory_pressure",), pressure_threshold=1.0),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Alice likes tea.",
+            source="dialogue",
+            metadata={"trigger": {"signals": {"importance": 0.9}}},
+        )
+    )
+
+    assert packet.trace["evolution_trigger"]["module"] == "runtime_event_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["matched_events"] == ["memory_pressure"]
+    assert packet.trace["evolution_trigger"]["decisions_store_counts"] == {"episodic": 3}
+    assert packet.decisions_store is not None
+    assert packet.decisions_store["episodic"]["selector"]["kind"] == "layer_all"
+
+
+def test_pipeline_scalar_memory_pressure_records_decisions_store_summary() -> None:
+    from memprimitive.baselines import ScalarRuleTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic", settings={"record_budget": 2}),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior one"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior two"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=ScalarRuleTrigger(signal_key="memory_pressure", threshold=1.0, target_layer="episodic"),
+        organization=AppendOrganization(target_layer="episodic"),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="Alice likes tea.",
+            source="dialogue",
+        )
+    )
+
+    assert packet.trace["write_trigger"]["module"] == "scalar_rule_write_trigger"
+    assert packet.trace["write_trigger"]["decisions_store_counts"] == {"episodic": 2}
+    assert packet.decisions_store is not None
+    assert packet.decisions_store["episodic"]["selector"]["kind"] == "layer_all"
+    assert packet.decisions_store["episodic"]["selector"]["source"] == "scalar_rule"
 
 
 def test_pipeline_end_to_end_supports_model_judge_trigger_with_reflection_generation() -> None:

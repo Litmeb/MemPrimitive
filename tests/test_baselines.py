@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from typing import Any
 import pytest
 
 from memprimitive.baselines.registry import (
@@ -109,6 +110,17 @@ def _seed_layer(store: MemoryStore, layer: str, texts: list[str]) -> None:
             text=text,
             timestamp=f"2026-01-01T00:00:{index:02d}Z",
             metadata={},
+        )
+        store.append(MemoryRecord.from_unit(unit=unit, layer=layer, sequence_id=store.next_sequence_id()))
+
+
+def _seed_layer_with_metadata(store: MemoryStore, layer: str, units: list[dict[str, object]]) -> None:
+    for index, payload in enumerate(units, start=1):
+        unit = MemoryUnit(
+            unit_id=str(payload.get("unit_id", f"seed-{index}")),
+            text=str(payload.get("text", f"seed text {index}")),
+            timestamp=f"2026-01-01T00:00:{index:02d}Z",
+            metadata=dict(payload.get("metadata", {})),
         )
         store.append(MemoryRecord.from_unit(unit=unit, layer=layer, sequence_id=store.next_sequence_id()))
 
@@ -532,6 +544,83 @@ def test_boundary_event_trigger_matches_structural_events_for_both_slots() -> No
     assert evolution_packet.trace["evolution_trigger"]["source"] == "boundary"
 
 
+@pytest.mark.parametrize(
+    ("event_name", "match_key", "match_value"),
+    [
+        ("session_end", "session_id", "sess-1"),
+        ("turn_end", "turn_id", "turn-1"),
+        ("chunk_end", "chunk_id", "chunk-1"),
+        ("subgoal_end", "subgoal_id", "subgoal-1"),
+        ("episode_end", "episode_id", "episode-1"),
+    ],
+)
+def test_boundary_event_trigger_populates_decisions_store_for_matching_boundary(
+    event_name: str,
+    match_key: str,
+    match_value: str,
+) -> None:
+    from memprimitive.baselines import BoundaryEventTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic", theme="episode"),
+            ]
+        )
+    )
+    _seed_layer_with_metadata(
+        store,
+        "default",
+        [
+            {"text": "default match", "metadata": {match_key: match_value}},
+            {"text": "default miss", "metadata": {match_key: "other"}},
+        ],
+    )
+    _seed_layer_with_metadata(
+        store,
+        "episodic",
+        [
+            {"text": "episodic match", "metadata": {match_key: match_value}},
+            {"text": "episodic other", "metadata": {"session_id": "other-session"}},
+        ],
+    )
+    packet, _ = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"events": [event_name], match_key: match_value}},
+    )
+
+    packet_out, _ = BoundaryEventTrigger(accepted_events=(event_name,)).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.decisions_store is not None
+    assert set(packet_out.decisions_store) == {"default", "episodic"}
+    assert packet_out.decisions_store["default"]["record_ids"] == ["rec-1"]
+    assert packet_out.decisions_store["episodic"]["record_ids"] == ["rec-3"]
+    assert packet_out.trace["write_trigger"]["boundary_kind"] == match_key.removesuffix("_id")
+    assert packet_out.trace["write_trigger"]["match_key"] == match_key
+    assert packet_out.trace["write_trigger"]["match_value"] == match_value
+    assert packet_out.trace["write_trigger"]["decisions_store_counts"] == {"default": 1, "episodic": 1}
+
+
+def test_boundary_event_trigger_keeps_decisions_but_records_missing_match_key() -> None:
+    from memprimitive.baselines import BoundaryEventTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"events": ["session_end"]}},
+    )
+
+    packet_out, _ = BoundaryEventTrigger(accepted_events=("session_end",)).run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.decisions_store is None
+    assert packet_out.trace["write_trigger"]["missing_match_key"] is True
+    assert packet_out.trace["write_trigger"]["match_key"] == "session_id"
+    assert packet_out.trace["write_trigger"]["match_value"] is None
+    assert packet_out.trace["write_trigger"]["decisions_store_layers"] == []
+
+
 def test_runtime_event_trigger_uses_packet_events_when_trigger_metadata_missing() -> None:
     from memprimitive.baselines import AppendOrganization, RuntimeEventTrigger
 
@@ -582,6 +671,10 @@ def test_runtime_event_trigger_computes_memory_pressure_event_from_record_budget
     assert packet_out.trace["evolution_trigger"]["record_pressure"] == 1.5
     assert packet_out.trace["evolution_trigger"]["token_pressure"] is None
     assert packet_out.trace["evolution_trigger"]["target_layer"] == "episodic"
+    assert packet_out.decisions_store is not None
+    assert packet_out.decisions_store["episodic"]["record_ids"] == ["rec-1", "rec-2", "rec-3"]
+    assert packet_out.decisions_store["episodic"]["selector"]["kind"] == "layer_all"
+    assert packet_out.trace["evolution_trigger"]["decisions_store_counts"] == {"episodic": 3}
 
 
 def test_runtime_event_trigger_keeps_literal_memory_pressure_event_without_threshold() -> None:
@@ -608,6 +701,33 @@ def test_runtime_event_trigger_keeps_literal_memory_pressure_event_without_thres
     assert packet_out.trace["evolution_trigger"]["observed_events"] == ["memory_pressure"]
     assert packet_out.trace["evolution_trigger"]["computed_runtime_events"] == []
     assert packet_out.trace["evolution_trigger"]["pressure_threshold"] is None
+    assert packet_out.decisions_store is not None
+    assert packet_out.decisions_store["episodic"]["record_ids"] == ["rec-1"]
+
+
+def test_runtime_event_trigger_skips_decisions_store_when_memory_pressure_not_triggered() -> None:
+    from memprimitive.baselines import AppendOrganization, RuntimeEventTrigger
+
+    store = _budgeted_store(layer_name="episodic", record_budget=10)
+    packet, _ = _represented_packet("Alice likes tea.")
+    packet, store = AppendOrganization(target_layer="episodic").run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    packet_out, _ = RuntimeEventTrigger(
+        accepted_events=("memory_pressure",),
+        pressure_threshold=2.0,
+    ).run(packet, store)
+
+    assert packet_out.decisions == [False]
+    assert packet_out.decisions_store is None
+    assert packet_out.trace["evolution_trigger"]["decisions_store_layers"] == []
 
 
 def test_runtime_event_trigger_memory_pressure_requires_single_layer_for_broadcast_resolution() -> None:
@@ -688,6 +808,11 @@ def test_scalar_rule_trigger_memory_pressure_supports_record_and_token_budgets()
     assert packet_out.trace["write_trigger"]["memory_pressure"] == pytest.approx(4 / 3)
     assert packet_out.trace["write_trigger"]["active_budget_types"] == ["record_budget", "token_budget"]
     assert packet_out.trace["write_trigger"]["per_unit"][0]["target_layer"] == "episodic"
+    assert packet_out.decisions_store is not None
+    assert packet_out.decisions_store["episodic"]["record_ids"] == ["rec-1", "rec-2"]
+    assert packet_out.decisions_store["episodic"]["selector"]["kind"] == "layer_all"
+    assert packet_out.decisions_store["episodic"]["selector"]["source"] == "scalar_rule"
+    assert packet_out.trace["write_trigger"]["decisions_store_counts"] == {"episodic": 2}
 
 
 def test_scalar_rule_trigger_memory_pressure_supports_per_unit_resolution_from_placements() -> None:
@@ -729,6 +854,10 @@ def test_scalar_rule_trigger_memory_pressure_supports_per_unit_resolution_from_p
     assert packet_out.trace["evolution_trigger"]["per_unit"][0]["record_pressure"] == 0.25
     assert packet_out.trace["evolution_trigger"]["per_unit"][1]["target_layer"] == "semantic"
     assert packet_out.trace["evolution_trigger"]["per_unit"][1]["record_pressure"] == 1.0
+    assert packet_out.decisions_store is not None
+    assert set(packet_out.decisions_store) == {"semantic"}
+    assert packet_out.decisions_store["semantic"]["record_ids"] == ["rec-2", "rec-3"]
+    assert packet_out.trace["evolution_trigger"]["decisions_store_counts"] == {"semantic": 2}
 
 
 def test_scalar_rule_trigger_memory_pressure_requires_explicit_write_layer() -> None:
@@ -815,6 +944,15 @@ def test_new_trigger_classes_are_registered_in_baseline_exports() -> None:
         "ModelJudgeTrigger",
         "PeriodicMaintenanceTrigger",
         "IdleMaintenanceTrigger",
+    }.issubset(exported)
+
+
+def test_hierarchical_classes_are_registered_in_baseline_exports() -> None:
+    exported = registered_baseline_class_names()
+
+    assert {
+        "HierarchicalOrganization",
+        "HierarchicalEvolution",
     }.issubset(exported)
 
 
@@ -914,6 +1052,30 @@ class _WrapperShapeAMEMRuntime(_FakeAMEMRuntime):
         if "update each neighbor note's context and tags" in lowered_system:
             return payload["updates"]
         return payload
+
+
+class _FakeHierarchicalRuntime:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def require_llm(self, *, capability: str) -> None:
+        return None
+
+    def json(self, *, system: str, user: str):
+        payload = json.loads(user)
+        self.calls.append({"system": system, "payload": payload})
+        fields = payload["extract_fields"]
+        records = payload["records"]
+        group_key = payload["group_key"]
+        if "CUSTOM HIERARCHICAL PROMPT" in system:
+            return {
+                field: f"custom::{field}::{group_key.get('session_id', 'all')}::{len(records)}"
+                for field in fields
+            }
+        return {
+            field: f"generated::{field}::{group_key.get('session_id', 'all')}::{len(records)}"
+            for field in fields
+        }
 
 
 
@@ -2355,6 +2517,308 @@ def test_layer_move_evolution_copy_appends_unit_to_target_layer() -> None:
 
     assert store.count("semantic") == 1
     assert packet_out.trace["memory_evolution"]["effects"][0]["move_style"] == "copy_append"
+
+
+def test_hierarchical_organization_copy_uses_decisions_store_selection() -> None:
+    from memprimitive.baselines import HierarchicalOrganization
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(
+        store,
+        "default",
+        [
+            {"text": "doc-a note", "metadata": {"session_id": "sess-1", "doc_id": "doc-a", "subgoal_id": "sg-1"}},
+            {"text": "doc-b note", "metadata": {"session_id": "sess-2", "doc_id": "doc-b", "subgoal_id": "sg-2"}},
+        ],
+    )
+    packet, _ = _represented_packet("incoming note")
+    packet = Packet(
+        observation=packet.observation,
+        units=packet.units,
+        decisions=[True],
+        decisions_store={
+            "default": {
+                "decision": True,
+                "record_ids": ["rec-1"],
+                "selector": {"kind": "boundary_match"},
+            }
+        },
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalOrganization(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="copy",
+        extract_fields=("doc_id", "subgoal_id"),
+    ).run(packet, store)
+
+    written = store.iter_records("semantic")
+    assert len(written) == 1
+    assert packet_out.placements is not None
+    assert packet_out.placements[0].target_layer == "semantic"
+    assert packet_out.trace["organization"]["selection_source"] == "decisions_store"
+    assert packet_out.trace["organization"]["selected_record_count"] == 1
+    assert packet_out.trace["organization"]["append_current_units"] is False
+    assert written[0].metadata["hierarchical"]["source_record_ids"] == ["rec-1"]
+    assert written[0].metadata["hierarchical"]["field_payload"]["doc_id"] == "doc-a"
+
+
+def test_hierarchical_evolution_copy_uses_evolution_decisions_store_selection() -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(
+        store,
+        "default",
+        [
+            {"text": "doc-a note", "metadata": {"session_id": "sess-1", "doc_id": "doc-a"}},
+            {"text": "doc-b note", "metadata": {"session_id": "sess-2", "doc_id": "doc-b"}},
+        ],
+    )
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        decisions_store={
+            "default": {
+                "decision": True,
+                "record_ids": ["rec-2"],
+                "selector": {"kind": "boundary_match"},
+            }
+        },
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalEvolution(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="copy",
+        extract_fields=("doc_id",),
+    ).run(packet, store)
+
+    written = store.iter_records("semantic")
+    assert len(written) == 1
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions_store"
+    assert packet_out.trace["memory_evolution"]["selected_record_count"] == 1
+    assert packet_out.trace["memory_evolution"]["effects"][0]["source_record_ids"] == ["rec-2"]
+    assert written[0].text == "doc-b"
+
+
+def test_hierarchical_copy_grouping_and_dedup_preserve_unique_values() -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(
+        store,
+        "default",
+        [
+            {"text": "a1", "metadata": {"session_id": "sess-1", "doc_id": "doc-a"}},
+            {"text": "a2", "metadata": {"session_id": "sess-1", "doc_id": "doc-a"}},
+            {"text": "b1", "metadata": {"session_id": "sess-2", "doc_id": "doc-b"}},
+            {"text": "b2", "metadata": {"session_id": "sess-2", "doc_id": "doc-c"}},
+        ],
+    )
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        decisions_store={
+            "default": {
+                "decision": True,
+                "record_ids": ["rec-1", "rec-2", "rec-3", "rec-4"],
+                "selector": {"kind": "boundary_match"},
+            }
+        },
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalEvolution(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="copy",
+        extract_fields=("doc_id",),
+        group_by=("session_id",),
+    ).run(packet, store)
+
+    written = store.iter_records("semantic")
+    assert len(written) == 2
+    assert packet_out.trace["memory_evolution"]["group_count"] == 2
+    first_payload = written[0].metadata["hierarchical"]["field_payload"]["doc_id"]
+    second_payload = written[1].metadata["hierarchical"]["field_payload"]["doc_id"]
+    assert first_payload == "doc-a"
+    assert second_payload == ["doc-b", "doc-c"]
+    assert written[0].metadata["hierarchical"]["group_key"] == {"session_id": "sess-1"}
+    assert written[1].metadata["hierarchical"]["group_key"] == {"session_id": "sess-2"}
+
+
+def test_hierarchical_modules_fall_back_to_source_layer_scan_when_decisions_store_missing() -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(
+        store,
+        "default",
+        [
+            {"text": "a1", "metadata": {"doc_id": "doc-a"}},
+            {"text": "a2", "metadata": {"doc_id": "doc-b"}},
+        ],
+    )
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalEvolution(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="copy",
+        extract_fields=("doc_id",),
+    ).run(packet, store)
+
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "source_layer_scan"
+    assert packet_out.trace["memory_evolution"]["selected_record_count"] == 3
+    assert store.count("semantic") == 1
+    assert store.iter_records("semantic")[0].metadata["hierarchical"]["field_payload"]["doc_id"] == ["doc-a", "doc-b", None]
+
+
+def test_hierarchical_modules_noop_when_decisions_store_excludes_source_layer() -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(store, "default", [{"text": "a1", "metadata": {"doc_id": "doc-a"}}])
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        decisions_store={
+            "other": {"decision": True, "record_ids": ["rec-1"], "selector": {"kind": "manual"}}
+        },
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalEvolution(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="copy",
+        extract_fields=("doc_id",),
+    ).run(packet, store)
+
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions_store"
+    assert packet_out.trace["memory_evolution"]["selected_record_count"] == 0
+    assert packet_out.trace["memory_evolution"]["effects"] == []
+    assert store.count("semantic") == 0
+
+
+def test_hierarchical_generate_mode_supports_default_and_custom_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+    from memprimitive.utils import _runtime
+
+    fake_runtime = _FakeHierarchicalRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(
+        store,
+        "default",
+        [
+            {"text": "a1", "metadata": {"session_id": "sess-1"}},
+            {"text": "a2", "metadata": {"session_id": "sess-1"}},
+        ],
+    )
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        decisions_store={
+            "default": {"decision": True, "record_ids": ["rec-1", "rec-2"], "selector": {"kind": "manual"}}
+        },
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalEvolution(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="generate",
+        extract_fields=("summary", "profile"),
+        group_by=("session_id",),
+        prompt="CUSTOM HIERARCHICAL PROMPT",
+    ).run(packet, store)
+
+    written = store.iter_records("semantic")
+    assert len(written) == 1
+    assert fake_runtime.calls
+    assert fake_runtime.calls[0]["system"] == "CUSTOM HIERARCHICAL PROMPT"
+    assert written[0].text == "summary: custom::summary::sess-1::2\nprofile: custom::profile::sess-1::2"
+    assert written[0].metadata["hierarchical"]["field_payload"]["summary"] == "custom::summary::sess-1::2"
+    assert packet_out.trace["memory_evolution"]["active_group_keys"] == [{"session_id": "sess-1"}]
+
+
+def test_hierarchical_generate_mode_uses_default_prompt_when_custom_prompt_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+    from memprimitive.utils import _runtime
+
+    fake_runtime = _FakeHierarchicalRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    _seed_layer_with_metadata(store, "default", [{"text": "a1", "metadata": {"session_id": "sess-1"}}])
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        decisions_store={
+            "default": {"decision": True, "record_ids": ["rec-1"], "selector": {"kind": "manual"}}
+        },
+        trace=packet.trace,
+    )
+
+    _, store = HierarchicalEvolution(
+        source_layer="default",
+        target_layer="semantic",
+        extract_mode="generate",
+        extract_fields=("summary",),
+    ).run(packet, store)
+
+    assert fake_runtime.calls[0]["system"] != "CUSTOM HIERARCHICAL PROMPT"
+    assert "higher-level hierarchical memory record" in fake_runtime.calls[0]["system"]
+    assert store.iter_records("semantic")[0].text == "generated::summary::all::1"
 
 
 def test_keyword_count_retrieval_prefers_keyword_hits() -> None:

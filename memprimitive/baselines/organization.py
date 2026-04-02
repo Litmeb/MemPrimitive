@@ -16,6 +16,14 @@ from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
 
 from ..utils._graph_family import graph_metadata_for_unit
+from ..utils._hierarchical_family import (
+    append_hierarchical_records,
+    build_fixed_placements,
+    group_records,
+    require_aligned_units_decisions,
+    resolve_source_records,
+    validate_hierarchical_config,
+)
 from ..utils._reflexion_family import DEFAULT_TRIAL_LAYER
 from ..utils._trace import copy_trace
 
@@ -368,6 +376,80 @@ class GraphAppendLinkReadyOrganization(OrganizationModule):
         return replace(packet, placements=placements, trace=trace), store
 
 
+class HierarchicalOrganization(OrganizationModule):
+    """Aggregate selected source-layer records into higher-level target records."""
+
+    spec = ModuleSpec(
+        name="hierarchical_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        side_effects=("modify_store", "append_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        source_layer: str,
+        target_layer: str,
+        extract_mode: str,
+        extract_fields: tuple[str, ...],
+        group_by: tuple[str, ...] = (),
+        prompt: str | None = None,
+    ) -> None:
+        config = validate_hierarchical_config(
+            source_layer=source_layer,
+            target_layer=target_layer,
+            extract_mode=extract_mode,
+            extract_fields=extract_fields,
+            group_by=group_by,
+            prompt=prompt,
+        )
+        self.source_layer = config["source_layer"]
+        self.target_layer = config["target_layer"]
+        self.extract_mode = config["extract_mode"]
+        self.extract_fields = config["extract_fields"]
+        self.group_by = config["group_by"]
+        self.prompt = config["prompt"]
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        require_aligned_units_decisions(packet, include_placements=False)
+
+        placements = build_fixed_placements(packet, target_layer=self.target_layer)
+        selected_records, selection_source = resolve_source_records(
+            packet,
+            store,
+            source_layer=self.source_layer,
+        )
+        grouped = group_records(selected_records, group_by=self.group_by)
+        effects = append_hierarchical_records(
+            store,
+            source_layer=self.source_layer,
+            target_layer=self.target_layer,
+            extract_mode=self.extract_mode,
+            extract_fields=self.extract_fields,
+            group_by=self.group_by,
+            grouped_records=grouped,
+            prompt=self.prompt,
+        )
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "source_layer": self.source_layer,
+            "target_layer": self.target_layer,
+            "extract_mode": self.extract_mode,
+            "extract_fields": list(self.extract_fields),
+            "group_by": list(self.group_by),
+            "selection_source": selection_source,
+            "selected_record_count": len(selected_records),
+            "group_count": len(grouped),
+            "written_record_ids": [effect["record_id"] for effect in effects],
+            "append_current_units": False,
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "organization"
 BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
@@ -375,4 +457,5 @@ BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     GraphAppendOrganization,
     PlacementWithoutAppendOrganization,
     GraphAppendLinkReadyOrganization,
+    HierarchicalOrganization,
 )
