@@ -1,14 +1,14 @@
-閻╊喗鐖ｉ弰顖濐唨 memory DSL 娑撳秴褰ч弰?taxonomy閿涘矁鈧本妲告稉鈧稉?**閸欘垳绮嶉崥鍫涒偓浣稿讲閹兼粎鍌ㄩ妴浣稿讲婢跺秶鏁ら妴浣稿讲閺囨寧宕?* 閻ㄥ嫮閮寸紒鐕傜礉闁絼绠炲В蹇庨嚋鐎涙顔岄張鈧總浠嬪厴鐎规矮绠熼幋鎰娑擃亝鐖ｉ崙鍡樐侀崸妤佸复閸欙綇绱濋懓灞肩瑝閺勵垰褰ч崘娆愬灇闁板秶鐤嗘い骞库偓?
+目标是让 memory DSL 不只是 taxonomy，而是一个 **可组合、可搜索、可复用、可替换** 的系统，那么每个字段最好都定义成一个标准模块接口，而不是只写成配置项。
 
-* **DSL 鐏?*閿涙碍寮挎潻鎵兇缂佺喓鏁遍崫顏冪昂濡€虫健缂佸嫭鍨?
-* **Interface 鐏?*閿涙俺顫夌€规碍鐦℃稉顏吥侀崸妤€鎮嗘禒鈧稊鍫涒偓浣告倷娴犫偓娑?
-* **Implementation 鐏?*閿涙艾鍙挎担鎾剁暬濞夋洖骞撶€圭偟骞囨潻娆庣昂閹恒儱褰?
+* **DSL 层**：描述系统由哪些模块组成
+* **Interface 层**：规定每个模块吃什么、吐什么
+* **Implementation 层**：具体算法去实现这些接口
 
 ---
 
-# 1. 閹缍嬮幀婵婄熅閿涙碍濡?memory system 閻鍨氭稉鈧弶鈩冩殶閹诡喗绁?
+# 1. 总体思路：把 memory system 看成一条数据流
 
-閸欘垯浜掗幎濠冩殻娑擃亞閮寸紒鐔稿▕鐠炩剝鍨氶敍?
+可以把整个系统抽象成：
 
 ```text
 raw input
@@ -22,47 +22,47 @@ raw input
   -> downstream agent
 ```
 
-閹碘偓娴犮儲鐦℃稉顏吥侀崸妤呭厴鎼存棁顕氶弰顖ょ窗
+所以每个模块都应该是：
 
 ```text
 Module: InputState -> OutputArtifact (+ side effects on memory store)
 ```
 
-娴ｅ棜绻栭柌灞炬箒娑撯偓娑擃亜鍙ч柨顔惧仯閿?
+但这里有一个关键点：
 
-**memory 濡€虫健娑撳秴褰ч弰顖滃嚱閸戣姤鏆?*閿涘苯绶㈡径姘侀崸妞剧窗娣囶喗鏁?store閵?
-閹碘偓娴犮儲甯撮崣锝嗘付婵傜晫绮烘稉鈧幋鎰瑓闂堛垼绻栫粔宥呰埌瀵骏绱?
+**memory 模块不只是纯函数**，很多模块会修改 store。
+所以接口最好统一成下面这种形式：
 
 ```python
 output, new_store, aux = module(input, store, context, config)
 ```
 
-娑旂喎姘ㄩ弰顖濐嚛閿涘本鐦℃稉顏吥侀崸妤呭厴閹恒儲鏁归敍?
+也就是说，每个模块都接收：
 
-* `input`閿涙艾缍嬮崜宥堫洣婢跺嫮鎮婇惃鍕嚠鐠?
-* `store`閿涙艾缍嬮崜?memory store
-* `context`閿涙俺绻嶇悰灞肩瑐娑撳鏋?
-* `config`閿涙碍膩閸ф寮弫?
+* `input`：当前要处理的对象
+* `store`：当前 memory store
+* `context`：运行上下文
+* `config`：模块参数
 
-鏉╂柨娲栭敍?
+返回：
 
-* `output`閿涙矮绶垫稉瀣埗娴ｈ法鏁ら惃鍕波閺?
-* `new_store`閿涙碍娲块弬鏉挎倵閻?store
-* `aux`閿涙矮鑵戦梻鏉戝瀻閺佽埇鈧焦妫╄箛妞尖偓涔紃ace閵嗕浇袙闁插﹣淇婇幁?
+* `output`：供下游使用的结果
+* `new_store`：更新后的 store
+* `aux`：中间分数、日志、trace、解释信息
 
-鏉╂瑤绱伴棃鐐茬埗闁倸鎮庡Ο鈥虫健閸栨牕鐤勬灞肩瑢閹兼粎鍌ㄩ妴?
+这会非常适合模块化实验与搜索。
 
 ---
 
-# 2. 閸忓牆鐣炬稊澶婂殤娑擃亜鍙忕仦鈧弽鍥у櫙鐎电钖?
+# 2. 先定义几个全局标准对象
 
-閸︺劏鐨ョ€涙顔岄幒銉ュ經閸撳稄绱濋崗鍫濈暰娑斿鍙忕化鑽ょ埠閸忓彉闊╅惃鍕殶閹诡喚琚崹瀣ㄢ偓鍌欑瑝閻掕埖鐦℃稉顏吥侀崸妤呭厴閸氬嫯顕╅崥鍕樈閵?
+在谈字段接口前，先定义全系统共享的数据类型。不然每个模块都各说各话。
 
 ---
 
 ## 2.1 Observation
 
-鐞涖劎銇氭径鏍劥鏉堟挸鍙嗛妴?
+表示外部输入。
 
 ```python
 Observation = {
@@ -79,7 +79,7 @@ Observation = {
 
 ## 2.2 MemoryUnit
 
-鐞涖劎銇氶張鈧亸蹇氼唶韫囧棗宕熼崗鍐︹偓?
+表示最小记忆单元。
 
 ```python
 MemoryUnit = {
@@ -107,7 +107,7 @@ MemoryUnit = {
 
 ## 2.3 MemoryStore
 
-鐞涖劎銇氶弫缈犻嚋 memory 閻樿埖鈧降鈧?
+表示整个 memory 状态。
 
 ```python
 MemoryStore = {
@@ -135,7 +135,7 @@ MemoryStore = {
 
 ## 2.4 Query
 
-鐞涖劎銇?retrieval 閻ㄥ嫭鐓＄拠顫偓?
+表示 retrieval 的查询。
 
 ```python
 Query = {
@@ -153,7 +153,7 @@ Query = {
 
 ## 2.5 RetrievedContext
 
-鐞涖劎銇?retrieval 缂佹挻鐏夐妴?
+表示 retrieval 结果。
 
 ```python
 RetrievedContext = {
@@ -168,7 +168,7 @@ RetrievedContext = {
 
 ## 2.6 AgentContext
 
-鐞涖劎銇氭潻鎰攽閺冩湹绗傛稉瀣瀮閵?
+表示运行时上下文。
 
 ```python
 AgentContext = {
@@ -183,17 +183,17 @@ AgentContext = {
 
 ---
 
-# 3. 濮ｅ繋閲滅€涙顔屾俊鍌欑秿鐎规矮绠熼弽鍥у櫙閹恒儱褰?
+# 3. 每个字段如何定义标准接口
 
-娑撳娼版潻娑樺弳闁插秶鍋ｉ妴?
+下面进入重点。
 
 ---
 
 ## A. Unit Formation Interface
 
-鐎瑰啳绀嬬拹锝嗗Ω閸樼喎顫?observation 閸掑洦鍨?memory units閵?
+它负责把原始 observation 切成 memory units。
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def unit_formation(
@@ -205,20 +205,20 @@ def unit_formation(
     ...
 ```
 
-鏉╂柨娲栭敍?
+返回：
 
-* `list[MemoryUnit]`閿涙艾鑸伴幋鎰畱鐠佹澘绻傞崡鏇炲帗
-* `dict`閿涙瓫ux閿涘本鐦俊鍌涘▕閸欐牞鐦夐幑顔衡偓涔竌rser logits閵嗕浇袝閸欐垵甯崶?
+* `list[MemoryUnit]`：形成的记忆单元
+* `dict`：aux，比如抽取证据、parser logits、触发原因
 
-### 鏉堟挸鍙嗙拠顓濈疅
+### 输入语义
 
-* `observation`閿涙矮绔撮弶鈩冩煀鏉堟挸鍙?
-* `store`閿涙艾褰查柅澶涚礉閻劋绨?entity-aware parsing
-* `context`閿涙艾缍嬮崜宥勬崲閸斅扳偓浣割嚠鐠囨繂宸婚崣鑼搼
+* `observation`：一条新输入
+* `store`：可选，用于 entity-aware parsing
+* `context`：当前任务、对话历史等
 
-### 鏉堟挸鍤憰浣圭湴
+### 输出要求
 
-濮ｅ繋閲滄潏鎾冲毉 unit 閼峰啿鐨憰浣稿瘶閸氼偓绱?
+每个输出 unit 至少要包含：
 
 * `unit_id`
 * `unit_type`
@@ -226,7 +226,7 @@ def unit_formation(
 * `timestamp`
 * `metadata.provenance`
 
-### 鐢瓕顫嗙€圭偟骞?
+### 常见实现
 
 * `TurnSplitter`
 * `EventExtractor`
@@ -238,9 +238,9 @@ def unit_formation(
 
 ## B. Representation Interface
 
-鐎瑰啳绀嬬拹锝嗗Ω unit 鐟欏嫯瀵栭崠鏍ㄥ灇閺屾劗顫掔悰銊с仛閿涘苯鑻熺悰銉ュ弿 embedding / schema閵?
+它负责把 unit 规范化成某种表示，并补全 embedding / schema。
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def represent(
@@ -252,41 +252,41 @@ def represent(
     ...
 ```
 
-### 娴ｆ粎鏁?
+### 作用
 
-* 缂?unit 閸?embedding
-* 鏉烆剚鍨?kv / triple / frame
-* 鐞?metadata
-* 閺嶅洤鍣崠鏍х摟濞堥潧鎮?
+* 给 unit 加 embedding
+* 转成 kv / triple / frame
+* 补 metadata
+* 标准化字段名
 
-### 鏉堟挸鍤憰浣圭湴
+### 输出要求
 
-representation 濡€虫健娑撳秷鍏橀弨鐟板綁 unit 閻ㄥ嫯顕㈡稊澶庨煩娴犳枻绱濋崣顏囧厴閺€鐟板綁閹存牕顤冨楦裤€冪粈鍝勮埌瀵繈鈧?
+representation 模块不能改变 unit 的语义身份，只能改变或增强表示形式。
 
-娓氬顩ч敍?
+例如：
 
-* 閺傚洦婀版禍瀣杽 -> triple
-* 鐎电鐦?turn -> hybrid(text + embedding + entities)
+* 文本事实 -> triple
+* 对话 turn -> hybrid(text + embedding + entities)
 
 ---
 
 ## C. Organization Interface
 
-鐎瑰啳绀嬬拹?**ingest-time 閻ㄥ嫮绮嶇紒鍥︾瑢鐢瓕顫夐崘娆忓弳閹绘劒姘?*閵?
+它负责 **ingest-time 的组织与常规写入提交**。
 
-閸︺劍鏌婇惃鍕嚔娑斿绗呴敍灞肩瑝閸愬秵濡?`organization` 閸欘亞鎮婄憴锝勮礋 閳ユ笡lacement plan generator閳ユ縿鈧?
-鐎瑰啯妫﹂崘鍐茬暰閿?
+在新的语义下，不再把 `organization` 只理解为 “placement plan generator”。
+它既决定：
 
-* unit 閸樿鎽㈡稉鈧仦?/ 閸濐亙閲滈崚鍡楀隘
-* 娑撳骸鍑￠張?memory 瀵よ櫣鐝涙禒鈧稊?links
-* 閸︺劌鐖剁憴鍕晸閸忋儴鐭惧鍕瑐婵″倷缍嶅锝呯础閽€钘夊弳 store
+* unit 去哪一层 / 哪个分区
+* 与已有 memory 建立什么 links
+* 在常规写入路径上如何正式落入 store
 
-娑旂喎姘ㄩ弰顖濐嚛閿?
+也就是说：
 
 * `organization` = organize + commit normal write
-* `memory_evolution` 娑撳秴鍟€姒涙顓婚幍鎸庡閺咁噣鈧?append / 鐢瓕顫夐拃钘夌氨
+* `memory_evolution` 不再默认承担普通 append / 常规落库
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def organize(
@@ -298,7 +298,7 @@ def organize(
     ...
 ```
 
-鏉堟挸鍤崣顖欎簰閺?`PlacementPlan`閿?
+输出可以是 `PlacementPlan`：
 
 ```python
 PlacementPlan = {
@@ -309,38 +309,38 @@ PlacementPlan = {
 }
 ```
 
-### 鏉堟挸鍤拠顓濈疅
+### 输出语义
 
-* `PlacementPlan` 娴犲秴褰叉担婊€璐熼弰鎯х础娑擃參妫跨悰銊с仛
-* 娴?`organization` 閸忎浇顔忛惄瀛樺复娣囶喗鏁?`store`
-* trace 鎼存棁顔囪ぐ鏇窗
+* `PlacementPlan` 仍可作为显式中间表示
+* 但 `organization` 允许直接修改 `store`
+* trace 应记录：
   * target store / layer
   * links / index updates
   * affected unit ids / record ids
-  * 鐢瓕顫夐崘娆忓弳闁插洤褰囬惃?ingest-time update 鐞涘奔璐?
+  * 常规写入采取的 ingest-time update 行为
 
-### 鐢瓕顫嗛崝鐔诲厴
+### 常见功能
 
-* 閸掋倕鐣剧拠銉︽杹閸濐亙閲滅€涙劕绨?
-* 瀵よ櫣鐝?temporal / entity / similarity / causal links
-* append 閸掓壆娲伴弽?layer
-* 閸ユ崘濡悙鐟板晸閸?
-* 閸掑棗灏崘娆忓弳
-* 娑撳骸缍嬮崜?organization strategy 缁毖嗏偓锕€鎮庨惃?ingest-time merge / upsert / replace
+* 判定该放哪个子库
+* 建立 temporal / entity / similarity / causal links
+* append 到目标 layer
+* 图节点写入
+* 分区写入
+* 与当前 organization strategy 紧耦合的 ingest-time merge / upsert / replace
 
 ---
 
 ## D. Trigger Interface
 
-鐎瑰啳绀嬬拹锝呭灲閺傤厸鈧粍鐓囨稉顏勬倵缂侇厼濮╂担婊嗩洣娑撳秷顩︾憴锕€褰傞垾婵勨偓?
+它负责判断“某个后续动作要不要触发”。
 
-閸︺劌缍嬮崜?DSL 闁插矉绱漷rigger 閺勵垯绔寸猾璇插讲婢跺秶鏁ら張鍝勫煑閿涘矁鈧奔绗夐弰顖氬涧閼宠姤婀囬崝鈥茬艾閸楁洑绔?slot 閻ㄥ嫪绗撶仦鐐茨侀崸妞尖偓?
-閸氬奔绔?trigger family 閸欘垯浜掗崚鍡楀焼鐎圭偘绶ラ崠鏍﹁礋閿?
+在当前 DSL 里，trigger 是一类可复用机制，而不是只能服务于单一 slot 的专属模块。
+同一 trigger family 可以分别实例化为：
 
-* `write_trigger`閿涙艾锝為崘?`decisions`閿涘本甯堕崚鑸垫Ц閸氾箒绻橀崗銉ョ埗鐟欏嫬鍟撻崗銉ㄧ熅瀵?
-* `evolution_trigger`閿涙艾锝為崘?`decisions`閿涘本甯堕崚鑸垫Ц閸氾箑鎯庨崝銊╊杺婢舵牜娈?memory evolution
+* `write_trigger`：填写 `decisions`，控制是否进入常规写入路径
+* `evolution_trigger`：填写 `evolution_decisions`，控制是否启动额外的 memory evolution
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def should_trigger(
@@ -352,12 +352,12 @@ def should_trigger(
     ...
 ```
 
-鏉╂柨娲栭敍?
+返回：
 
-* 濮ｅ繋閲?unit 閺勵垰鎯佺憴锕€褰傝ぐ鎾冲 slot 鐎电懓绨查惃鍕З娴?
-* 濮ｅ繋閲滈崘宕囩摜閻ㄥ嫯袙闁插﹣绗岄崚鍡樻殶
+* 每个 unit 是否触发当前 slot 对应的动作
+* 每个决策的解释与分数
 
-娓氬顩ф潏鎾冲毉閿?
+例如输出：
 
 ```python
 [
@@ -370,44 +370,44 @@ def should_trigger(
 ]
 ```
 
-### Slot 閸栨牜瀹崇€?
+### Slot 化约定
 
-閸?stage-1 runtime 娑擃叏绱漷rigger 閺堝搫鍩楃悮顐ｆ杹閸︺劋琚辨稉顏冪瑝閸氬瞼娈?ingest slot閿?
+在 stage-1 runtime 中，trigger 机制被放在两个不同的 ingest slot：
 
 ```text
 unit_formation -> representation -> write_trigger -> organization -> evolution_trigger -> memory_evolution
 ```
 
-鐎电懓绨查惃鍕殶閹诡噣娼扮痪锕€鐣鹃弰顖ょ窗
+对应的数据面约定是：
 
-* `write_trigger` 閸?`Packet.decisions`
-* `organization` 鐠囪褰?`Packet.decisions` 楠炶泛鐣幋鎰埗鐟欏嫬鍟撻崗?
-* `evolution_trigger` 閸?`Packet.decisions`
-* `memory_evolution` 鐠囪褰?`decisions`
+* `write_trigger` 写 `Packet.decisions`
+* `organization` 读取 `Packet.decisions` 并完成常规写入
+* `evolution_trigger` 写 `Packet.evolution_decisions`
+* `memory_evolution` 读取 `evolution_decisions`
 
-婵″倹鐏夐弻鎰嚋 runtime 閺嗗倹妞傛禒宥呭帒鐠?`memory_evolution` 閸ョ偤鈧偓娴ｈ法鏁?`decisions`閿涘苯绨茬憴鍡曡礋閸氭垵鎮楅崗鐓庮啇鐞涘奔璐熼敍宀冣偓灞肩瑝閺勵垳娲伴弽鍥嚔娑斿鈧?
+如果某个 runtime 暂时仍允许 `memory_evolution` 回退使用 `decisions`，应视为向后兼容行为，而不是目标语义。
 
-### 鏉╂瑦鐗辩拋鎹愵吀閻ㄥ嫬銈芥径?
+### 这样设计的好处
 
-* 閼宠棄宕熼悪?ablate write policy
-* 閼宠姤濡?閳ユ粌鐖剁憴鍕晸閸忋儮鈧?娑?閳ユ粓顤傛径鏍ㄧ川閸栨牑鈧?濞撳懏娅氶崠鍝勫瀻
-* 閼宠棄浠?learned write / heuristic write / llm-judge write 閻ㄥ嫮绮烘稉鈧В鏃囩窛
+* 能单独 ablate write policy
+* 能把 “常规写入” 与 “额外演化” 清晰区分
+* 能做 learned write / heuristic write / llm-judge write 的统一比较
 
 ---
 
 ## E. Memory Evolution Interface
 
-鐎瑰啳绀嬬拹?**姒涙顓绘稉宥呮儙閸斻劊鈧線顤傛径鏍曢崣?* 閻?memory evolution閵?
+它负责 **默认不启动、额外触发** 的 memory evolution。
 
-鏉╂瑩鍣烽惃鍕嚠鐠炩€茬瑝閺勵垪鈧粍婀板▎?observation 閻ㄥ嫬鐖剁憴鍕儰鎼存挴鈧繐绱濋懓灞炬Ц閿?
+这里的对象不是“本次 observation 的常规落库”，而是：
 
-* 鐎电懓鍑￠張?memory 閻ㄥ嫭鏆ｉ悶?
-* 妤傛ê鐪伴幎鍊熻杽
-* 缂佸瓨濮?
-* 闁绻?
-* 閸氬骸褰撮柌宥呭晸 / 闁插秶绮?
+* 对已有 memory 的整理
+* 高层抽象
+* 维护
+* 遗忘
+* 后台重写 / 重组
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def memory_evolution(
@@ -419,7 +419,7 @@ def memory_evolution(
     ...
 ```
 
-### 閸旂喕鍏?
+### 功能
 
 * summarize
 * reflect
@@ -427,10 +427,10 @@ def memory_evolution(
 * dedup
 * consolidate
 * move / archive
-* 鐎电懓鍑￠張?memory 閻?rewrite / review
-* 閸︺劍妯夊蹇毿曢崣鎴炴鏉╂稖顢?profile / concept abstraction
+* 对已有 memory 的 rewrite / review
+* 在显式触发时进行 profile / concept abstraction
 
-### 鏉堟挸鍤稉顓犳畱 aux 鎼存柨瀵橀崥?
+### 输出中的 aux 应包含
 
 * affected unit ids
 * affected record ids
@@ -438,20 +438,20 @@ def memory_evolution(
 * rewrite / summarize / prune trace
 * overwritten / removed / archived records
 
-鏉╂瑤閲?trace 瀵板牓鍣哥憰渚婄礉閸ョ姳璐熸担鐘辩閸氬骸鍨庨弸?memory 閺堝搫鍩楅弮鏈电窗闂団偓鐟曚降鈧?
+这个 trace 很重要，因为你之后分析 memory 机制时会需要。
 
 ---
 
 ## F. Compression / Abstraction Family
 
-鏉╂瑤绗夐弰顖滃缁?slot閿涘矁鈧本妲?`memory_evolution` 閻ㄥ嫪绔存稉顏堝櫢鐟曚礁鐡欑€硅埖妫岄妴?
+这不是独立 slot，而是 `memory_evolution` 的一个重要子家族。
 
-娑旂喎姘ㄩ弰顖濐嚛閿?
+也就是说：
 
-* `compress` / `abstract` 娴犲秶鍔ч弰顖炲櫢鐟曚焦婧€閸?
-* 娴ｅ棗婀ぐ鎾冲 primitive 閸掓帒鍨庢稉瀣剁礉鐎瑰啩婊戠仦鐐扮艾 `memory_evolution` 閻ㄥ嫬鐤勯悳鏉垮綁娴?
+* `compress` / `abstract` 仍然是重要机制
+* 但在当前 primitive 划分下，它们属于 `memory_evolution` 的实现变体
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def compress(
@@ -462,19 +462,19 @@ def compress(
     ...
 ```
 
-娑撹桨绮堟稊鍫ｇ箲閸ョ偘琚辨稉顏冪鐟楀尅绱?
+为什么返回两个东西？
 
-* `list[MemoryUnit]`閿涙碍鏌婇悽鐔稿灇閻ㄥ嫭鎲崇憰?濮掑倸搴风拋鏉跨箓
-* `MemoryStore`閿涙碍娲块弬鏉挎倵閻?store
+* `list[MemoryUnit]`：新生成的摘要/概念记忆
+* `MemoryStore`：更新后的 store
 
-### 鐢瓕顫嗙憴锕€褰傞弬鐟扮础
+### 常见触发方式
 
 * periodic
 * episode_end
 * budget_exceeded
 * explicit_reflection
 
-### 鐢瓕顫嗘潏鎾冲毉
+### 常见输出
 
 * summary units
 * concept units
@@ -485,9 +485,9 @@ def compress(
 
 ## G. Retrieval Interface
 
-鐎瑰啳绀嬬拹锝囩舶鐎?query閿涘奔绮?store 閹?relevant memory閵?
+它负责给定 query，从 store 找 relevant memory。
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def retrieve(
@@ -499,16 +499,16 @@ def retrieve(
     ...
 ```
 
-### 鏉╂柨娲?
+### 返回
 
 * `RetrievedContext`
-* 濡偓缁?trace
+* 检索 trace
 
-### trace 鎼存棁顕氶弽鍥у櫙閸?
+### trace 应该标准化
 
-閸ョ姳璐?retrieval 閺勵垱鐗宠箛鍐ㄧ杽妤犲苯褰夐柌蹇庣娑撯偓閵?
+因为 retrieval 是核心实验变量之一。
 
-娓氬顩ч敍?
+例如：
 
 ```python
 {
@@ -524,20 +524,20 @@ def retrieve(
 }
 ```
 
-鏉╂瑦鐗辨担鐘插讲娴犮儳鐖虹粚璁圭窗
+这样你可以研究：
 
-* 閸掓澘绨抽弰?sim 鐠ц渹缍旈悽銊ㄧ箷閺?recency 鐠ц渹缍旈悽?
-* 娑撹桨绮堟稊鍫熺厙閺壜ゎ唶韫囧棜顫﹂柅澶夎厬
+* 到底是 sim 起作用还是 recency 起作用
+* 为什么某条记忆被选中
 
 ---
 
 ## H. Maintenance Family
 
-鏉╂瑥鎮撻弽铚傜瑝閺勵垳瀚粩?slot閿涘矁鈧本妲?`memory_evolution` 閻ㄥ嫬褰熸稉鈧稉顏勭摍鐎硅埖妫岄妴?
+这同样不是独立 slot，而是 `memory_evolution` 的另一个子家族。
 
-鐎瑰啳绀嬬拹锝咁啇闁插繑甯堕崚韬测偓渚€浠愯箛妯糕偓浣稿箵闁插秲鈧線鍣搁幒鎺戠碍缁涘顤傛径鏍ㄧ川閸栨牓鈧?
+它负责容量控制、遗忘、去重、重排序等额外演化。
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def maintain(
@@ -548,7 +548,7 @@ def maintain(
     ...
 ```
 
-### 閸旂喕鍏?
+### 功能
 
 * pruning
 * decay update
@@ -557,17 +557,17 @@ def maintain(
 * consolidation trigger
 * archival movement
 
-### 瀵ら缚顔?
+### 建议
 
-閹?`maintenance` 鐠佹崘顓搁幋鎰讲閸涖劍婀＄憴锕€褰傞惃鍕倵閸欑増顒炴銈忕礉娴ｅ棗婀ぐ鎾冲 DSL 娑擃厼鐨㈤崗鎯邦潒娑?`memory_evolution` 閻ㄥ嫪绔寸粔宥呯杽閻滅増膩瀵骏绱濋懓灞肩瑝閺勵垱鏌婃晶鐐恒€婄仦?slot閵?
+把 `maintenance` 设计成可周期触发的后台步骤，但在当前 DSL 中将其视为 `memory_evolution` 的一种实现模式，而不是新增顶层 slot。
 
 ---
 
 ## I. Readout Interface
 
-鐎瑰啳绀嬬拹锝嗗Ω retrieved memory 鏉烆剚鍨氭稉瀣埗 agent 閸欘垱绉风拹鍦畱鏉堟挸鍙嗛妴?
+它负责把 retrieved memory 转成下游 agent 可消费的输入。
 
-### 閹恒儱褰涚€规矮绠?
+### 接口定义
 
 ```python
 def readout(
@@ -579,7 +579,7 @@ def readout(
     ...
 ```
 
-鏉堟挸鍤崣顖濆厴閺勵垽绱?
+输出可能是：
 
 ```python
 ReadoutPacket = {
@@ -590,27 +590,27 @@ ReadoutPacket = {
 }
 ```
 
-### 娑撹桨绮堟稊鍫濆礋閻欘剛鐝涢幒銉ュ經
+### 为什么单独立接口
 
-閸ョ姳璐熼敍?
+因为：
 
-* retrieval 鐟欙絽鍠呴垾婊勫娴犫偓娑斿牃鈧?
-* readout 鐟欙絽鍠呴垾婊勨偓搴濈疄閻劉鈧?
+* retrieval 解决“找什么”
+* readout 解决“怎么用”
 
-鏉╂瑤琚辨稉顏堟６妫版ü绗夐懗鑺ヨ穿閵?
+这两个问题不能混。
 
-閸氬本鐗遍惃?retrieved items閿?
+同样的 retrieved items：
 
-* 閸欘垯浜掗惄瀛樺复閹?prompt
-* 閸欘垯浜掗崗?summary 閸愬秵瀚?
-* 閸欘垯浜掗幐?profile / facts / history 閸掑棗灏▔銊ュ弳
-* 閸欘垯浜掗崣顏嗙舶 planner閿涘奔绗夌紒?responder
+* 可以直接拼 prompt
+* 可以先 summary 再拼
+* 可以按 profile / facts / history 分区注入
+* 可以只给 planner，不给 responder
 
 ---
 
-# 4. 閺囩绻樻稉鈧銉窗缂佺喍绔撮幋鎰垼閸戝棙膩閸ф顒烽崥?
+# 4. 更进一步：统一成标准模块签名
 
-娑撹桨绨＄拋?DSL 閻喐顒滃Ο鈥虫健閸栨牭绱濇担鐘垫晪閼峰啿褰叉禒銉ュ繁閸掕埖澧嶉張澶嬆侀崸妤呭厴闁潧鐣х紒鐔剁缁涙儳鎮曢敍?
+为了让 DSL 真正模块化，你甚至可以强制所有模块都遵守统一签名：
 
 ```python
 class MemoryModule:
@@ -618,9 +618,9 @@ class MemoryModule:
         return output_packet, new_store, aux
 ```
 
-閸忔湹鑵?`packet` 閺勵垶鈧氨鏁ゆ潪鎴掔秼閿涘本瀵滃Ο鈥虫健闂冭埖顔屾稉宥呮倱鐟佸懍绗夐崥灞藉敶鐎瑰箍鈧?
+其中 `packet` 是通用载体，按模块阶段不同装不同内容。
 
-娓氬顩ч敍?
+例如：
 
 ```python
 Packet = {
@@ -628,7 +628,7 @@ Packet = {
     "units": list[MemoryUnit] | None,
     "decisions": list[bool] | None,
     "placements": list[PlacementPlan] | None,
-    "decisions": list[bool] | None,
+    "evolution_decisions": list[bool] | None,
     "query": Query | None,
     "retrieved": RetrievedContext | None,
     "readout": dict | None,
@@ -636,9 +636,9 @@ Packet = {
 }
 ```
 
-閻掕泛鎮楁稉宥呮倱濡€虫健閸欘亣顕伴崘娆掑殰瀹稿崬鍙ц箛鍐畱鐎涙顔岄妴?
+然后不同模块只读写自己关心的字段。
 
-鏉╂瑦鐗辨担鐘垫畱 pipeline 閸欘垯浜掗崘娆愬灇閿?
+这样你的 pipeline 可以写成：
 
 ```python
 packet = {"observation": obs, "trace": {}}
@@ -652,30 +652,30 @@ packet, store, aux6 = memory_evolution(packet, store, context, cfg6)
 ...
 ```
 
-閸忔湹鑵戦弬鎵畱鐠囶厺绠熼弰顖ょ窗
+其中新的语义是：
 
-* `organize(...)` 鐎瑰本鍨?ingest-time normal write
-* `memory_evolution(...)` 閸欘亜婀?`evolution_trigger` 閹垫挸绱戦弮璺轰粵妫版繂顦诲鏂垮
+* `organize(...)` 完成 ingest-time normal write
+* `memory_evolution(...)` 只在 `evolution_trigger` 打开时做额外演化
 
-鏉╂瑥姘ㄩ弰顖氱发閸忕鐎烽惃?**IR-style intermediate representation** 閹繆鐭鹃妴?
-閹存垼顫庡妤勭箹鐎?DSL 瀵板牊婀佺敮顔煎И閵?
+这就是很典型的 **IR-style intermediate representation** 思路。
+我觉得这对 DSL 很有帮助。
 
 ---
 
-# 5. 鏉╂ê褰叉禒銉ョ暰娑斿膩閸ф娈戦垾婊嗗厴閸旀稓瀹抽弶鐔测偓?
+# 5. 还可以定义模块的“能力约束”
 
-婵″倹鐏夐幆鍐蹭粵閼奉亜濮╅幖婊呭偍閿涘苯褰х€规矮绠?IO 鏉╂ü绗夋径鐕傜礉鏉╂顩︾€规矮绠?**type constraints**閵?
-娑撳秶鍔ч幖婊呭偍娴兼氨绮嶉崥鍫濆毉瀵板牆顦块棃鐐寸《闁板秶鐤嗛妴?
+如果想做自动搜索，只定义 IO 还不够，还要定义 **type constraints**。
+不然搜索会组合出很多非法配置。
 
-濮ｆ柨顩ч敍?
+比如：
 
-* `graph_retrieval` 鐟曚焦鐪?store 闁插本婀?graph links
-* `entity_merge_update` 鐟曚焦鐪?unit 闁插本婀?entity ids
-* `similarity_retrieval` 鐟曚焦鐪?unit 閺?embedding
-* `profile_rewrite` 鐟曚焦鐪伴惄顔界垼 store 閺?profile / semantic
-* `delta_update` 鐟曚焦鐪?unit 閸欘垰顕鎰煂閺冄嗩唶瑜?
+* `graph_retrieval` 要求 store 里有 graph links
+* `entity_merge_update` 要求 unit 里有 entity ids
+* `similarity_retrieval` 要求 unit 有 embedding
+* `profile_rewrite` 要求目标 store 是 profile / semantic
+* `delta_update` 要求 unit 可对齐到旧记录
 
-閹碘偓娴犮儲鐦℃稉顏吥侀崸妤呮珟娴?IO 婢舵牭绱濇潻妯虹安鐠囥儱锛愰弰搴窗
+所以每个模块除了 IO 外，还应该声明：
 
 ```python
 ModuleSpec = {
@@ -686,7 +686,7 @@ ModuleSpec = {
 }
 ```
 
-娓氬顩ч敍?
+例如：
 
 ```python
 {
@@ -697,7 +697,7 @@ ModuleSpec = {
 }
 ```
 
-閸愬秵鐦俊鍌︾窗
+再比如：
 
 ```python
 {
@@ -708,46 +708,46 @@ ModuleSpec = {
 }
 ```
 
-鏉╂瑥顕懛顏勫З缂佸嫬鎮庨棃鐐茬埗闁插秷顩﹂妴?
+这对自动组合非常重要。
 
 ---
 
-# 6. DSL 鐎涙顔屾稉宥勭矌閼宠棄鐣炬稊?IO閿涘矁绻曢懗钘夌暰娑斿鈧粍鎼锋担婊嗩嚔娑斿鈧?
+# 6. DSL 字段不仅能定义 IO，还能定义“操作语义”
 
-娴ｇ姴褰叉禒銉﹀Ω濮ｅ繋閲滅€涙顔岄崚鍡樺灇娑撳鐪伴敍?
+你可以把每个字段分成三层：
 
 ### 1) Type signature
 
-鏉堟挸鍙嗘潏鎾冲毉缁鐎?
+输入输出类型
 
 ### 2) Contract
 
-鏉╂瑤閲滃Ο鈥虫健閹佃儻顕崑姘矆娑斿牞绱濇稉宥嗗鐠囧搫浠涙禒鈧稊?
+这个模块承诺做什么，不承诺做什么
 
 ### 3) Side effects
 
-鐎瑰啩绱版俊鍌欑秿娣囶喗鏁?store 閹?metadata
+它会如何修改 store 或 metadata
 
-娓氬顩?`retrieve` 閻?contract 閸欘垯浜掗弰顖ょ窗
+例如 `retrieve` 的 contract 可以是：
 
-* 鏉堟挸鍙?query 閸?store
-* 鏉堟挸鍤稉鈧稉顏呮箒鎼村繒娈?memory list
-* 韫囧懘銆忛幓鎰返 score trace
-* 娑撳秴鍘戠拋鍝ユ纯閹恒儰鎱ㄩ弨鐟板斧婵?memory 閸愬懎顔?
+* 输入 query 和 store
+* 输出一个有序的 memory list
+* 必须提供 score trace
+* 不允许直接修改原始 memory 内容
 
-閼?`memory_evolution` 閻?contract 閺勵垽绱?
+而 `memory_evolution` 的 contract 是：
 
-* 鏉堟挸鍙?packet / store / context
-* 閸欘垯浜掓穱顔芥暭 store
-* 韫囧懘銆忔潻鏂挎礀 evolution / overwrite / summarize / prune trace
+* 输入 packet / store / context
+* 可以修改 store
+* 必须返回 evolution / overwrite / summarize / prune trace
 
-鏉╂瑦鐗遍弫缈犻嚋缁崵绮烘导姘舵姜鐢憡绔婚弲鑸偓?
+这样整个系统会非常清晰。
 
 ---
 
-# 7. 閹存垵缂撶拋顔炬畱閺堚偓鐏忓繑鐖ｉ崙鍡樺复閸欙綁娉﹂崥?
+# 7. 我建议的最小标准接口集合
 
-婵″倹鐏夋担鐘冲厒鐏忚棄鎻╅拃钘夋勾閿涘奔绗夎箛鍛瀵偓婵顔曠拋鈥崇繁婢额亪鍣搁妴鍌氬讲娴犮儱鍘涚€规矮绔存稉顏呮付鐏忓繒澧楅張顒婄窗
+如果你想尽快落地，不必一开始设计得太重。可以先定一个最小版本：
 
 ```python
 unit_formation(observation, store, context, config) 
@@ -772,13 +772,13 @@ readout(retrieved, store, context, config)
     -> readout_packet, aux
 ```
 
-鏉╂瑦妲告稉鈧稉顏堟姜鐢鐤勯悽銊ф畱鐠ч鍋ｉ妴?
+这是一个非常实用的起点。
 
 ---
 
-# 8. 娑撯偓娑擃亜鍙挎担鎾茬伐鐎涙劧绱版俊鍌欑秿濡€虫健閸栨牜绮嶉崥?
+# 8. 一个具体例子：如何模块化组合
 
-閸嬪洩顔曟担鐘茬暰娑斿绔存稉?memory config閿?
+假设你定义一个 memory config：
 
 ```python
 MemoryConfig(
@@ -793,9 +793,9 @@ MemoryConfig(
 )
 ```
 
-闁絼绠炴潻鎰攽閺冭泛姘ㄩ弰顖ょ窗
+那么运行时就是：
 
-### 閸愭瑥鍙嗛梼鑸殿唽
+### 写入阶段
 
 ```python
 units = EventExtractor(obs)
@@ -803,55 +803,55 @@ units = HybridRep(units)
 decisions = ImportanceNoveltyGate(units, store)
 selected_units = filter_by_decision(units, decisions)
 store, placement = EntityTemporalOrganizer(selected_units, store)
-decisions = Never()(selected_units, store)
-if any(decisions):
+evolution_decisions = Never()(selected_units, store)
+if any(evolution_decisions):
     store = ImportanceDecayPruner(store)
 ```
 
-### 鐠囪褰囬梼鑸殿唽
+### 读取阶段
 
 ```python
 retrieved = HybridRetriever(query, store)
 readout_packet = StructuredReadout(retrieved, store)
 ```
 
-鏉╂瑥姘ㄥ鑼病閺勵垯绔存稉顏勫讲閹笛嗩攽閻?memory DSL runtime 娴滃棎鈧?
+这就已经是一个可执行的 memory DSL runtime 了。
 
 ---
 
-# 9. 娴犲海鐖虹粚鎯邦潡鎼达妇婀呴敍灞剧垼閸?IO 閹恒儱褰涢惃鍕壈娑斿娼敮绋裤亣
+# 9. 从研究角度看，标准 IO 接口的意义非常大
 
-鐎瑰啩绗夋禒鍛Ц瀹搞儳鈻奸梻顕€顣介敍宀冪箷閻╁瓨甯撮崘鍐茬暰娴ｇ姷娈戦惍鏃傗敀閼虫垝绗夐懗鑺ュ灇缁斿鈧?
-
----
-
-## 9.1 娓氬じ绨崑姘辩矋閸氬牊鎮崇槐?
-
-婵″倹鐏夊Ο鈥虫健閸忓彉闊╅幒銉ュ經閿涘奔缍橀幍宥堝厴閿?
-
-* 閸ュ搫鐣?representation閿涘本鎮崇槐?retrieval
-* 閸ュ搫鐣?retrieval閿涘本鎮崇槐?write policy
-* 閼辨柨鎮庨幖婊呭偍 write + organization + memory evolution
-
-閸氾箑鍨幖婊呭偍缁屾椽妫块崣顏呮Ц缁鹃晲绗傜拫鍫濆徍閵?
+它不仅是工程问题，还直接决定你的研究能不能成立。
 
 ---
 
-## 9.2 娓氬じ绨崑姘彆楠炶櫕鐦潏?
+## 9.1 便于做组合搜索
 
-缂佺喍绔撮幒銉ュ經閸氬函绱濇担鐘插讲娴犮儳婀″锝嗗付閸掕泛褰夐柌蹇ョ窗
+如果模块共享接口，你才能：
 
-* 閸氬本鐗遍惃?unit formation閿涘奔绗夐崥?retrieval
-* 閸氬本鐗遍惃?organization閿涘奔绗夐崥?write trigger
-* 閸氬本鐗遍惃?retrieval閿涘奔绗夐崥?readout
+* 固定 representation，搜索 retrieval
+* 固定 retrieval，搜索 write policy
+* 联合搜索 write + organization + memory evolution
 
-鏉╂瑥顕拋鐑樻瀮鐎圭偤鐛欏鍫濆彠闁款喓鈧?
+否则搜索空间只是纸上谈兵。
 
 ---
 
-## 9.3 娓氬じ绨崚鍡樼€?recurring motifs
+## 9.2 便于做公平比较
 
-婵″倹鐏夊鍫濐樋妤傛ɑ鈧嗗厴缁崵绮洪柈鑺ュ姬鐡掔绱?
+统一接口后，你可以真正控制变量：
+
+* 同样的 unit formation，不同 retrieval
+* 同样的 organization，不同 write trigger
+* 同样的 retrieval，不同 readout
+
+这对论文实验很关键。
+
+---
+
+## 9.3 便于分析 recurring motifs
+
+如果很多高性能系统都满足：
 
 * event/fact unit
 * hybrid representation
@@ -860,36 +860,36 @@ readout_packet = StructuredReadout(retrieved, store)
 * hybrid retrieval
 * periodic evolution
 
-闁絼缍樼亸杈厴娴犲孩鎮崇槐銏㈢波閺嬫粌缍婄痪鍐插毉 motif閿涘矁鈧奔绗夐弰顖氬涧瀵版鍩岄垾婊勭厙娑擃亪绮︾粻閬嶅帳缂冾喗娲挎總瑙ｂ偓婵勨偓?
+那你就能从搜索结果归纳出 motif，而不是只得到“某个黑箱配置更好”。
 
 ---
 
-# 10. 娴ｅ棜顩﹀▔銊﹀壈閿涙矮绗夐弰顖涘閺堝鐡у▓鐢稿厴闁倸鎮庣€瑰苯鍙忛悪顒傜彌
+# 10. 但要注意：不是所有字段都适合完全独立
 
-鏉╂瑩鍣烽張澶夌娑擃亞骞囩€圭偤妫舵０姗堢窗
-閺堝绨虹€涙顔屾稊瀣？閼帮箑鎮庡鍫濆繁閿涘奔绗夐懗鑺ユ簚濮婄増濯跺鈧妴?
+这里有一个现实问题：
+有些字段之间耦合很强，不能机械拆开。
 
-濮ｆ柨顩ч敍?
+比如：
 
-### representation 閸?retrieval 瀵缚鈧箑鎮?
+### representation 和 retrieval 强耦合
 
-* 濞?embedding 鐏忓崬浠涙稉宥勭啊閸氭垿鍣哄Λ鈧槐?
-* 濞?graph link 鐏忓崬浠涙稉宥勭啊 graph hop retrieval
+* 没 embedding 就做不了向量检索
+* 没 graph link 就做不了 graph hop retrieval
 
-### unit formation 閸?organization / evolution 瀵缚鈧箑鎮?
+### unit formation 和 organization / evolution 强耦合
 
-* fact unit 閺囨挳鈧倸鎮?entity/profile-oriented organization 閹存牕鎮楃紒?profile evolution
-* raw chunk 閺囨挳鈧倸鎮?append-style organization
+* fact unit 更适合 entity/profile-oriented organization 或后续 profile evolution
+* raw chunk 更适合 append-style organization
 
-### compression 閸?maintenance 瀵缚鈧箑鎮?
+### compression 和 maintenance 强耦合
 
-* summary 閻㈢喐鍨氶崥搴″讲閼宠棄寮芥潻鍥ㄦ降鐟欙箑褰傞崚?raw memory
-* consolidation 娴兼碍鏁奸崣?retention policy
+* summary 生成后可能反过来触发删 raw memory
+* consolidation 会改变 retention policy
 
-閹碘偓娴犮儲顒滅涵顔间粵濞夋洑绗夐弰顖氫海鐟佸懎鐣崗銊у缁斿绱濋懓灞炬Ц閿?
+所以正确做法不是假装完全独立，而是：
 
-* **閹恒儱褰涢悪顒傜彌**
-* **鐠囶厺绠熸稉濠傚帒鐠佸摜瀹抽弶?*
-* **閹兼粎鍌ㄩ弮鍫曗偓姘崇箖 compatibility constraints 鏉╁洦鎶ら棃鐐寸《缂佸嫬鎮?*
+* **接口独立**
+* **语义上允许约束**
+* **搜索时通过 compatibility constraints 过滤非法组合**
 
-鏉╂瑦鐦垾婊冪暚閸忋劏鍤滈悽杈╃矋閸氬牃鈧繀寮楃拫銊ョ繁婢舵哎鈧?
+这比“完全自由组合”严谨得多。
