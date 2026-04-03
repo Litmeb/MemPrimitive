@@ -934,6 +934,100 @@ def test_periodic_and_idle_maintenance_triggers_gate_evolution_from_schedule_met
     assert idle_packet.trace["evolution_trigger"]["idle_seconds"] == 45.0
 
 
+def test_store_all_trigger_preserves_existing_decisions_and_selects_all_layers() -> None:
+    from memprimitive.baselines import AlwaysTrigger, StoreAllTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic"),
+                StoreLayerSpec(name="semantic"),
+            ]
+        )
+    )
+    _seed_layer(store, "default", ["default one"])
+    _seed_layer(store, "episodic", ["episodic one", "episodic two"])
+    _seed_layer(store, "semantic", ["semantic one"])
+
+    packet, _ = _represented_packet("Alice likes tea.")
+    packet, _ = AlwaysTrigger().run(packet, store)
+
+    packet_out, _ = StoreAllTrigger().run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.decisions_store is not None
+    assert set(packet_out.decisions_store) == {"default", "episodic", "semantic"}
+    assert packet_out.decisions_store["default"]["record_ids"] == ["rec-1"]
+    assert packet_out.decisions_store["episodic"]["record_ids"] == ["rec-2", "rec-3"]
+    assert packet_out.decisions_store["semantic"]["record_ids"] == ["rec-4"]
+    assert packet_out.decisions_store["semantic"]["selector"]["kind"] == "store_all"
+    assert packet_out.decisions_store["semantic"]["selector"]["source"] == "store_all_trigger"
+    assert packet_out.trace["write_trigger"]["module"] == "store_all_write_trigger"
+    assert packet_out.trace["write_trigger"]["decisions"] == [True]
+    assert packet_out.trace["write_trigger"]["decisions_store_counts"] == {
+        "default": 1,
+        "episodic": 2,
+        "semantic": 1,
+    }
+
+
+def test_store_all_trigger_keeps_decisions_none_when_no_prior_decision_exists() -> None:
+    from memprimitive.baselines import StoreAllTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic"),
+            ]
+        )
+    )
+    _seed_layer(store, "episodic", ["episodic one"])
+    packet, _ = _represented_packet("Alice likes tea.")
+
+    packet_out, _ = StoreAllTrigger().run(packet, store)
+
+    assert packet_out.decisions is None
+    assert packet_out.decisions_store is not None
+    assert set(packet_out.decisions_store) == {"episodic"}
+    assert packet_out.trace["write_trigger"]["decisions"] is None
+    assert packet_out.trace["write_trigger"]["per_unit"] == []
+    assert packet_out.trace["write_trigger"]["preserved_decisions"] is False
+
+
+def test_store_all_trigger_supports_evolution_slot() -> None:
+    from memprimitive.baselines import AppendOrganization, StoreAllTrigger
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic"),
+            ]
+        )
+    )
+    _seed_layer(store, "episodic", ["prior one"])
+    packet, _ = _represented_packet("Alice likes tea.")
+    packet, store = AppendOrganization(target_layer="episodic").run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    packet_out, _ = StoreAllTrigger(slot="evolution_trigger").run(packet, store)
+
+    assert packet_out.decisions == [True]
+    assert packet_out.decisions_store is not None
+    assert set(packet_out.decisions_store) == {"episodic"}
+    assert packet_out.decisions_store["episodic"]["record_ids"] == ["rec-1", "rec-2"]
+    assert packet_out.trace["evolution_trigger"]["module"] == "store_all_evolution_trigger"
+
+
 def test_new_trigger_classes_are_registered_in_baseline_exports() -> None:
     exported = registered_baseline_class_names()
 
@@ -941,6 +1035,7 @@ def test_new_trigger_classes_are_registered_in_baseline_exports() -> None:
         "BoundaryEventTrigger",
         "RuntimeEventTrigger",
         "ScalarRuleTrigger",
+        "StoreAllTrigger",
         "ModelJudgeTrigger",
         "PeriodicMaintenanceTrigger",
         "IdleMaintenanceTrigger",

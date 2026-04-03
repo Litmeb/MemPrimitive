@@ -365,24 +365,25 @@ def _write_trace(
     *,
     module_name: str,
     trace_key: str,
-    decisions: list[bool],
+    decisions: list[bool] | None,
     decisions_store: dict[str, dict[str, Any]] | None = None,
     trace_payload: dict[str, Any] | None = None,
     per_unit_payload: list[dict[str, Any]] | None = None,
 ) -> Packet:
     trace = copy_trace(packet)
     per_unit = []
-    for index, (unit, decision) in enumerate(zip(packet.units or [], decisions, strict=True)):
-        item = {
-            "unit_id": unit.unit_id,
-            "decision": bool(decision),
-        }
-        if per_unit_payload is not None and index < len(per_unit_payload):
-            item.update(per_unit_payload[index])
-        per_unit.append(item)
+    if decisions is not None:
+        for index, (unit, decision) in enumerate(zip(packet.units or [], decisions, strict=True)):
+            item = {
+                "unit_id": unit.unit_id,
+                "decision": bool(decision),
+            }
+            if per_unit_payload is not None and index < len(per_unit_payload):
+                item.update(per_unit_payload[index])
+            per_unit.append(item)
     payload = {
         "module": module_name,
-        "decisions": list(decisions),
+        "decisions": None if decisions is None else list(decisions),
         "per_unit": per_unit,
     }
     decisions_store_layers, decisions_store_counts = _build_store_decisions_summary(decisions_store)
@@ -392,7 +393,26 @@ def _write_trace(
         payload.update(trace_payload)
     trace[trace_key] = payload
     next_decisions_store = decisions_store if decisions_store is not None else packet.decisions_store
-    return replace(packet, decisions=list(decisions), decisions_store=next_decisions_store, trace=trace)
+    next_decisions = packet.decisions if decisions is None else list(decisions)
+    return replace(packet, decisions=next_decisions, decisions_store=next_decisions_store, trace=trace)
+
+
+def _select_all_store_records(store: MemoryStore, *, selector: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for layer in store.topology.layer_names:
+        record_ids = [record.record_id for record in store.iter_records(layer)]
+        if not record_ids:
+            continue
+        out[layer] = {
+            "decision": True,
+            "record_ids": record_ids,
+            "selector": {
+                **selector,
+                "layer": layer,
+                "count": len(record_ids),
+            },
+        }
+    return out
 
 
 def _normalize_model_judge_output(output: Any, *, decision_mode: str, threshold: float) -> tuple[bool, dict[str, Any]]:
@@ -577,6 +597,37 @@ class ThresholdTrigger(_BaseTrigger):
                 decisions=decisions,
                 trace_payload={"constant": self.constant, "threshold": self.threshold, "source": "constant"},
                 per_unit_payload=[{"constant": self.constant} for _ in decisions],
+            ),
+            store,
+        )
+
+
+class StoreAllTrigger(_BaseTrigger):
+    """Select every existing record across all store layers without rewriting decisions."""
+
+    _DEFAULT_SLOT = "write_trigger"
+    _NAME_PREFIX = "store_all"
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        self._require_units(packet)
+        decisions_store = _select_all_store_records(
+            store,
+            selector={
+                "kind": "store_all",
+                "source": "store_all_trigger",
+            },
+        )
+        return (
+            _write_trace(
+                packet,
+                module_name=self.spec.name,
+                trace_key=self._trace_key(),
+                decisions=packet.decisions,
+                decisions_store=decisions_store,
+                trace_payload={
+                    "source": "store_all",
+                    "preserved_decisions": packet.decisions is not None,
+                },
             ),
             store,
         )
@@ -1265,5 +1316,6 @@ __all__ = [
     "PeriodicMaintenanceTrigger",
     "RuntimeEventTrigger",
     "ScalarRuleTrigger",
+    "StoreAllTrigger",
     "ThresholdTrigger",
 ]

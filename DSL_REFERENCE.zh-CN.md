@@ -53,12 +53,15 @@ unit_formation
 
 - 所有 trigger module 都带 `slot` 参数，取值必须是 `write_trigger` 或 `evolution_trigger`。
 - 下面这张表写的是“可挂到 `write_trigger` 的 trigger 类”。其中有些类默认更偏向 `evolution_trigger`，但代码上仍可通过 `slot="write_trigger"` 使用。
+- `StoreAllTrigger` 只会把当前 store 中所有非空 layer 的全部 records 写进 `packet.decisions_store`，不会主动生成或重算 `packet.decisions`；如果进入该 trigger 时 `packet.decisions` 还是 `None`，它会保持 `None`。
+- 若把 `StoreAllTrigger` 放进 `DispatchWriteTrigger` / `DispatchEvolutionTrigger` 且不是 `primary_index` 分支，它写出的 `decisions_store` 不会自动合并回最终 packet；更稳妥的用法是把它放在 primary child，或直接在 pipeline slot 里传 `[其他 trigger, StoreAllTrigger(...)]` 做串行补写。
 
 | Module | 构造参数 | 效果 |
 | --- | --- | --- |
 | `AlwaysTrigger` | `slot="write_trigger"` | 所有 unit 一律触发。 |
 | `NeverTrigger` | `slot="write_trigger"` | 所有 unit 一律不触发。 |
 | `ThresholdTrigger` | `slot="write_trigger"`, `threshold=0.5`, `constant=1.0` | 用常数分数和阈值比较，得到统一布尔决策。 |
+| `StoreAllTrigger` | `slot="write_trigger"` | 不改 `packet.decisions`，只把当前 store 里所有非空 layer 的全部 records 写入 `packet.decisions_store`。 |
 | `BoundaryEventTrigger` | `slot="write_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False` | 根据结构边界事件触发，支持 `session/turn/chunk/subgoal/episode` 边界别名；命中后除广播写 `packet.decisions` 外，也会按 `*_id` 生成 `packet.decisions_store`。 |
 | `RuntimeEventTrigger` | `slot="write_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False`, `target_layer=None`, `pressure_threshold=None` | 根据 runtime callback 事件触发，也可结合 store pressure 做事件级门控；当 `memory_pressure` 命中时会把目标 layer 的全部 records 写入 `packet.decisions_store`。 |
 | `ScalarRuleTrigger` | `slot="write_trigger"`, `signal_key`, `threshold`, `comparator=">="`, `signal_source="auto"`, `aggregate="broadcast"`, `missing_value=None`, `target_layer=None` | 读取显式标量信号并做规则比较，例如分数、预算压力、置信度；当 `signal_key="memory_pressure"` 命中时也会把目标 layer 的全部 records 写入 `packet.decisions_store`。 |
@@ -87,12 +90,14 @@ unit_formation
 
 - 可用 trigger 类与 `write_trigger` 相同，差别只是实例化时的 `slot` 值。
 - 有些 trigger 默认就面向演化侧，例如 `RuntimeEventTrigger`、`PeriodicMaintenanceTrigger`、`IdleMaintenanceTrigger`。
+- `StoreAllTrigger(slot="evolution_trigger")` 也同样只补 `packet.decisions_store`，不会替你决定是否进入演化；它适合接在已经产出 `packet.decisions` 的 trigger 后面，为 `memory_evolution` 提供“全 store 选择”。
 
 | Module | 构造参数 | 效果 |
 | --- | --- | --- |
 | `AlwaysTrigger` | `slot="evolution_trigger"` | 所有 unit 一律进入演化。 |
 | `NeverTrigger` | `slot="evolution_trigger"` | 所有 unit 一律不进入演化。 |
 | `ThresholdTrigger` | `slot="evolution_trigger"`, `threshold=0.5`, `constant=1.0` | 用常数分数和阈值控制是否演化。 |
+| `StoreAllTrigger` | `slot="evolution_trigger"` | 不改 `packet.decisions`，只把当前 store 里所有非空 layer 的全部 records 写入 `packet.decisions_store`。 |
 | `BoundaryEventTrigger` | `slot="evolution_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False` | 根据结构边界事件触发演化；支持 `session/turn/chunk/subgoal/episode` 边界，并把同一 `*_id` 的 store records 写入 `packet.decisions_store`。 |
 | `RuntimeEventTrigger` | `slot="evolution_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False`, `target_layer=None`, `pressure_threshold=None` | 根据 runtime 事件或 memory pressure 触发演化；`memory_pressure` 命中时会把对应 layer 的全部 records 标记到 `packet.decisions_store`。 |
 | `ScalarRuleTrigger` | `slot="evolution_trigger"`, `signal_key`, `threshold`, `comparator=">="`, `signal_source="auto"`, `aggregate="broadcast"`, `missing_value=None`, `target_layer=None` | 根据显式标量规则触发演化；当 `signal_key="memory_pressure"` 命中时会把对应 layer 的全部 records 标记到 `packet.decisions_store`。 |

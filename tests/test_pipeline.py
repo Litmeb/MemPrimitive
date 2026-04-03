@@ -4,6 +4,7 @@ import json
 import pytest
 
 from memprimitive import (
+    DispatchEvolutionTrigger,
     DispatchOrganization,
     DispatchReadout,
     IncompatibleCompositionError,
@@ -41,6 +42,7 @@ from memprimitive.baselines import (
     ReflectionGenerationEvolution,
     RetrievalOrientedEmbeddingRepresentation,
     SemanticFieldEnrichmentRepresentation,
+    StoreAllTrigger,
     TagRetrieval,
     TripleRepresentation,
     VectorGraphSeedAndExpandRetrieval,
@@ -945,6 +947,116 @@ def test_dispatch_readout_returns_primary_branch_but_records_all_children() -> N
     readout = pipeline.recall(Query(text="Alice"))
 
     assert readout.text.startswith("- ")
+
+
+def test_pipeline_serial_write_triggers_can_preserve_decisions_and_fill_store_selection() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic"),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior one"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=[AlwaysTrigger(), StoreAllTrigger()],
+        organization=AppendOrganization(target_layer="episodic"),
+        evolution_trigger=StoreAllTrigger(slot="evolution_trigger"),
+        store=store,
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert packet.decisions == [True]
+    assert packet.trace["write_trigger"]["module"] == "store_all_write_trigger"
+    assert packet.trace["evolution_trigger"]["module"] == "store_all_evolution_trigger"
+    assert packet.decisions_store is not None
+    assert packet.decisions_store["episodic"]["selector"]["kind"] == "store_all"
+    assert packet.decisions_store["episodic"]["record_ids"] == ["rec-1", "rec-2"]
+
+
+def test_dispatch_store_all_trigger_silently_drops_non_primary_store_selection() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic"),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior one"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=AlwaysTrigger(),
+        organization=AppendOrganization(target_layer="episodic"),
+        evolution_trigger=DispatchEvolutionTrigger(
+            (
+                NeverTrigger(),
+                StoreAllTrigger(slot="evolution_trigger"),
+            ),
+            primary_index=0,
+        ),
+        store=store,
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert packet.decisions == [False]
+    assert packet.decisions_store is None
+    assert packet.trace["dispatch"]["evolution_trigger"]["children"][1]["module"] == "store_all_evolution_trigger"
+    assert (
+        packet.trace["dispatch"]["evolution_trigger"]["children"][1]["slot_trace"]["decisions_store_counts"]
+        == {"episodic": 2}
+    )
+
+
+def test_dispatch_store_all_trigger_keeps_store_selection_when_primary() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="episodic"),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(text="prior one"),
+            layer="episodic",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=AlwaysTrigger(),
+        organization=AppendOrganization(target_layer="episodic"),
+        evolution_trigger=DispatchEvolutionTrigger(
+            (
+                StoreAllTrigger(slot="evolution_trigger"),
+                NeverTrigger(),
+            ),
+            primary_index=0,
+        ),
+        store=store,
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+
+    assert packet.decisions == [True]
+    assert packet.decisions_store is not None
+    assert packet.decisions_store["episodic"]["selector"]["kind"] == "store_all"
+    assert packet.decisions_store["episodic"]["record_ids"] == ["rec-1", "rec-2"]
 
 
 def test_dispatch_organization_validates_child_slots_and_graph_compatibility() -> None:
