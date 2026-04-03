@@ -1203,7 +1203,7 @@ class ModelJudgeTrigger(_BaseTrigger):
 
 
 class PeriodicMaintenanceTrigger(_BaseTrigger):
-    """Gate evolution on periodic schedule metadata."""
+    """Invoke another trigger only when periodic schedule metadata matches."""
 
     _DEFAULT_SLOT = "evolution_trigger"
     _NAME_PREFIX = "periodic_maintenance"
@@ -1214,7 +1214,7 @@ class PeriodicMaintenanceTrigger(_BaseTrigger):
         slot: str | None = None,
         every_n: int,
         counter_key: str = "ingest_count",
-        decision_mode: str = "broadcast",
+        trigger: TriggerModule,
     ) -> None:
         super().__init__(slot=slot)
         if every_n <= 0:
@@ -1222,35 +1222,66 @@ class PeriodicMaintenanceTrigger(_BaseTrigger):
         normalized_counter_key = str(counter_key).strip()
         if not normalized_counter_key:
             raise ValueError("counter_key must be non-empty.")
+        if not isinstance(trigger, TriggerModule):
+            raise TypeError("trigger must be a TriggerModule instance.")
+        wrapped_slot = getattr(getattr(trigger, "spec", None), "slot", None)
+        if wrapped_slot is None:
+            wrapped_slot = getattr(trigger, "slot", None)
+        if wrapped_slot is not None and wrapped_slot != self.slot:
+            raise ValueError(
+                f"PeriodicMaintenanceTrigger slot {self.slot!r} requires wrapped trigger slot {self.slot!r}, "
+                f"got {wrapped_slot!r}."
+            )
         self.every_n = int(every_n)
         self.counter_key = normalized_counter_key
-        self.decision_mode = _require_choice(decision_mode, field_name="decision_mode", allowed=_VALID_MAINTENANCE_MODES)
+        self.trigger = trigger
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        units = self._require_units(packet)
+        self._require_units(packet)
         schedule = _resolve_schedule(packet)
         raw_tick = schedule.get("tick")
         if raw_tick is None:
             raw_tick = store.metadata.get(self.counter_key)
         tick = _coerce_numeric(raw_tick)
         matched = bool(tick is not None and tick > 0 and int(tick) % self.every_n == 0)
-        decisions = _broadcast_decisions(len(units), matched)
+
+        periodic_payload = {
+            "source": "scheduler",
+            "schedule_kind": "periodic",
+            "every_n": self.every_n,
+            "counter_key": self.counter_key,
+            "tick": None if tick is None else int(tick),
+            "periodic_matched": matched,
+            "wrapped_trigger_module": getattr(getattr(self.trigger, "spec", None), "name", type(self.trigger).__name__),
+        }
+
+        if not matched:
+            return (
+                _write_trace(
+                    packet,
+                    module_name=self.spec.name,
+                    trace_key=self._trace_key(),
+                    decisions=None,
+                    trace_payload=periodic_payload,
+                ),
+                store,
+            )
+
+        wrapped_packet, wrapped_store = self.trigger.run(packet, store)
+        trace = copy_trace(wrapped_packet)
+        slot_trace = trace.get(self._trace_key(), {})
+        if not isinstance(slot_trace, dict):
+            slot_trace = {}
+        trace[self._trace_key()] = {
+            **slot_trace,
+            **periodic_payload,
+        }
         return (
-            _write_trace(
-                packet,
-                module_name=self.spec.name,
-                trace_key=self._trace_key(),
-                decisions=decisions,
-                trace_payload={
-                    "source": "scheduler",
-                    "schedule_kind": "periodic",
-                    "every_n": self.every_n,
-                    "counter_key": self.counter_key,
-                    "tick": None if tick is None else int(tick),
-                    "decision_mode": self.decision_mode,
-                },
+            replace(
+                wrapped_packet,
+                trace=trace,
             ),
-            store,
+            wrapped_store,
         )
 
 
