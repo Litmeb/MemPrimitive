@@ -103,6 +103,69 @@ def _score_graph_seed(query_text: str, record) -> float:
     return float(overlap + (2 * entity_overlap))
 
 
+_RETRIEVAL_SOURCES: Final[frozenset[str]] = frozenset({"store", "retrieved"})
+
+
+def _normalize_retrieval_source(source: str) -> str:
+    normalized = str(source).strip().casefold()
+    if normalized not in _RETRIEVAL_SOURCES:
+        raise ValueError("retrieval source must be one of: retrieved, store.")
+    return normalized
+
+
+def _dedupe_records_by_id(records: list[Any]) -> list[Any]:
+    deduped: list[Any] = []
+    seen_record_ids: set[str] = set()
+    for record in records:
+        record_id = getattr(record, "record_id", None)
+        if not isinstance(record_id, str) or record_id in seen_record_ids:
+            continue
+        seen_record_ids.add(record_id)
+        deduped.append(record)
+    return deduped
+
+
+def _candidate_records(packet: Packet, store: MemoryStore, *, source: str, layer: str | None = None) -> list[Any]:
+    if source == "store":
+        return store.iter_records(layer)
+
+    retrieved = packet.retrieved if packet.retrieved is not None else RetrievedSet()
+    records = list(retrieved.items)
+    if layer is not None:
+        records = [record for record in records if getattr(record, "layer", None) == layer]
+    return _dedupe_records_by_id(records)
+
+
+def _with_retrieved(packet: Packet, retrieved: RetrievedSet, *, query=None) -> Packet:
+    trace = copy_trace(packet)
+    trace["retrieval"] = retrieved.trace
+    if query is None:
+        return replace(packet, retrieved=retrieved, trace=trace)
+    return replace(packet, query=query, retrieved=retrieved, trace=trace)
+
+
+def _empty_retrieved(
+    packet: Packet,
+    *,
+    module_name: str,
+    top_k: int,
+    source: str,
+    query=None,
+    **trace_fields: Any,
+) -> Packet:
+    retrieved = RetrievedSet(
+        items=[],
+        scores=[],
+        trace={
+            "module": module_name,
+            "top_k": top_k,
+            "source": source,
+            **trace_fields,
+        },
+    )
+    return _with_retrieved(packet, retrieved, query=query)
+
+
 class RecencyRetrieval(RetrievalModule):
     """Retrieve up to ``top_k`` latest records by recency only.
 
@@ -124,17 +187,18 @@ class RecencyRetrieval(RetrievalModule):
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
 
-    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+    def __init__(self, top_k: int = 3, layer: str | None = None, *, source: str = "store") -> None:
         if top_k <= 0:
             raise ValueError("RecencyRetrieval requires top_k > 0.")
         self.top_k = top_k
         self.layer = layer
+        self.source = _normalize_retrieval_source(source)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("RecencyRetrieval requires packet.query.")
 
-        all_records = store.iter_records(self.layer)
+        all_records = _candidate_records(packet, store, source=self.source, layer=self.layer)
         ordered = list(reversed(all_records))
         selected_records = ordered[: self.top_k]
         scores = [
@@ -151,12 +215,11 @@ class RecencyRetrieval(RetrievalModule):
             trace={
                 "module": self.spec.name,
                 "top_k": self.top_k,
+                "source": self.source,
                 "candidate_count": len(all_records),
             },
         )
-        trace = copy_trace(packet)
-        trace["retrieval"] = retrieved.trace
-        return replace(packet, retrieved=retrieved, trace=trace), store
+        return _with_retrieved(packet, retrieved), store
 
 
 class KeywordCountRetrieval(RetrievalModule):
@@ -169,18 +232,19 @@ class KeywordCountRetrieval(RetrievalModule):
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
 
-    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+    def __init__(self, top_k: int = 3, layer: str | None = None, *, source: str = "store") -> None:
         if top_k <= 0:
             raise ValueError("KeywordCountRetrieval requires top_k > 0.")
         self.top_k = top_k
         self.layer = layer
+        self.source = _normalize_retrieval_source(source)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("KeywordCountRetrieval requires packet.query.")
 
         tokens = _query_tokens(packet.query.text)
-        all_records = list(reversed(store.iter_records(self.layer)))
+        all_records = list(reversed(_candidate_records(packet, store, source=self.source, layer=self.layer)))
         scored = []
         for order_index, record in enumerate(all_records):
             representation = _representation(record)
@@ -207,12 +271,11 @@ class KeywordCountRetrieval(RetrievalModule):
             trace={
                 "module": self.spec.name,
                 "top_k": self.top_k,
+                "source": self.source,
                 "candidate_count": len(all_records),
             },
         )
-        trace = copy_trace(packet)
-        trace["retrieval"] = retrieved.trace
-        return replace(packet, retrieved=retrieved, trace=trace), store
+        return _with_retrieved(packet, retrieved), store
 
 
 class EmbeddingSimilarityRetrieval(RetrievalModule):
@@ -245,12 +308,14 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         top_k: int = 3,
         layer: str | None = None,
         embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        source: str = "store",
     ) -> None:
         if top_k <= 0:
             raise ValueError("EmbeddingSimilarityRetrieval requires top_k > 0.")
         self.top_k = top_k
         self.layer = layer
         self.embedding_model = embedding_model
+        self.source = _normalize_retrieval_source(source)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
@@ -262,7 +327,21 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         if query.embedding is None:
             query = replace(query, embedding=query_embedding)
 
-        all_records = store.iter_records(self.layer)
+        all_records = _candidate_records(packet, store, source=self.source, layer=self.layer)
+        if not all_records:
+            packet = _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source=self.source,
+                query=query,
+                strategy="embedding_similarity",
+                candidate_count=0,
+                embedding_candidate_count=0,
+                reused_query_embedding=reused_query_embedding,
+                skipped_dim_mismatch_count=0,
+            )
+            return packet, store
         scored_candidates: list[tuple[float, object]] = []
         skipped_dim_mismatch = 0
         for record in all_records:
@@ -293,15 +372,14 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
                 "module": self.spec.name,
                 "top_k": self.top_k,
                 "strategy": "embedding_similarity",
+                "source": self.source,
                 "candidate_count": len(all_records),
                 "embedding_candidate_count": len(scored_candidates),
                 "reused_query_embedding": reused_query_embedding,
                 "skipped_dim_mismatch_count": skipped_dim_mismatch,
             },
         )
-        trace = copy_trace(packet)
-        trace["retrieval"] = retrieved.trace
-        return replace(packet, query=query, retrieved=retrieved, trace=trace), store
+        return _with_retrieved(packet, retrieved, query=query), store
 
     def _embed_text(self, text: str) -> list[float]:
         model = self._embedding_cache.get(self.embedding_model)
@@ -453,33 +531,31 @@ class BM25Retrieval(RetrievalModule):
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
 
-    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
+    def __init__(self, top_k: int = 3, layer: str | None = None, *, source: str = "store") -> None:
         if top_k <= 0:
             raise ValueError("BM25Retrieval requires top_k > 0.")
         self.top_k = top_k
         self.layer = layer
+        self.source = _normalize_retrieval_source(source)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("BM25Retrieval requires packet.query.")
 
         query_tokens = _tokenize_text(packet.query.text)
-        all_records = list(reversed(store.iter_records(self.layer)))
+        all_records = list(reversed(_candidate_records(packet, store, source=self.source, layer=self.layer)))
         if not all_records:
-            retrieved = RetrievedSet(
-                items=[],
-                scores=[],
-                trace={
-                    "module": self.spec.name,
-                    "top_k": self.top_k,
-                    "candidate_count": 0,
-                    "scored_count": 0,
-                    "used_recency_fallback": False,
-                },
+            packet = _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source=self.source,
+                candidate_count=0,
+                scored_count=0,
+                avg_doc_len=0.0,
+                used_recency_fallback=False,
             )
-            trace = copy_trace(packet)
-            trace["retrieval"] = retrieved.trace
-            return replace(packet, retrieved=retrieved, trace=trace), store
+            return packet, store
 
         document_tokens = [_document_tokens(record) for record in all_records]
         bm25 = BM25Okapi(document_tokens)
@@ -516,15 +592,14 @@ class BM25Retrieval(RetrievalModule):
             trace={
                 "module": self.spec.name,
                 "top_k": self.top_k,
+                "source": self.source,
                 "candidate_count": len(all_records),
                 "scored_count": len(scored),
                 "avg_doc_len": avg_doc_len,
                 "used_recency_fallback": used_recency_fallback,
             },
         )
-        trace = copy_trace(packet)
-        trace["retrieval"] = retrieved.trace
-        return replace(packet, retrieved=retrieved, trace=trace), store
+        return _with_retrieved(packet, retrieved), store
 
 
 class GraphNeighborRetrieval(RetrievalModule):
@@ -747,6 +822,128 @@ class GraphSeedAndExpandRetrieval(RetrievalModule):
         trace = copy_trace(packet)
         trace["retrieval"] = retrieved.trace
         return replace(packet, retrieved=retrieved, trace=trace), store
+
+
+class ExpandRetrievedGraphNeighbors(RetrievalModule):
+    """Expand graph neighbors from ``packet.retrieved.items`` seed records."""
+
+    spec = ModuleSpec(
+        name="expand_retrieved_graph_neighbors",
+        slot="retrieval",
+        input_requirements=("retrieved.items",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("index:graph", "shape:Graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+    )
+    requires_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
+
+    def __init__(
+        self,
+        top_k: int = 3,
+        *,
+        layer: str = "knowledge_graph",
+        include_seed_records: bool = True,
+        per_seed_top_k: int | None = None,
+        dedupe: bool = True,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("ExpandRetrievedGraphNeighbors requires top_k > 0.")
+        if per_seed_top_k is not None and per_seed_top_k <= 0:
+            raise ValueError("ExpandRetrievedGraphNeighbors requires per_seed_top_k > 0 when provided.")
+        self.top_k = top_k
+        self.layer = layer
+        self.target_layer = layer
+        self.include_seed_records = include_seed_records
+        self.per_seed_top_k = per_seed_top_k
+        self.dedupe = dedupe
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        retrieved_input = packet.retrieved if packet.retrieved is not None else RetrievedSet()
+        seed_records = [
+            record
+            for record in _dedupe_records_by_id(list(retrieved_input.items))
+            if getattr(record, "layer", None) == self.layer
+        ]
+        if not seed_records:
+            packet = _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source="retrieved",
+                layer=self.layer,
+                per_seed_top_k=self.per_seed_top_k,
+                include_seed_records=self.include_seed_records,
+                dedupe=self.dedupe,
+                seed_record_ids=[],
+                expanded_neighbor_ids=[],
+                returned_count=0,
+            )
+            return packet, store
+
+        items: list[Any] = []
+        scores: list[dict[str, Any]] = []
+        seen_record_ids: set[str] = set()
+        expanded_neighbor_ids: list[str] = []
+
+        def append_result(record, *, strategy: str, seed_record_id: str, hop: int) -> None:
+            if self.dedupe and record.record_id in seen_record_ids:
+                return
+            seen_record_ids.add(record.record_id)
+            items.append(record)
+            scores.append(
+                {
+                    "record_id": record.record_id,
+                    "rank": len(items),
+                    "strategy": strategy,
+                    "seed_record_id": seed_record_id,
+                    "hop": hop,
+                }
+            )
+
+        for seed_record in seed_records:
+            if self.include_seed_records:
+                append_result(
+                    seed_record,
+                    strategy="graph_seed",
+                    seed_record_id=seed_record.record_id,
+                    hop=0,
+                )
+                if len(items) >= self.top_k:
+                    break
+
+            neighbors = store.iter_graph_neighbors(self.layer, seed_record.record_id)
+            if self.per_seed_top_k is not None:
+                neighbors = neighbors[: self.per_seed_top_k]
+            for neighbor in neighbors:
+                expanded_neighbor_ids.append(neighbor.record_id)
+                append_result(
+                    neighbor,
+                    strategy="graph_expand_retrieved",
+                    seed_record_id=seed_record.record_id,
+                    hop=1,
+                )
+                if len(items) >= self.top_k:
+                    break
+            if len(items) >= self.top_k:
+                break
+
+        retrieved = RetrievedSet(
+            items=items[: self.top_k],
+            scores=scores[: self.top_k],
+            trace={
+                "module": self.spec.name,
+                "source": "retrieved",
+                "layer": self.layer,
+                "top_k": self.top_k,
+                "per_seed_top_k": self.per_seed_top_k,
+                "include_seed_records": self.include_seed_records,
+                "dedupe": self.dedupe,
+                "seed_record_ids": [record.record_id for record in seed_records],
+                "expanded_neighbor_ids": list(dict.fromkeys(expanded_neighbor_ids)),
+                "returned_count": min(len(items), self.top_k),
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
 
 
 class _LayerScopedStore:
@@ -1209,6 +1406,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     BM25Retrieval,
     GraphNeighborRetrieval,
     GraphSeedAndExpandRetrieval,
+    ExpandRetrievedGraphNeighbors,
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
     BufferRetrieval,
