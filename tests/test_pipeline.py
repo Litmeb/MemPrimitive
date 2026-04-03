@@ -38,7 +38,6 @@ from memprimitive.baselines import (
     NeighborContextUpdateEvolution,
     PassThroughUnitFormation,
     PromptContextReadout,
-    KeywordRepresentation,
     RecencyRetrieval,
     ReflectionGenerationEvolution,
     RetrievalOrientedEmbeddingRepresentation,
@@ -862,11 +861,13 @@ def test_memory_pipeline_accepts_iterable_slot_modules_and_runs_them_in_order() 
             ]
         )
     )
+    tag_rep = LLMRepresentation(field="tags", prompt="Extract tags.")
+    tag_rep._llm_json = lambda *, user: ["memory", "note"]  # type: ignore[method-assign]
     pipeline = MemoryPipeline(
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags",)),
+            tag_rep,
         ),
         organization=(
             AppendOrganization(target_layer="working"),
@@ -934,11 +935,13 @@ def test_dispatch_organization_fans_out_same_snapshot_and_keeps_primary_packet()
             ]
         )
     )
+    tag_rep = LLMRepresentation(field="tags", prompt="Extract tags.")
+    tag_rep._llm_json = lambda *, user: ["memory", "note"]  # type: ignore[method-assign]
     pipeline = MemoryPipeline(
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags",)),
+            tag_rep,
         ),
         organization=DispatchOrganization(
             (
@@ -1120,7 +1123,11 @@ def test_memory_pipeline_registers_leaf_module_contracts_on_store() -> None:
 
     MemoryPipeline(
         store=store,
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text", "embedding")),
+            LLMRepresentation(field="entities", prompt="Extract entities."),
+            LLMRepresentation(field="tags", prompt="Extract tags."),
+        ),
         retrieval=EntityRetrieval(top_k=2),
     )
 
@@ -1134,11 +1141,23 @@ def test_store_check_fails_when_retrieval_requires_missing_embedding_contract() 
     store = MemoryStore()
     MemoryPipeline(
         store=store,
-        representation=KeywordRepresentation(),
+        representation=BasicRepresentation(elements=("text", "keywords")),
         retrieval=EmbeddingSimilarityRetrieval(top_k=2),
     )
 
     with pytest.raises(IncompatibleCompositionError, match="unit.embedding"):
+        store.check()
+
+
+def test_store_check_fails_when_retrieval_requires_missing_entity_contract() -> None:
+    store = MemoryStore()
+    MemoryPipeline(
+        store=store,
+        representation=BasicRepresentation(elements=("text", "embedding")),
+        retrieval=EntityRetrieval(top_k=2),
+    )
+
+    with pytest.raises(IncompatibleCompositionError, match="unit.entities"):
         store.check()
 
 

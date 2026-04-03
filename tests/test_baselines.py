@@ -241,6 +241,18 @@ def test_basic_representation_rejects_summary_and_description_elements() -> None
     with pytest.raises(ValueError, match="Unsupported representation element"):
         BasicRepresentation(elements=("text", "description"))
 
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "kv"))
+
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "entities"))
+
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "tags"))
+
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "relation_tags"))
+
 
 def test_llm_representation_requires_openai_config() -> None:
     from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
@@ -1909,7 +1921,7 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
         MemoryStore(),
     )
     packet, store = BasicRepresentation(
-        elements=("text", "entities", "tags", "keywords", "time_anchor", "relation_tags", "source_type")
+        elements=("text", "keywords", "time_anchor", "source_type")
     ).run(packet, store)
     packet, store = AlwaysTrigger().run(packet, store)
     _, store = AppendOrganization().run(packet, store)
@@ -1921,24 +1933,12 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
     assert rep["source_type"] == "notes"
 
 
-def test_keyword_representation_exposes_keyword_summary_without_embedding() -> None:
-    from memprimitive.baselines import KeywordRepresentation, PassThroughUnitFormation
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice builds retrieval tools for memory graphs.", source="notes")),
-        MemoryStore(),
-    )
-    packet, _ = KeywordRepresentation().run(packet, store)
-
-    rep = packet.units[0].metadata["representation"]
-    assert "keywords" in rep
-    assert packet.units[0].embedding is None
-
-
-
-
 def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
-    from memprimitive.baselines import AlwaysTrigger, BasicRepresentation, ConditionalLayerOrganization, PassThroughUnitFormation
+    from memprimitive.baselines import AlwaysTrigger, ConditionalLayerOrganization, LLMRepresentation, PassThroughUnitFormation
+
+    class SeededEntityRepresentation(LLMRepresentation):
+        def _llm_json(self, *, user: str) -> Any:
+            return ["Alice", "tea"]
 
     store = MemoryStore(
         topology=StoreTopology.from_layers(
@@ -1952,7 +1952,7 @@ def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -
         Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
         store,
     )
-    packet, store = BasicRepresentation(elements=("text", "entities", "tags")).run(packet, store)
+    packet, store = SeededEntityRepresentation(field="entities", prompt="Extract entities.").run(packet, store)
     packet, store = AlwaysTrigger().run(packet, store)
     packet, store = ConditionalLayerOrganization(
         default_layer="working",
@@ -2249,6 +2249,7 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
         GraphNeighborContextTraceEvolution,
         GraphReadout,
         GraphSeedAndExpandRetrieval,
+        LLMRepresentation,
         PassThroughUnitFormation,
         ThresholdTrigger,
         TripleRepresentation,
@@ -2269,13 +2270,25 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
             represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
             return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
 
+    class SeededTagRepresentation(LLMRepresentation):
+        _TAGS_BY_TEXT = {
+            "Alice likes jasmine tea.": ["preference", "tea"],
+            "Alice studies graph memory systems.": ["graph", "memory"],
+            "Bob builds retrieval tools.": ["retrieval", "tools"],
+        }
+
+        def _llm_json(self, *, user: str) -> Any:
+            payload = json.loads(user)
+            return list(self._TAGS_BY_TEXT[payload["unit"]["text"]])
+
     store = _graph_vector_store()
     pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=(
             BasicRepresentation(elements=("text", "embedding")),
             SeededTripleRepresentation(),
-            BasicRepresentation(elements=("tags", "keywords")),
+            BasicRepresentation(elements=("keywords",)),
+            SeededTagRepresentation(field="tags", prompt="Extract tags."),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         evolution_trigger=ThresholdTrigger(slot="evolution_trigger", threshold=0.5, constant=1.0),
@@ -3081,12 +3094,23 @@ def test_bm25_retrieval_falls_back_to_recency_when_all_scores_are_zero() -> None
 
 
 def test_tag_retrieval_prefers_matching_tags() -> None:
-    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, BasicRepresentation, PassThroughUnitFormation, TagRetrieval
+    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, LLMRepresentation, PassThroughUnitFormation, TagRetrieval
+
+    class SeededTagRepresentation(LLMRepresentation):
+        _TAGS_BY_TEXT = {
+            "Alice likes tea": ["preference", "tea"],
+            "Alice studies graph memory": ["graph", "memory"],
+            "Bob likes coffee": ["preference", "coffee"],
+        }
+
+        def _llm_json(self, *, user: str) -> Any:
+            payload = json.loads(user)
+            return list(self._TAGS_BY_TEXT[payload["unit"]["text"]])
 
     store = MemoryStore()
     for text in ("Alice likes tea", "Alice studies graph memory", "Bob likes coffee"):
         packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
-        packet, store = BasicRepresentation(elements=("text", "tags")).run(packet, store)
+        packet, store = SeededTagRepresentation(field="tags", prompt="Extract tags.").run(packet, store)
         packet, store = AlwaysTrigger().run(packet, store)
         _, store = AppendOrganization().run(packet, store)
 
@@ -3096,12 +3120,23 @@ def test_tag_retrieval_prefers_matching_tags() -> None:
 
 
 def test_entity_retrieval_prefers_entity_overlap() -> None:
-    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, BasicRepresentation, EntityRetrieval, PassThroughUnitFormation
+    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, EntityRetrieval, LLMRepresentation, PassThroughUnitFormation
+
+    class SeededEntityRepresentation(LLMRepresentation):
+        _ENTITIES_BY_TEXT = {
+            "Alice likes tea": ["Alice"],
+            "Bob likes coffee": ["Bob"],
+            "Alice studies graph memory": ["Alice"],
+        }
+
+        def _llm_json(self, *, user: str) -> Any:
+            payload = json.loads(user)
+            return list(self._ENTITIES_BY_TEXT[payload["unit"]["text"]])
 
     store = MemoryStore()
     for text in ("Alice likes tea", "Bob likes coffee", "Alice studies graph memory"):
         packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
-        packet, store = BasicRepresentation(elements=("text", "entities")).run(packet, store)
+        packet, store = SeededEntityRepresentation(field="entities", prompt="Extract entities.").run(packet, store)
         packet, store = AlwaysTrigger().run(packet, store)
         _, store = AppendOrganization().run(packet, store)
 
