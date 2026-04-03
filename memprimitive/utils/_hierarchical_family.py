@@ -253,7 +253,7 @@ def build_hierarchical_metadata(
     group_key: dict[str, Any],
     records: list[MemoryRecord],
     field_payload: dict[str, Any],
-) -> dict[str, Any]:
+    ) -> dict[str, Any]:
     return {
         "hierarchical": {
             "source_layer": source_layer,
@@ -266,6 +266,29 @@ def build_hierarchical_metadata(
             "source_unit_ids": list(dict.fromkeys(record.unit_id for record in records)),
             "field_payload": field_payload,
             "relation": "hierarchical_source",
+        }
+    }
+
+
+def build_extracted_triple_metadata(
+    *,
+    source_layer: str,
+    target_layer: str,
+    source_record: MemoryRecord,
+    triples: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    return {
+        "hierarchical": {
+            "source_layer": source_layer,
+            "target_layer": target_layer,
+            "extract_mode": "copy",
+            "extract_fields": ["triples"],
+            "group_by": [],
+            "group_key": {},
+            "source_record_ids": [source_record.record_id],
+            "source_unit_ids": [source_record.unit_id],
+            "field_payload": {"triples": list(triples)},
+            "relation": "hierarchical_extracted_triple",
         }
     }
 

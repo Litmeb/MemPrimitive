@@ -18,6 +18,7 @@ from ..interfaces import OrganizationModule
 from ..utils._graph_family import graph_metadata_for_unit
 from ..utils._hierarchical_family import (
     append_hierarchical_records,
+    build_extracted_triple_metadata,
     build_fixed_placements,
     group_records,
     inferred_target_layer,
@@ -203,8 +204,16 @@ class GraphAppendOrganization(OrganizationModule):
     requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
     produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
 
-    def __init__(self, *, target_layer: str = "knowledge_graph") -> None:
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        separate: bool = False,
+        separate_layer: str | None = None,
+    ) -> None:
         self.target_layer = target_layer
+        self.separate = separate
+        self.separate_layer = None if separate_layer is None else str(separate_layer).strip()
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
@@ -215,19 +224,33 @@ class GraphAppendOrganization(OrganizationModule):
             raise ValueError("GraphAppendOrganization requires decisions aligned with units.")
         if store.layer_shape(self.target_layer) != "Graph":
             raise ValueError(f"GraphAppendOrganization requires target layer {self.target_layer!r} to be Graph.")
+        if self.separate and not self.separate_layer:
+            raise ValueError("GraphAppendOrganization requires separate_layer when separate=True.")
 
         placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
-        written_record_ids, written_unit_ids, skipped_units = _append_records_for_placements(
-            packet,
-            store,
-            placements,
-            metadata_builder=self._graph_metadata,
-        )
+        separate_source_record_ids: list[str] = []
+        if self.separate:
+            written_record_ids, written_unit_ids, skipped_units, separate_source_record_ids = self._append_separate_records(
+                packet,
+                store,
+                placements,
+            )
+        else:
+            written_record_ids, written_unit_ids, skipped_units = _append_records_for_placements(
+                packet,
+                store,
+                placements,
+                metadata_builder=self._graph_metadata,
+            )
         trace = copy_trace(packet)
         trace["organization"] = {
             "module": self.spec.name,
             "target_layer": self.target_layer,
+            "separate": self.separate,
+            "separate_layer": self.separate_layer,
             "written_record_ids": written_record_ids,
+            "source_written_record_ids": separate_source_record_ids,
+            "triple_written_record_ids": written_record_ids,
             "written_unit_ids": written_unit_ids,
             "skipped_unit_count": skipped_units,
             "graph_metadata_schema": (
@@ -249,6 +272,42 @@ class GraphAppendOrganization(OrganizationModule):
         return {
             "graph": graph_metadata_for_unit(unit, layer=placement.target_layer),
         }
+
+    def _append_separate_records(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        placements: list[Placement],
+    ) -> tuple[list[str], list[str], int, list[str]]:
+        written_record_ids: list[str] = []
+        written_unit_ids: list[str] = []
+        source_written_record_ids: list[str] = []
+        skipped_units = 0
+        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            if not decision:
+                skipped_units += 1
+                continue
+
+            source_sequence_id = store.next_sequence_id()
+            source_record = MemoryRecord.from_unit(unit=unit, layer=self.separate_layer, sequence_id=source_sequence_id)
+            store.append(source_record)
+            source_written_record_ids.append(source_record.record_id)
+
+            triple_sequence_id = store.next_sequence_id()
+            triple_record = MemoryRecord.from_unit(unit=unit, layer=placement.target_layer, sequence_id=triple_sequence_id)
+            triple_record.metadata.update(self._graph_metadata(unit, placement))
+            triple_record.metadata.update(
+                build_extracted_triple_metadata(
+                    source_layer=self.separate_layer,
+                    target_layer=placement.target_layer,
+                    source_record=source_record,
+                    triples=list(triple_record.metadata["graph"]["triples"]),
+                )
+            )
+            store.append(triple_record)
+            written_record_ids.append(triple_record.record_id)
+            written_unit_ids.append(unit.unit_id)
+        return written_record_ids, written_unit_ids, skipped_units, source_written_record_ids
 
 
 class PlacementWithoutAppendOrganization(OrganizationModule):

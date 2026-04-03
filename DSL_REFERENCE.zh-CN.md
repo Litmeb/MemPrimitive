@@ -77,7 +77,7 @@ unit_formation
 | --- | --- | --- |
 | `AppendOrganization` (`append_organization`) | `target_layer="default"` | 把当前 unit 直接 append 到固定 layer。 |
 | `ConditionalLayerOrganization` (`conditional_layer_organization`) | `default_layer="default"`, `rules=()` | 根据 tags、entities、unit metadata 等规则把 unit 路由到不同 layer，再 append。 |
-| `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"` | 把 unit 追加到图层，并补上 graph-oriented metadata。 |
+| `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 默认把 unit 追加到图层并补上 graph-oriented metadata；当 `separate=True` 时，`target_layer` 继续保存 triple graph record，而 `separate_layer` 额外保存原始文本 record，同时在 triple record 的 `metadata["hierarchical"]` 中记录“从原文抽取 triple”的来源关系。 |
 | `PlacementWithoutAppendOrganization` (`placement_without_append_organization`) | `target_layer="trial_buffer"` | 只产出 placement，不真正落库；适合“先试算/先追踪”的写入路径。 |
 | `GraphAppendLinkReadyOrganization` (`graph_append_link_ready_organization`) | `target_layer="knowledge_graph"`, `note_namespace="note"` | 把富 note 写入图层，并带上后续 link evolution 需要的 link-ready metadata。 |
 | `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 从 source layer 选中的 records 按组抽共性；最终写入不再直接 append，而是把抽象结果构造成 observation 后交给子 `MemoryPipeline.ingest()` 持久化，其中 `target_layer` 与 `memory_pipeline` 二选一。 |

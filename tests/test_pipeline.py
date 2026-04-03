@@ -852,6 +852,37 @@ def test_memory_pipeline_accepts_graph_organization_with_compatible_store_topolo
     assert pipeline.store.count("knowledge_graph") == 1
 
 
+def test_memory_pipeline_accepts_graph_organization_separate_mode() -> None:
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="source_notes"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    pipeline = MemoryPipeline(
+        representation=TripleRepresentation(method="direct"),
+        store=store,
+        organization=GraphAppendOrganization(
+            target_layer="knowledge_graph",
+            separate=True,
+            separate_layer="source_notes",
+        ),
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice likes tea.", source="notes"))
+
+    assert packet.trace["organization"]["target_layer"] == "knowledge_graph"
+    assert packet.trace["organization"]["separate"] is True
+    assert packet.trace["organization"]["separate_layer"] == "source_notes"
+    assert pipeline.store.count("source_notes") == 1
+    assert pipeline.store.count("knowledge_graph") == 1
+    triple_record = pipeline.store.iter_records("knowledge_graph")[0]
+    source_record = pipeline.store.iter_records("source_notes")[0]
+    assert triple_record.metadata["hierarchical"]["source_record_ids"] == [source_record.record_id]
+
+
 def test_memory_pipeline_accepts_iterable_slot_modules_and_runs_them_in_order() -> None:
     store = MemoryStore(
         topology=StoreTopology.from_layers(

@@ -2238,6 +2238,69 @@ def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadat
     assert record.metadata["graph"]["links"] == []
     assert record.metadata["graph"]["link_count"] == 0
     assert packet.trace["organization"]["graph_metadata_schema"]
+    assert packet.trace["organization"]["separate"] is False
+    assert packet.trace["organization"]["source_written_record_ids"] == []
+
+
+def test_graph_append_organization_separate_mode_writes_source_and_triple_layers() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            triples = [("Alice", "likes", "tea")]
+            entities = ["Alice", "tea"]
+            represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="source_notes"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphAppendOrganization(
+        target_layer="knowledge_graph",
+        separate=True,
+        separate_layer="source_notes",
+    ).run(packet, store)
+
+    source_record = store.iter_records("source_notes")[0]
+    triple_record = store.iter_records("knowledge_graph")[0]
+    assert source_record.text == "Alice likes tea."
+    assert "graph" in triple_record.metadata
+    assert "hierarchical" in triple_record.metadata
+    assert triple_record.metadata["hierarchical"]["source_layer"] == "source_notes"
+    assert triple_record.metadata["hierarchical"]["target_layer"] == "knowledge_graph"
+    assert triple_record.metadata["hierarchical"]["source_record_ids"] == [source_record.record_id]
+    assert triple_record.metadata["hierarchical"]["source_unit_ids"] == [source_record.unit_id]
+    assert triple_record.metadata["hierarchical"]["field_payload"]["triples"] == [("Alice", "likes", "tea")]
+    assert triple_record.metadata["hierarchical"]["relation"] == "hierarchical_extracted_triple"
+    assert packet.trace["organization"]["separate"] is True
+    assert packet.trace["organization"]["separate_layer"] == "source_notes"
+    assert packet.trace["organization"]["source_written_record_ids"] == [source_record.record_id]
+    assert packet.trace["organization"]["triple_written_record_ids"] == [triple_record.record_id]
+
+
+def test_graph_append_organization_separate_mode_requires_separate_layer() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphAppendOrganization, PassThroughUnitFormation
+
+    store = _graph_store()
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = AlwaysTrigger().run(packet, store)
+
+    with pytest.raises(ValueError, match="requires separate_layer"):
+        GraphAppendOrganization(target_layer="knowledge_graph", separate=True).run(packet, store)
 
 
 def test_memory_store_graph_link_round_trip_returns_neighbors() -> None:
