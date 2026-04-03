@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 
 from memprimitive import (
@@ -251,6 +252,132 @@ def test_pipeline_can_mask_evolution_without_blocking_write_path_organization() 
     assert packet.trace["memory_evolution"]["effects"] == []
 
 
+def test_hierarchical_session_summary_pipeline_merges_global_top_k(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.utils import _runtime
+
+    def _fake_embed_text(self, text: str) -> list[float]:
+        lowered = text.casefold()
+        return [
+            float("graph" in lowered) + (0.4 if "retrieval" in lowered else 0.0),
+            float("trip" in lowered) + float("hotel" in lowered) + float("train" in lowered),
+            1.0 if "summary" in lowered else 0.2,
+        ]
+
+    class _FakeHierarchicalRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def json(self, *, system: str, user: str):
+            payload = json.loads(user)
+            group_key = payload.get("group_key", {})
+            session_id = group_key.get("session_id", "unknown")
+            texts = [record.get("text", "") for record in payload.get("records", [])]
+            return {"summary": f"summary for {session_id}: {' '.join(texts)}"}
+
+    monkeypatch.setattr(BasicRepresentation, "_embed_text", _fake_embed_text)
+    monkeypatch.setattr(EmbeddingSimilarityRetrieval, "_embed_text", _fake_embed_text)
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeHierarchicalRuntime())
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="episodic", theme="session_memory", indices=("temporal", "vector")),
+                StoreLayerSpec(name="session_summary", theme="semantic", indices=("temporal", "vector")),
+            ]
+        )
+    )
+    turn_pipeline = MemoryPipeline(
+        representation=BasicRepresentation(elements=("text", "embedding")),
+        organization=AppendOrganization(target_layer="episodic"),
+        store=store,
+    )
+    session_close_pipeline = MemoryPipeline(
+        representation=BasicRepresentation(elements=("text",)),
+        write_trigger=NeverTrigger(slot="write_trigger"),
+        organization=AppendOrganization(target_layer="episodic"),
+        evolution_trigger=BoundaryEventTrigger(
+            slot="evolution_trigger",
+            accepted_events=("session_end",),
+        ),
+        memory_evolution=HierarchicalEvolution(
+            source_layer="episodic",
+            extract_mode="generate",
+            extract_fields=("summary",),
+            group_by=("session_id",),
+            target_layer="session_summary",
+        ),
+        store=store,
+    )
+    recall_pipeline = MemoryPipeline(
+        retrieval=LayerAwareRetrieval(
+            default_retriever=EmbeddingSimilarityRetrieval(top_k=3),
+            retriever_by_layer={"session_summary": EmbeddingSimilarityRetrieval(top_k=3)},
+            active_layers=("session_summary", "episodic"),
+            top_k=3,
+            top_k_by_layer={"session_summary": 3, "episodic": 3},
+        ),
+        readout=BulletListReadout(),
+        store=store,
+    )
+
+    observations = [
+        Observation(
+            text="Alice is debugging graph retrieval.",
+            source="dialogue",
+            metadata={"session_id": "sess-1"},
+        ),
+        Observation(
+            text="She wants a clean session summary for retrieval work.",
+            source="dialogue",
+            metadata={"session_id": "sess-1"},
+        ),
+        Observation(
+            text="Bob is comparing hotel and train options.",
+            source="dialogue",
+            metadata={"session_id": "sess-2"},
+        ),
+        Observation(
+            text="He is planning a weekend trip.",
+            source="dialogue",
+            metadata={"session_id": "sess-2"},
+        ),
+    ]
+    for observation in observations:
+        turn_pipeline.ingest(observation)
+
+    session_close_pipeline.ingest(
+        Observation(
+            text="close session sess-1",
+            source="session_controller",
+            metadata={"session_id": "sess-1", "trigger": {"events": ["session_end"]}},
+        )
+    )
+    session_close_pipeline.ingest(
+        Observation(
+            text="close session sess-2",
+            source="session_controller",
+            metadata={"session_id": "sess-2", "trigger": {"events": ["session_end"]}},
+        )
+    )
+
+    assert store.count("session_summary") == 2
+    summary_records = store.iter_records("session_summary")
+    assert summary_records[0].metadata["hierarchical"]["group_key"] == {"session_id": "sess-1"}
+    assert summary_records[1].metadata["hierarchical"]["group_key"] == {"session_id": "sess-2"}
+
+    query = Query(text="graph retrieval session summary")
+    packet, _ = recall_pipeline.retrieval.run(Packet(query=query), recall_pipeline.store)
+
+    assert packet.retrieved is not None
+    assert len(packet.retrieved.items) == 3
+    assert len(packet.retrieved.scores) == 3
+    assert packet.retrieved.scores[0]["merge_rank"] == 1
+    assert packet.retrieved.scores[-1]["merge_rank"] == 3
+    assert "session_summary" in {record.layer for record in packet.retrieved.items}
+    assert packet.trace["retrieval"]["final_returned_count"] == 3
+    assert packet.trace["retrieval"]["active_layers"] == ["session_summary", "episodic"]
+
+
 def test_default_ingest_writes_before_optional_evolution_runs() -> None:
     pipeline = create_baseline_pipeline(top_k=2)
 
@@ -358,10 +485,10 @@ def test_pipeline_boundary_trigger_can_feed_hierarchical_evolution() -> None:
         evolution_trigger=BoundaryEventTrigger(slot="evolution_trigger", accepted_events=("session_end",)),
         memory_evolution=HierarchicalEvolution(
             source_layer="default",
-            target_layer="profile",
             extract_mode="copy",
             extract_fields=("doc_id", "subgoal_id"),
             group_by=("session_id",),
+            target_layer="profile",
         ),
         store=store,
     )
@@ -383,11 +510,70 @@ def test_pipeline_boundary_trigger_can_feed_hierarchical_evolution() -> None:
     assert packet.trace["evolution_trigger"]["decisions_store_counts"] == {"default": 2}
     assert packet.trace["memory_evolution"]["module"] == "hierarchical_evolution"
     assert packet.trace["memory_evolution"]["group_count"] == 1
+    assert packet.trace["memory_evolution"]["write_mode"] == "memory_pipeline_ingest"
+    assert packet.trace["memory_evolution"]["writer_pipeline_mode"] == "default_target_layer"
     assert pipeline.store.count("profile") == 1
     profile_record = pipeline.store.iter_records("profile")[0]
     assert profile_record.metadata["hierarchical"]["source_record_ids"] == ["rec-1", "rec-2"]
     assert profile_record.metadata["hierarchical"]["field_payload"]["doc_id"] == ["doc-a", "doc-b"]
     assert profile_record.metadata["hierarchical"]["group_key"] == {"session_id": "sess-1"}
+
+
+def test_pipeline_hierarchical_evolution_can_write_through_provided_child_pipeline() -> None:
+    child_pipeline = MemoryPipeline(
+        write_trigger=AlwaysTrigger(),
+        organization=AppendOrganization(target_layer="profile"),
+        store=MemoryStore(),
+    )
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="profile", theme="semantic"),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord.from_unit(
+            unit=MemoryUnit(
+                text="prior session note",
+                metadata={"session_id": "sess-1", "doc_id": "doc-a"},
+            ),
+            layer="default",
+            sequence_id=store.next_sequence_id(),
+        )
+    )
+    pipeline = MemoryPipeline(
+        write_trigger=BoundaryEventTrigger(accepted_events=("session_end",)),
+        organization=AppendOrganization(target_layer="default"),
+        evolution_trigger=BoundaryEventTrigger(slot="evolution_trigger", accepted_events=("session_end",)),
+        memory_evolution=HierarchicalEvolution(
+            source_layer="default",
+            extract_mode="copy",
+            extract_fields=("doc_id",),
+            memory_pipeline=child_pipeline,
+        ),
+        store=store,
+    )
+
+    packet = pipeline.ingest(
+        Observation(
+            text="new session note",
+            source="dialogue",
+            metadata={
+                "session_id": "sess-1",
+                "doc_id": "doc-b",
+                "trigger": {"events": ["session_end"], "session_id": "sess-1"},
+            },
+        )
+    )
+
+    assert child_pipeline.store is pipeline.store
+    assert packet.trace["memory_evolution"]["writer_pipeline_mode"] == "provided"
+    assert pipeline.store.count("profile") == 1
+    profile_record = pipeline.store.iter_records("profile")[0]
+    assert profile_record.metadata["hierarchical"]["field_payload"]["doc_id"] == ["doc-a", "doc-b"]
+    assert packet.trace["memory_evolution"]["effects"][0]["sub_ingest_trace"]["organization"]["target_layer"] == "profile"
 
 
 def test_pipeline_runtime_memory_pressure_records_decisions_store_summary() -> None:

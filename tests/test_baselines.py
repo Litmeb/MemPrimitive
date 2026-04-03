@@ -2552,9 +2552,9 @@ def test_hierarchical_organization_copy_uses_decisions_store_selection() -> None
 
     packet_out, store = HierarchicalOrganization(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="copy",
         extract_fields=("doc_id", "subgoal_id"),
+        target_layer="semantic",
     ).run(packet, store)
 
     written = store.iter_records("semantic")
@@ -2564,6 +2564,10 @@ def test_hierarchical_organization_copy_uses_decisions_store_selection() -> None
     assert packet_out.trace["organization"]["selection_source"] == "decisions_store"
     assert packet_out.trace["organization"]["selected_record_count"] == 1
     assert packet_out.trace["organization"]["append_current_units"] is False
+    assert packet_out.trace["organization"]["write_mode"] == "memory_pipeline_ingest"
+    assert packet_out.trace["organization"]["writer_pipeline_mode"] == "default_target_layer"
+    assert packet_out.trace["organization"]["written_record_ids"] == ["rec-3"]
+    assert packet_out.trace["organization"]["sub_ingest_trace"][0]["organization"]["target_layer"] == "semantic"
     assert written[0].metadata["hierarchical"]["source_record_ids"] == ["rec-1"]
     assert written[0].metadata["hierarchical"]["field_payload"]["doc_id"] == "doc-a"
 
@@ -2601,16 +2605,19 @@ def test_hierarchical_evolution_copy_uses_evolution_decisions_store_selection() 
 
     packet_out, store = HierarchicalEvolution(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="copy",
         extract_fields=("doc_id",),
+        target_layer="semantic",
     ).run(packet, store)
 
     written = store.iter_records("semantic")
     assert len(written) == 1
     assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions_store"
     assert packet_out.trace["memory_evolution"]["selected_record_count"] == 1
+    assert packet_out.trace["memory_evolution"]["write_mode"] == "memory_pipeline_ingest"
+    assert packet_out.trace["memory_evolution"]["writer_pipeline_mode"] == "default_target_layer"
     assert packet_out.trace["memory_evolution"]["effects"][0]["source_record_ids"] == ["rec-2"]
+    assert packet_out.trace["memory_evolution"]["effects"][0]["sub_ingest_trace"]["organization"]["target_layer"] == "semantic"
     assert written[0].text == "doc-b"
 
 
@@ -2649,10 +2656,10 @@ def test_hierarchical_copy_grouping_and_dedup_preserve_unique_values() -> None:
 
     packet_out, store = HierarchicalEvolution(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="copy",
         extract_fields=("doc_id",),
         group_by=("session_id",),
+        target_layer="semantic",
     ).run(packet, store)
 
     written = store.iter_records("semantic")
@@ -2692,9 +2699,9 @@ def test_hierarchical_modules_fall_back_to_source_layer_scan_when_decisions_stor
 
     packet_out, store = HierarchicalEvolution(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="copy",
         extract_fields=("doc_id",),
+        target_layer="semantic",
     ).run(packet, store)
 
     assert packet_out.trace["memory_evolution"]["decision_source"] == "source_layer_scan"
@@ -2725,9 +2732,9 @@ def test_hierarchical_modules_noop_when_decisions_store_excludes_source_layer() 
 
     packet_out, store = HierarchicalEvolution(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="copy",
         extract_fields=("doc_id",),
+        target_layer="semantic",
     ).run(packet, store)
 
     assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions_store"
@@ -2769,11 +2776,11 @@ def test_hierarchical_generate_mode_supports_default_and_custom_prompts(monkeypa
 
     packet_out, store = HierarchicalEvolution(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="generate",
         extract_fields=("summary", "profile"),
         group_by=("session_id",),
         prompt="CUSTOM HIERARCHICAL PROMPT",
+        target_layer="semantic",
     ).run(packet, store)
 
     written = store.iter_records("semantic")
@@ -2811,14 +2818,81 @@ def test_hierarchical_generate_mode_uses_default_prompt_when_custom_prompt_missi
 
     _, store = HierarchicalEvolution(
         source_layer="default",
-        target_layer="semantic",
         extract_mode="generate",
         extract_fields=("summary",),
+        target_layer="semantic",
     ).run(packet, store)
 
     assert fake_runtime.calls[0]["system"] != "CUSTOM HIERARCHICAL PROMPT"
     assert "higher-level hierarchical memory record" in fake_runtime.calls[0]["system"]
     assert store.iter_records("semantic")[0].text == "generated::summary::all::1"
+
+
+def test_hierarchical_constructors_require_exactly_one_target_or_pipeline() -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+    from memprimitive.pipeline import create_baseline_pipeline
+
+    with pytest.raises(ValueError, match="Exactly one of target_layer or memory_pipeline"):
+        HierarchicalEvolution(
+            source_layer="default",
+            extract_mode="copy",
+            extract_fields=("doc_id",),
+        )
+
+    with pytest.raises(ValueError, match="Exactly one of target_layer or memory_pipeline"):
+        HierarchicalEvolution(
+            source_layer="default",
+            extract_mode="copy",
+            extract_fields=("doc_id",),
+            target_layer="semantic",
+            memory_pipeline=create_baseline_pipeline(),
+        )
+
+
+def test_hierarchical_memory_pipeline_mode_reuses_parent_store_and_custom_route() -> None:
+    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, HierarchicalEvolution
+    from memprimitive.pipeline import MemoryPipeline
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="semantic", theme="semantic"),
+                StoreLayerSpec(name="profile", theme="semantic"),
+            ]
+        )
+    )
+    _seed_layer_with_metadata(store, "default", [{"text": "a1", "metadata": {"doc_id": "doc-a"}}])
+    child_pipeline = MemoryPipeline(
+        write_trigger=AlwaysTrigger(),
+        organization=AppendOrganization(target_layer="profile"),
+        store=MemoryStore(),
+    )
+    packet, store = _stored_pipeline_packet("incoming note", store)
+    packet = Packet(
+        units=packet.units,
+        placements=packet.placements,
+        decisions=[True],
+        decisions_store={
+            "default": {"decision": True, "record_ids": ["rec-1"], "selector": {"kind": "manual"}}
+        },
+        trace=packet.trace,
+    )
+
+    packet_out, store = HierarchicalEvolution(
+        source_layer="default",
+        extract_mode="copy",
+        extract_fields=("doc_id",),
+        memory_pipeline=child_pipeline,
+    ).run(packet, store)
+
+    assert child_pipeline.store is store
+    assert store.count("profile") == 1
+    assert store.count("semantic") == 0
+    assert packet_out.trace["memory_evolution"]["writer_pipeline_mode"] == "provided"
+    assert packet_out.trace["memory_evolution"]["target_layer"] == "profile"
+    assert packet_out.trace["memory_evolution"]["effects"][0]["sub_ingest_trace"]["organization"]["target_layer"] == "profile"
+    assert store.iter_records("profile")[0].metadata["hierarchical"]["field_payload"]["doc_id"] == "doc-a"
 
 
 def test_keyword_count_retrieval_prefers_keyword_hits() -> None:

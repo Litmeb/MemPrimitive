@@ -20,6 +20,7 @@ from ..utils._hierarchical_family import (
     append_hierarchical_records,
     build_fixed_placements,
     group_records,
+    inferred_target_layer,
     require_aligned_units_decisions,
     resolve_source_records,
     validate_hierarchical_config,
@@ -391,15 +392,17 @@ class HierarchicalOrganization(OrganizationModule):
         self,
         *,
         source_layer: str,
-        target_layer: str,
         extract_mode: str,
         extract_fields: tuple[str, ...],
         group_by: tuple[str, ...] = (),
         prompt: str | None = None,
+        target_layer: str | None = None,
+        memory_pipeline=None,
     ) -> None:
         config = validate_hierarchical_config(
             source_layer=source_layer,
             target_layer=target_layer,
+            memory_pipeline=memory_pipeline,
             extract_mode=extract_mode,
             extract_fields=extract_fields,
             group_by=group_by,
@@ -407,6 +410,7 @@ class HierarchicalOrganization(OrganizationModule):
         )
         self.source_layer = config["source_layer"]
         self.target_layer = config["target_layer"]
+        self.memory_pipeline = config["memory_pipeline"]
         self.extract_mode = config["extract_mode"]
         self.extract_fields = config["extract_fields"]
         self.group_by = config["group_by"]
@@ -415,37 +419,49 @@ class HierarchicalOrganization(OrganizationModule):
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         require_aligned_units_decisions(packet, include_placements=False)
 
-        placements = build_fixed_placements(packet, target_layer=self.target_layer)
+        placements = build_fixed_placements(
+            packet,
+            target_layer=self.target_layer,
+            memory_pipeline=self.memory_pipeline,
+        )
         selected_records, selection_source = resolve_source_records(
             packet,
             store,
             source_layer=self.source_layer,
         )
         grouped = group_records(selected_records, group_by=self.group_by)
-        effects = append_hierarchical_records(
+        effects, writer_pipeline_mode = append_hierarchical_records(
             store,
             source_layer=self.source_layer,
             target_layer=self.target_layer,
+            memory_pipeline=self.memory_pipeline,
             extract_mode=self.extract_mode,
             extract_fields=self.extract_fields,
             group_by=self.group_by,
             grouped_records=grouped,
             prompt=self.prompt,
         )
+        effective_target_layer = inferred_target_layer(
+            target_layer=self.target_layer,
+            memory_pipeline=self.memory_pipeline,
+        )
 
         trace = copy_trace(packet)
         trace["organization"] = {
             "module": self.spec.name,
             "source_layer": self.source_layer,
-            "target_layer": self.target_layer,
+            "target_layer": effective_target_layer,
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
             "group_by": list(self.group_by),
             "selection_source": selection_source,
             "selected_record_count": len(selected_records),
             "group_count": len(grouped),
-            "written_record_ids": [effect["record_id"] for effect in effects],
+            "written_record_ids": [record_id for effect in effects for record_id in effect["written_record_ids"]],
             "append_current_units": False,
+            "write_mode": "memory_pipeline_ingest",
+            "writer_pipeline_mode": writer_pipeline_mode,
+            "sub_ingest_trace": [effect["sub_ingest_trace"] for effect in effects],
         }
         return replace(packet, placements=placements, trace=trace), store
 
