@@ -1285,6 +1285,42 @@ def test_retrieval_returns_latest_records_first_regardless_of_query_text() -> No
     assert [record.text for record in packet_out.retrieved.items] == ["third item", "second item"]
 
 
+def test_recency_retrieval_source_store_preserves_default_behavior() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+
+    store = MemoryStore()
+    for text in ("first item", "second item", "third item"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    default_packet, _ = RecencyRetrieval(top_k=2).run(Packet(query=Query(text="ignored")), store)
+    explicit_store_packet, _ = RecencyRetrieval(top_k=2, source="store").run(Packet(query=Query(text="ignored")), store)
+
+    assert [record.record_id for record in explicit_store_packet.retrieved.items] == [
+        record.record_id for record in default_packet.retrieved.items
+    ]
+    assert explicit_store_packet.retrieved.trace["source"] == "store"
+
+
+def test_recency_retrieval_source_retrieved_reranks_existing_subset_only() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+
+    store = MemoryStore()
+    for text in ("first item", "second item", "third item", "fourth item"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = RecencyRetrieval(top_k=2, source="retrieved").run(
+        Packet(
+            query=Query(text="ignored"),
+            retrieved=RetrievedSet(items=[store.iter_records()[0], store.iter_records()[2]], scores=[]),
+        ),
+        store,
+    )
+
+    assert [record.text for record in packet_out.retrieved.items] == ["third item", "first item"]
+    assert packet_out.retrieved.trace["source"] == "retrieved"
+    assert packet_out.retrieved.trace["candidate_count"] == 2
+
+
 def test_retrieval_does_not_mutate_store() -> None:
     from memprimitive.baselines import RecencyRetrieval
 
@@ -1417,6 +1453,95 @@ def test_embedding_similarity_retrieval_uses_record_embedding_not_metadata_summa
     assert packet_out.retrieved.scores == []
     assert packet_out.trace["retrieval"]["candidate_count"] == 1
     assert packet_out.trace["retrieval"]["embedding_candidate_count"] == 0
+
+
+def test_embedding_similarity_retrieval_source_retrieved_uses_query_embedding() -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    first = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="default",
+        text="closest",
+        timestamp="2026-01-01T00:00:00+00:00",
+        embedding=[1.0, 0.0],
+    )
+    second = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="default",
+        text="second",
+        timestamp="2026-01-01T00:00:01+00:00",
+        embedding=[0.0, 1.0],
+    )
+    outside = MemoryRecord(
+        record_id="rec-3",
+        unit_id="unit-3",
+        layer="default",
+        text="outside subset",
+        timestamp="2026-01-01T00:00:02+00:00",
+        embedding=[0.99, 0.01],
+    )
+    for record in (first, second, outside):
+        store.append(record)
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(top_k=2, source="retrieved").run(
+        Packet(
+            query=Query(text="ignored", embedding=[0.0, 1.0]),
+            retrieved=RetrievedSet(items=[first, second], scores=[]),
+        ),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+    assert packet_out.retrieved.trace["source"] == "retrieved"
+    assert packet_out.retrieved.trace["candidate_count"] == 2
+    assert packet_out.retrieved.trace["reused_query_embedding"] is True
+
+
+def test_embedding_similarity_retrieval_source_retrieved_computes_query_embedding_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+
+    store = MemoryStore()
+    first = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="default",
+        text="closest",
+        timestamp="2026-01-01T00:00:00+00:00",
+        embedding=[1.0, 0.0],
+    )
+    second = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="default",
+        text="second",
+        timestamp="2026-01-01T00:00:01+00:00",
+        embedding=[0.0, 1.0],
+    )
+    for record in (first, second):
+        store.append(record)
+
+    def _fake_embed_text(self, text: str) -> list[float]:
+        assert text == "alpha query"
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(EmbeddingSimilarityRetrieval, "_embed_text", _fake_embed_text)
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(top_k=1, source="retrieved").run(
+        Packet(
+            query=Query(text="alpha query"),
+            retrieved=RetrievedSet(items=[second, first], scores=[]),
+        ),
+        store,
+    )
+
+    assert packet_out.query.embedding == [1.0, 0.0]
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.retrieved.trace["reused_query_embedding"] is False
 
 
 def test_embedding_similarity_retrieval_skips_missing_and_mismatched_embeddings() -> None:
@@ -2088,6 +2213,103 @@ def test_graph_seed_and_expand_retrieval_uses_candidate_set_and_neighbor_expansi
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-seed", "rec-neighbor"]
     assert packet_out.trace["retrieval"]["seed_record_ids"] == ["rec-seed"]
     assert packet_out.trace["retrieval"]["expanded_neighbor_ids"] == ["rec-neighbor"]
+
+
+def test_expand_retrieved_graph_neighbors_adds_neighbors_from_retrieved_seeds() -> None:
+    from memprimitive.baselines import ExpandRetrievedGraphNeighbors
+
+    store = _graph_store()
+    seed = MemoryRecord(
+        record_id="rec-seed",
+        unit_id="unit-seed",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"links": ["rec-neighbor"]}},
+    )
+    neighbor = MemoryRecord(
+        record_id="rec-neighbor",
+        unit_id="unit-neighbor",
+        layer="knowledge_graph",
+        text="Alice likes jasmine tea",
+        timestamp="2026-03-27T00:01:00+00:00",
+        metadata={"graph": {"links": []}},
+    )
+    store.append(seed)
+    store.append(neighbor)
+
+    packet_out, _ = ExpandRetrievedGraphNeighbors(top_k=3, layer="knowledge_graph").run(
+        Packet(retrieved=RetrievedSet(items=[seed], scores=[])),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-seed", "rec-neighbor"]
+    assert packet_out.retrieved.scores[0]["strategy"] == "graph_seed"
+    assert packet_out.retrieved.scores[1]["strategy"] == "graph_expand_retrieved"
+    assert packet_out.retrieved.trace["expanded_neighbor_ids"] == ["rec-neighbor"]
+
+
+def test_expand_retrieved_graph_neighbors_dedupes_and_filters_non_target_layers() -> None:
+    from memprimitive.baselines import ExpandRetrievedGraphNeighbors
+
+    store = _graph_store()
+    seed_a = MemoryRecord(
+        record_id="rec-seed-a",
+        unit_id="unit-seed-a",
+        layer="knowledge_graph",
+        text="Alice studies graph memory",
+        timestamp="2026-03-27T00:00:00+00:00",
+        metadata={"graph": {"links": ["rec-neighbor"]}},
+    )
+    seed_b = MemoryRecord(
+        record_id="rec-seed-b",
+        unit_id="unit-seed-b",
+        layer="knowledge_graph",
+        text="Alice studies retrieval",
+        timestamp="2026-03-27T00:00:01+00:00",
+        metadata={"graph": {"links": ["rec-neighbor"]}},
+    )
+    neighbor = MemoryRecord(
+        record_id="rec-neighbor",
+        unit_id="unit-neighbor",
+        layer="knowledge_graph",
+        text="Shared neighbor",
+        timestamp="2026-03-27T00:00:02+00:00",
+        metadata={"graph": {"links": []}},
+    )
+    other_layer = MemoryRecord(
+        record_id="rec-other",
+        unit_id="unit-other",
+        layer="default",
+        text="Other layer seed",
+        timestamp="2026-03-27T00:00:03+00:00",
+    )
+    for record in (seed_a, seed_b, neighbor, other_layer):
+        store.append(record)
+
+    packet_out, _ = ExpandRetrievedGraphNeighbors(
+        top_k=5,
+        layer="knowledge_graph",
+        include_seed_records=False,
+        dedupe=True,
+    ).run(
+        Packet(retrieved=RetrievedSet(items=[seed_a, other_layer, seed_b], scores=[])),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-neighbor"]
+    assert packet_out.retrieved.trace["seed_record_ids"] == ["rec-seed-a", "rec-seed-b"]
+    assert packet_out.retrieved.trace["returned_count"] == 1
+
+
+def test_expand_retrieved_graph_neighbors_returns_empty_when_no_seeds() -> None:
+    from memprimitive.baselines import ExpandRetrievedGraphNeighbors
+
+    packet_out, _ = ExpandRetrievedGraphNeighbors(top_k=3).run(Packet(retrieved=RetrievedSet(items=[], scores=[])), _graph_store())
+
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+    assert packet_out.retrieved.trace["seed_record_ids"] == []
 
 
 def test_graph_neighbor_append_evolution_only_modifies_graph_layer() -> None:
@@ -3007,6 +3229,65 @@ def test_keyword_count_retrieval_prefers_keyword_hits() -> None:
     assert [record.text for record in packet_out.retrieved.items] == ["Alice studies graphs", "Alice likes tea"]
 
 
+def test_keyword_count_retrieval_source_store_preserves_default_behavior() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval
+
+    store = MemoryStore()
+    for text in ("Alice likes tea", "Bob likes coffee", "Alice studies graphs"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    default_packet, _ = KeywordCountRetrieval(top_k=2).run(Packet(query=Query(text="Alice graphs")), store)
+    explicit_store_packet, _ = KeywordCountRetrieval(top_k=2, source="store").run(Packet(query=Query(text="Alice graphs")), store)
+
+    assert [record.record_id for record in explicit_store_packet.retrieved.items] == [
+        record.record_id for record in default_packet.retrieved.items
+    ]
+    assert explicit_store_packet.retrieved.trace["source"] == "store"
+
+
+def test_keyword_count_retrieval_source_retrieved_only_reranks_candidate_subset() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval
+
+    store = MemoryStore()
+    candidate_a = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="default",
+        text="tea note",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={"representation": {"keywords": ["tea"]}},
+    )
+    candidate_b = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="default",
+        text="graph note",
+        timestamp="2026-01-01T00:00:01+00:00",
+        metadata={"representation": {"keywords": ["graph"]}},
+    )
+    better_outside = MemoryRecord(
+        record_id="rec-3",
+        unit_id="unit-3",
+        layer="default",
+        text="graph memory retrieval",
+        timestamp="2026-01-01T00:00:02+00:00",
+        metadata={"representation": {"keywords": ["graph", "memory", "retrieval"]}},
+    )
+    for record in (candidate_a, candidate_b, better_outside):
+        store.append(record)
+
+    packet_out, _ = KeywordCountRetrieval(top_k=2, source="retrieved").run(
+        Packet(
+            query=Query(text="graph"),
+            retrieved=RetrievedSet(items=[candidate_a, candidate_b], scores=[]),
+        ),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+    assert all(record.record_id != "rec-3" for record in packet_out.retrieved.items)
+
+
 def test_bm25_retrieval_prefers_stronger_lexical_matches() -> None:
     from memprimitive.baselines import BM25Retrieval
 
@@ -3072,6 +3353,19 @@ def test_bm25_retrieval_on_empty_store_returns_empty_retrieved_set() -> None:
     assert packet_out.retrieved.scores == []
 
 
+def test_bm25_retrieval_source_retrieved_returns_empty_on_empty_candidates() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    packet_out, _ = BM25Retrieval(top_k=2, source="retrieved").run(
+        Packet(query=Query(text="Alice"), retrieved=RetrievedSet(items=[], scores=[])),
+        MemoryStore(),
+    )
+
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.trace["source"] == "retrieved"
+    assert packet_out.retrieved.trace["candidate_count"] == 0
+
+
 def test_bm25_retrieval_requires_query() -> None:
     from memprimitive.baselines import BM25Retrieval
 
@@ -3091,6 +3385,50 @@ def test_bm25_retrieval_falls_back_to_recency_when_all_scores_are_zero() -> None
     assert [record.text for record in packet_out.retrieved.items] == ["new note", "old note"]
     assert packet_out.retrieved.trace["used_recency_fallback"] is True
     assert all(score["score"] == 0.0 for score in packet_out.retrieved.scores)
+
+
+def test_bm25_retrieval_source_retrieved_only_scores_candidate_subset() -> None:
+    from memprimitive.baselines import BM25Retrieval
+
+    store = MemoryStore()
+    candidate_a = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="default",
+        text="tea notes only",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={"representation": {"keywords": ["tea"]}},
+    )
+    candidate_b = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="default",
+        text="graph retrieval",
+        timestamp="2026-01-01T00:00:01+00:00",
+        metadata={"representation": {"keywords": ["graph", "retrieval"]}},
+    )
+    better_outside = MemoryRecord(
+        record_id="rec-3",
+        unit_id="unit-3",
+        layer="default",
+        text="graph memory retrieval",
+        timestamp="2026-01-01T00:00:02+00:00",
+        metadata={"representation": {"keywords": ["graph", "memory", "retrieval"]}},
+    )
+    for record in (candidate_a, candidate_b, better_outside):
+        store.append(record)
+
+    packet_out, _ = BM25Retrieval(top_k=2, source="retrieved").run(
+        Packet(
+            query=Query(text="graph memory"),
+            retrieved=RetrievedSet(items=[candidate_a, candidate_b], scores=[]),
+        ),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2"]
+    assert all(record.record_id != "rec-3" for record in packet_out.retrieved.items)
+    assert packet_out.retrieved.trace["candidate_count"] == 2
 
 
 def test_tag_retrieval_prefers_matching_tags() -> None:
