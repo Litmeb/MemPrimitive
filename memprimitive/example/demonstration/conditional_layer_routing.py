@@ -20,7 +20,7 @@ if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, StoreLayerSpec, StoreTopology
-from memprimitive.baselines import BasicRepresentation, ConditionalLayerOrganization, TripleRepresentation
+from memprimitive.baselines import BasicRepresentation, ConditionalLayerOrganization, LLMRepresentation, TripleRepresentation
 
 
 def main() -> None:
@@ -42,7 +42,8 @@ def main() -> None:
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags", "keywords", "summary")),
+            BasicRepresentation(elements=("tags", "keywords")),
+            LLMRepresentation(field="summary", prompt="Extract a short retrieval summary for this memory unit."),
         ),
         organization=ConditionalLayerOrganization(
             default_layer="working",
