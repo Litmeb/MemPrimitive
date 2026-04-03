@@ -30,6 +30,14 @@ def _default_factory_for_class(cls: type[PrimitiveModule], slot: str, *, top_k: 
     if slot == "write_trigger":
         return lambda c=cls: c(slot="write_trigger")
     if slot == "evolution_trigger":
+        if cls.__name__ == "PeriodicMaintenanceTrigger":
+            from .trigger import NeverTrigger
+
+            return lambda c=cls: c(
+                slot="evolution_trigger",
+                every_n=2,
+                trigger=NeverTrigger(slot="evolution_trigger"),
+            )
         return lambda c=cls: c(slot="evolution_trigger")
     return lambda c=cls: c()
 

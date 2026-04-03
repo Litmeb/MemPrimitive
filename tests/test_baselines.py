@@ -923,8 +923,8 @@ def test_model_judge_trigger_supports_injected_per_unit_and_broadcast_modes() ->
     assert evolution_packet.trace["evolution_trigger"]["per_unit"][0]["score"] == 0.75
 
 
-def test_periodic_and_idle_maintenance_triggers_gate_evolution_from_schedule_metadata() -> None:
-    from memprimitive.baselines import AppendOrganization, IdleMaintenanceTrigger, PeriodicMaintenanceTrigger
+def test_periodic_maintenance_trigger_runs_wrapped_trigger_when_schedule_matches() -> None:
+    from memprimitive.baselines import AppendOrganization, PeriodicMaintenanceTrigger, ScalarRuleTrigger
 
     packet, store = _represented_packet(
         "Alice likes tea.",
@@ -940,9 +940,134 @@ def test_periodic_and_idle_maintenance_triggers_gate_evolution_from_schedule_met
         store,
     )
 
-    periodic_packet, _ = PeriodicMaintenanceTrigger(every_n=3).run(packet, store)
+    periodic_packet, _ = PeriodicMaintenanceTrigger(
+        every_n=3,
+        trigger=ScalarRuleTrigger(
+            slot="evolution_trigger",
+            signal_key="importance",
+            threshold=0.5,
+        ),
+    ).run(
+        replace(
+            packet,
+            observation=replace(
+                packet.observation,
+                metadata={"trigger": {"schedule": {"tick": 12}, "signals": {"importance": 0.9}}},
+            ),
+        ),
+        store,
+    )
+
     assert periodic_packet.decisions == [True]
+    assert periodic_packet.trace["evolution_trigger"]["module"] == "scalar_rule_evolution_trigger"
     assert periodic_packet.trace["evolution_trigger"]["tick"] == 12
+    assert periodic_packet.trace["evolution_trigger"]["periodic_matched"] is True
+    assert periodic_packet.trace["evolution_trigger"]["wrapped_trigger_module"] == "scalar_rule_evolution_trigger"
+    assert periodic_packet.trace["evolution_trigger"]["signal_key"] == "importance"
+
+
+def test_periodic_maintenance_trigger_preserves_existing_decisions_on_miss() -> None:
+    from memprimitive.baselines import AppendOrganization, PeriodicMaintenanceTrigger, NeverTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"schedule": {"tick": 11}}},
+    )
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    periodic_packet, _ = PeriodicMaintenanceTrigger(
+        every_n=3,
+        trigger=NeverTrigger(slot="evolution_trigger"),
+    ).run(packet, store)
+
+    assert periodic_packet.decisions == [True]
+    assert periodic_packet.trace["evolution_trigger"]["module"] == "periodic_maintenance_evolution_trigger"
+    assert periodic_packet.trace["evolution_trigger"]["tick"] == 11
+    assert periodic_packet.trace["evolution_trigger"]["periodic_matched"] is False
+    assert periodic_packet.trace["evolution_trigger"]["wrapped_trigger_module"] == "never_evolution_trigger"
+
+
+def test_periodic_maintenance_trigger_keeps_none_decisions_on_miss() -> None:
+    from memprimitive.baselines import PeriodicMaintenanceTrigger, NeverTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"schedule": {"tick": 11}}},
+    )
+    packet = replace(
+        packet,
+        placements=[Placement(unit_id=packet.units[0].unit_id, target_layer="default")],
+    )
+
+    periodic_packet, _ = PeriodicMaintenanceTrigger(
+        every_n=3,
+        trigger=NeverTrigger(slot="evolution_trigger"),
+    ).run(packet, store)
+
+    assert periodic_packet.decisions is None
+    assert periodic_packet.trace["evolution_trigger"]["decisions"] is None
+    assert periodic_packet.trace["evolution_trigger"]["periodic_matched"] is False
+
+
+def test_periodic_maintenance_trigger_uses_store_counter_when_schedule_tick_missing() -> None:
+    from memprimitive.baselines import AppendOrganization, NeverTrigger, PeriodicMaintenanceTrigger
+
+    packet, store = _represented_packet("Alice likes tea.")
+    store = replace(store, metadata={**store.metadata, "ingest_count": 6})
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
+
+    periodic_packet, _ = PeriodicMaintenanceTrigger(
+        every_n=3,
+        trigger=NeverTrigger(slot="evolution_trigger"),
+    ).run(packet, store)
+
+    assert periodic_packet.trace["evolution_trigger"]["tick"] == 6
+    assert periodic_packet.trace["evolution_trigger"]["periodic_matched"] is True
+    assert periodic_packet.decisions == [False]
+
+
+def test_periodic_maintenance_trigger_rejects_wrapped_trigger_slot_mismatch() -> None:
+    from memprimitive.baselines import AlwaysTrigger, PeriodicMaintenanceTrigger
+
+    with pytest.raises(ValueError, match="wrapped trigger slot"):
+        PeriodicMaintenanceTrigger(
+            every_n=3,
+            trigger=AlwaysTrigger(slot="write_trigger"),
+        )
+
+
+def test_idle_maintenance_trigger_gates_evolution_from_schedule_metadata() -> None:
+    from memprimitive.baselines import AppendOrganization, IdleMaintenanceTrigger
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"trigger": {"schedule": {"tick": 12, "idle_seconds": 45.0}, "events": ["idle"]}},
+    )
+    packet, store = AppendOrganization().run(
+        Packet(
+            observation=packet.observation,
+            units=packet.units,
+            decisions=[True],
+            trace=packet.trace,
+        ),
+        store,
+    )
 
     idle_packet, _ = IdleMaintenanceTrigger(min_idle_seconds=30.0).run(packet, store)
     assert idle_packet.decisions == [True]
