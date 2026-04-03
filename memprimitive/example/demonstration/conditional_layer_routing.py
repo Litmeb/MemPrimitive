@@ -42,7 +42,8 @@ def main() -> None:
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags", "keywords")),
+            BasicRepresentation(elements=("keywords",)),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
             LLMRepresentation(field="summary", prompt="Extract a short retrieval summary for this memory unit."),
         ),
         organization=ConditionalLayerOrganization(

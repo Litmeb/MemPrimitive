@@ -36,18 +36,10 @@ from ..utils._trace import copy_trace
 _VALID_ELEMENTS: Final[tuple[str, ...]] = (
     "text",
     "embedding",
-    "kv",
-    "entities",
-    "tags",
     "keywords",
     "time_anchor",
-    "relation_tags",
     "source_type",
 )
-_ENTITY_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b")
-_KV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Za-z][A-Za-z0-9_ ]{0,40}?)\s*:\s*([^.;,\n]+)")
-_LIKES_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][a-z]+)\s+(likes|prefers|loves|hates|works on|studies)\s+([^.;,\n]+)", re.I)
-_IS_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][a-z]+)\s+is\s+([^.;,\n]+)", re.I)
 _WORD_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b")
 _STOPWORDS: Final[frozenset[str]] = frozenset(
     {
@@ -194,14 +186,9 @@ class BasicRepresentation(RepresentationModule):
         self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
         self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
         self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
-        produces: list[str] = []
-        if "embedding" in self.elements:
-            produces.append(UNIT_EMBEDDING_CONTRACT)
-        if "entities" in self.elements:
-            produces.append(UNIT_ENTITIES_CONTRACT)
-        if "tags" in self.elements:
-            produces.append(UNIT_TAGS_CONTRACT)
-        self.produces_contracts = normalize_contracts(produces)
+        self.produces_contracts = normalize_contracts(
+            [UNIT_EMBEDDING_CONTRACT] if "embedding" in self.elements else []
+        )
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
@@ -236,9 +223,6 @@ class BasicRepresentation(RepresentationModule):
         text_value = normalized_text
         embedding = list(unit.embedding) if unit.embedding is not None else None
         triples = list(unit.triples)
-        kv = dict(unit.kv)
-        entities = list(unit.entities)
-        tags = list(unit.tags)
         representation_meta: dict[str, Any] = dict(unit.metadata.get("representation", {}))
 
         if "text" in self.elements:
@@ -246,20 +230,8 @@ class BasicRepresentation(RepresentationModule):
         if "embedding" in self.elements:
             embedding = self._embed_text(normalized_text)
             elements.add("embedding")
-        if "kv" in self.elements:
-            kv = self._extract_kv(unit, normalized_text)
-            if kv:
-                elements.add("kv")
-        if "entities" in self.elements:
-            entities = self._extract_entities(unit, normalized_text)
-            if entities:
-                elements.add("entities")
-        if "tags" in self.elements:
-            tags = self._extract_tags(unit, normalized_text, kv=kv, entities=entities, triples=triples)
-            if tags:
-                elements.add("tags")
         if "keywords" in self.elements:
-            keywords = self._extract_keywords(unit, normalized_text, tags=tags, entities=entities)
+            keywords = self._extract_keywords(unit, normalized_text)
             if keywords:
                 representation_meta["keywords"] = keywords
                 elements.add("keywords")
@@ -268,11 +240,6 @@ class BasicRepresentation(RepresentationModule):
             if time_anchor:
                 representation_meta["time_anchor"] = time_anchor
                 elements.add("time_anchor")
-        if "relation_tags" in self.elements:
-            relation_tags = self._build_relation_tags(unit, triples=triples, entities=entities)
-            if relation_tags:
-                representation_meta["relation_tags"] = relation_tags
-                elements.add("relation_tags")
         if "source_type" in self.elements:
             source_type = self._build_source_type(unit)
             if source_type:
@@ -286,9 +253,6 @@ class BasicRepresentation(RepresentationModule):
             normalized_text=normalized_casefold,
             embedding=embedding,
             triples=triples,
-            kv=kv,
-            entities=entities,
-            tags=tags,
         )
         return replace(
             represented,
@@ -308,66 +272,7 @@ class BasicRepresentation(RepresentationModule):
             self._embedding_cache[self.embedding_model] = model
         return [float(value) for value in model.encode(text, normalize_embeddings=True).tolist()]
 
-    def _extract_kv(self, unit: MemoryUnit, text: str) -> dict[str, str]:
-        hinted = unit.metadata.get("kv")
-        if isinstance(hinted, dict) and hinted:
-            return {str(key): str(value) for key, value in hinted.items()}
-
-        kv: dict[str, str] = {}
-        for key, value in _KV_PATTERN.findall(text):
-            kv[key.strip().casefold().replace(" ", "_")] = value.strip()
-        for subject, predicate, obj in _LIKES_PATTERN.findall(text):
-            kv[f"{subject.strip().casefold()}_{predicate.lower().strip().replace(' ', '_')}"] = obj.strip()
-        for subject, value in _IS_PATTERN.findall(text):
-            kv[f"{subject.strip().casefold()}_state"] = value.strip()
-        return kv
-
-    def _extract_entities(self, unit: MemoryUnit, text: str) -> list[str]:
-        hinted = unit.metadata.get("entities")
-        if isinstance(hinted, list) and hinted:
-            return list(dict.fromkeys(str(item) for item in hinted))
-
-        entities = [match.group(1).strip() for match in _ENTITY_PATTERN.finditer(text)]
-        return list(dict.fromkeys(entity for entity in entities if entity.casefold() not in {"the", "a", "an"}))
-
-    def _extract_tags(
-        self,
-        unit: MemoryUnit,
-        text: str,
-        *,
-        kv: dict[str, str],
-        entities: list[str],
-        triples: list[tuple[str, str, str]],
-    ) -> list[str]:
-        hinted = unit.metadata.get("tags")
-        if isinstance(hinted, list) and hinted:
-            return list(dict.fromkeys(str(item) for item in hinted))
-
-        tags: list[str] = [unit.unit_type]
-        lowered = text.casefold()
-        keyword_to_tag = {
-            "graph": "graph",
-            "memory": "memory",
-            "code": "code",
-            "skill": "skill",
-            "preference": "preference",
-            "likes": "preference",
-            "prefers": "preference",
-            "works on": "work",
-            "study": "learning",
-        }
-        for keyword, tag in keyword_to_tag.items():
-            if keyword in lowered:
-                tags.append(tag)
-        if entities:
-            tags.append("entity_rich")
-        if kv:
-            tags.append("structured_kv")
-        if triples:
-            tags.append("structured_triple")
-        return list(dict.fromkeys(tag for tag in tags if tag))
-
-    def _extract_keywords(self, unit: MemoryUnit, text: str, *, tags: list[str], entities: list[str]) -> list[str]:
+    def _extract_keywords(self, unit: MemoryUnit, text: str) -> list[str]:
         hinted = unit.metadata.get("keywords")
         if isinstance(hinted, list) and hinted:
             return list(dict.fromkeys(str(item).casefold() for item in hinted if str(item).strip()))
@@ -377,9 +282,7 @@ class BasicRepresentation(RepresentationModule):
             for token in _WORD_PATTERN.findall(text)
             if token.casefold() not in _STOPWORDS
         )
-        ranked = [token for token, _ in counts.most_common(6)]
-        extras = [entity.casefold() for entity in entities] + [tag.casefold() for tag in tags if len(tag) > 2]
-        return list(dict.fromkeys(ranked + extras))
+        return [token for token, _ in counts.most_common(6)]
 
     def _build_time_anchor(self, unit: MemoryUnit) -> dict[str, str] | None:
         timestamp = unit.metadata.get("time_anchor") if isinstance(unit.metadata.get("time_anchor"), dict) else None
@@ -392,24 +295,6 @@ class BasicRepresentation(RepresentationModule):
             "timestamp": raw,
             "date": raw.split("T", 1)[0],
         }
-
-    def _build_relation_tags(
-        self,
-        unit: MemoryUnit,
-        *,
-        triples: list[tuple[str, str, str]],
-        entities: list[str],
-    ) -> list[str]:
-        hinted = unit.metadata.get("relation_tags")
-        if isinstance(hinted, list) and hinted:
-            return list(dict.fromkeys(str(item) for item in hinted if str(item).strip()))
-
-        relation_tags: list[str] = []
-        for _, predicate, _ in triples:
-            relation_tags.append(f"predicate:{predicate.replace(' ', '_')}")
-        if len(entities) >= 2:
-            relation_tags.append("multi_entity")
-        return list(dict.fromkeys(relation_tags))
 
     def _build_source_type(self, unit: MemoryUnit) -> str | None:
         source = unit.metadata.get("source")
@@ -648,7 +533,7 @@ class LLMRepresentation(RepresentationModule):
     requires_contracts = frozenset()
 
     _LIST_FIELDS: ClassVar[frozenset[str]] = frozenset({"tags", "entities", "keywords", "relation_tags"})
-    _DICT_FIELDS: ClassVar[frozenset[str]] = frozenset({"time_anchor"})
+    _DICT_FIELDS: ClassVar[frozenset[str]] = frozenset({"time_anchor", "kv"})
 
     def __init__(
         self,
@@ -721,6 +606,8 @@ class LLMRepresentation(RepresentationModule):
             updated = replace(updated, tags=list(payload))
         elif self.field == "entities":
             updated = replace(updated, entities=list(payload))
+        elif self.field == "kv":
+            updated = replace(updated, kv=dict(payload))
         elif self.field == "description":
             updated = replace(updated, description=payload)
         else:
@@ -811,46 +698,6 @@ class LLMRepresentation(RepresentationModule):
             ),
             user=user,
         )
-
-
-class KeywordRepresentation(BasicRepresentation):
-    """Thin wrapper around ``BasicRepresentation`` for keyword-oriented indexing.
-
-    Constructor keeps the same embedding/API options as ``BasicRepresentation``
-    but defaults the element set to ``text + keywords + tags``.
-    """
-
-    spec = ModuleSpec(
-        name="keyword_representation",
-        slot="representation",
-        input_requirements=("units",),
-        output_guarantees=(
-            "units.text",
-            "units.representation_elements",
-            "units.metadata.representation",
-        ),
-    )
-
-    def __init__(
-        self,
-        *,
-        elements: tuple[str, ...] = ("text", "keywords", "tags"),
-        embedding_model: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        model: str | None = None,
-    ) -> None:
-        super().__init__(
-            elements=elements,
-            embedding_model=embedding_model,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-        )
-        self.produces_contracts = normalize_contracts(
-            {*self.get_produces_contracts(), UNIT_TAGS_CONTRACT}
-        )
-
 
 class SemanticFieldEnrichmentRepresentation(RepresentationModule):
     """Generate enriched note fields for later graph organization and retrieval.
@@ -1081,7 +928,6 @@ BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
     BasicRepresentation,
     TripleRepresentation,
     LLMRepresentation,
-    KeywordRepresentation,
     SemanticFieldEnrichmentRepresentation,
     RetrievalOrientedEmbeddingRepresentation,
 )

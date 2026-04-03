@@ -25,6 +25,7 @@ from memprimitive.baselines import (
     GraphNeighborAppendEvolution,
     GraphReadout,
     GraphSeedAndExpandRetrieval,
+    LLMRepresentation,
     ThresholdTrigger,
     TripleRepresentation,
 )
@@ -48,7 +49,8 @@ def main() -> None:
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags", "keywords")),
+            BasicRepresentation(elements=("keywords",)),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         evolution_trigger=ThresholdTrigger(slot="evolution_trigger", threshold=0.5, constant=1.0),

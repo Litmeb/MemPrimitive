@@ -35,6 +35,7 @@ from memprimitive.baselines import (
     ConcatenateReadout,
     EntityRetrieval,
     GraphAppendOrganization,
+    LLMRepresentation,
     LayerAwareRetrieval,
     RecencyRetrieval,
     TripleRepresentation,
@@ -59,7 +60,7 @@ def main() -> None:
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags",)),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
         ),
         organization=DispatchOrganization(
             (

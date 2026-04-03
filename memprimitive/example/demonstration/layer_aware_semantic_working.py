@@ -25,6 +25,7 @@ from memprimitive.baselines import (
     BasicRepresentation,
     ConcatenateReadout,
     EmbeddingSimilarityRetrieval,
+    LLMRepresentation,
     LayerAwareRetrieval,
     RecencyRetrieval,
 )
@@ -40,7 +41,11 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     write_pipeline = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text", "embedding")),
+            LLMRepresentation(field="entities", prompt="Extract grounded entities from this memory unit."),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
+        ),
         organization=AppendOrganization(target_layer="working"),
         store=store,
     )
@@ -48,7 +53,11 @@ def main() -> None:
     write_pipeline.ingest(Observation(text="Alice is debugging a retrieval merge edge case.", source="dialogue"))
 
     semantic_writer = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "embedding", "entities", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text", "embedding")),
+            LLMRepresentation(field="entities", prompt="Extract grounded entities from this memory unit."),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
+        ),
         organization=AppendOrganization(target_layer="semantic"),
         store=store,
     )

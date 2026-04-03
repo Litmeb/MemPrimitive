@@ -26,6 +26,7 @@ from memprimitive.baselines import (
     ConcatenateReadout,
     EntityRetrieval,
     GraphAppendOrganization,
+    LLMRepresentation,
     LayerAwareRetrieval,
     RecencyRetrieval,
     TripleRepresentation,
@@ -47,7 +48,10 @@ def main() -> None:
     store = MemoryStore(topology=topology)
 
     working_writer = MemoryPipeline(
-        representation=BasicRepresentation(elements=("text", "tags")),
+        representation=(
+            BasicRepresentation(elements=("text",)),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
+        ),
         organization=AppendOrganization(target_layer="working"),
         store=store,
     )
@@ -58,7 +62,7 @@ def main() -> None:
         representation=(
             BasicRepresentation(elements=("text",)),
             TripleRepresentation(method="direct"),
-            BasicRepresentation(elements=("tags",)),
+            LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         store=store,
