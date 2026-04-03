@@ -32,6 +32,7 @@ from memprimitive.baselines import (
     HierarchicalEvolution,
     LayerAwareRetrieval,
     LinkStrengtheningEvolution,
+    LLMRepresentation,
     ModelJudgeTrigger,
     NeverTrigger,
     NeighborContextUpdateEvolution,
@@ -886,6 +887,26 @@ def test_memory_pipeline_accepts_iterable_slot_modules_and_runs_them_in_order() 
     assert store.count("working") == 1
     assert store.count("knowledge_graph") == 1
     assert readout.text.startswith("- ")
+
+
+def test_memory_pipeline_accepts_iterable_llm_representation_modules() -> None:
+    store = MemoryStore()
+    tag_rep = LLMRepresentation(field="tags", prompt="Extract tags.")
+    summary_rep = LLMRepresentation(field="summary", prompt="Extract summary.")
+    tag_rep._llm_json = lambda *, user: ["graph", "memory"]  # type: ignore[method-assign]
+    summary_rep._llm_text = lambda *, user: "Alice studies graph memory."  # type: ignore[method-assign]
+
+    pipeline = MemoryPipeline(
+        representation=(tag_rep, summary_rep),
+        store=store,
+    )
+
+    packet = pipeline.ingest(Observation(text="Alice studies graph memory.", source="notes"))
+
+    assert packet.units is not None
+    assert packet.units[0].tags == ["graph", "memory"]
+    assert packet.units[0].metadata["representation"]["summary"] == "Alice studies graph memory."
+    assert store.count() == 1
 
 
 def test_memory_pipeline_rejects_empty_iterable_slot() -> None:

@@ -232,80 +232,83 @@ def test_triple_representation_two_stage_uses_real_llm(require_real_runtime: Non
     assert all(subject and predicate and obj for subject, predicate, obj in unit.triples)
 
 
-def test_representation_description_requires_openai_config() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+def test_basic_representation_rejects_summary_and_description_elements() -> None:
+    from memprimitive.baselines import BasicRepresentation
 
-    unit_packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice writes reusable Python code for graph memory tools.", source="notes")),
-        MemoryStore(),
-    )
-    rep = BasicRepresentation(
-        elements=("text", "description"),
-        api_key="",
-        base_url="",
-        model="",
-    )
-    with pytest.raises(ValueError, match="description.*MEMPRIMITIVE"):
-        rep.run(unit_packet, store)
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "summary"))
+
+    with pytest.raises(ValueError, match="Unsupported representation element"):
+        BasicRepresentation(elements=("text", "description"))
 
 
-def test_representation_can_generate_real_description_via_api() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
-
-    probe = BasicRepresentation(elements=("text", "description"))
-    if not (probe.api_key and probe.base_url and probe.model):
-        pytest.skip("Requires MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, MEMPRIMITIVE_MODEL for LLM description")
-
-    unit_packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice writes reusable Python code for graph memory tools.", source="notes")),
-        MemoryStore(),
-    )
-
-    packet_out, _ = BasicRepresentation(elements=("text", "entities", "tags", "description")).run(unit_packet, store)
-
-    unit = packet_out.units[0]
-    assert unit.description is not None
-    assert len(unit.description) > 10
-    assert "alice" in unit.description.casefold() or "python" in unit.description.casefold()
-    assert unit.metadata["representation"]["description"] == unit.description
-
-
-def test_representation_summary_requires_openai_config() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+def test_llm_representation_requires_openai_config() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
 
     unit_packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
         MemoryStore(),
     )
-    rep = BasicRepresentation(
-        elements=("text", "summary"),
+    rep = LLMRepresentation(
+        field="summary",
+        prompt="Extract a one-sentence summary.",
         api_key="",
         base_url="",
         model="",
     )
-    with pytest.raises(ValueError, match="summary.*MEMPRIMITIVE"):
+    with pytest.raises(ValueError, match="LLMRepresentation field 'summary'.*MEMPRIMITIVE"):
         rep.run(unit_packet, store)
 
 
-def test_representation_can_generate_real_summary_via_api() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
-
-    probe = BasicRepresentation(elements=("text", "summary"))
-    if not (probe.api_key and probe.base_url and probe.model):
-        pytest.skip("Requires MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, MEMPRIMITIVE_MODEL for LLM summary")
+def test_llm_representation_writes_known_list_field_to_unit() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
 
     unit_packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice studies graph memory and retrieval for long contexts.", source="notes")),
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
         MemoryStore(),
     )
+    rep = LLMRepresentation(field="tags", prompt="Extract retrieval tags.")
 
-    packet_out, _ = BasicRepresentation(elements=("text", "entities", "tags", "summary")).run(unit_packet, store)
+    def _fake_llm_json(*, user: str) -> Any:
+        payload = json.loads(user)
+        assert payload["field"] == "tags"
+        assert payload["prompt"] == "Extract retrieval tags."
+        assert payload["unit"]["text"] == "Alice studies graph memory systems."
+        return ["graph-memory", "research"]
+
+    rep._llm_json = _fake_llm_json  # type: ignore[method-assign]
+    packet_out, _ = rep.run(unit_packet, store)
 
     unit = packet_out.units[0]
-    summary = unit.metadata["representation"].get("summary")
-    assert isinstance(summary, str)
-    assert len(summary) > 8
-    assert "alice" in summary.casefold() or "graph" in summary.casefold() or "memory" in summary.casefold()
+    assert unit.tags == ["graph-memory", "research"]
+    assert "tags" in unit.representation_elements
+    assert unit.metadata["representation"]["tags"] == ["graph-memory", "research"]
+    assert packet_out.trace["representation"]["field"] == "tags"
+    assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "list"
+
+
+def test_llm_representation_writes_summary_and_custom_fields_into_representation_metadata() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    summary_rep = LLMRepresentation(field="summary", prompt="Extract a one-sentence summary.")
+    summary_rep._llm_text = lambda *, user: "Alice studies graph memory systems."  # type: ignore[method-assign]
+    packet_out, _ = summary_rep.run(unit_packet, store)
+
+    summary_unit = packet_out.units[0]
+    assert summary_unit.metadata["representation"]["summary"] == "Alice studies graph memory systems."
+    assert "summary" in summary_unit.representation_elements
+
+    custom_rep = LLMRepresentation(field="custom_topic", prompt="Extract the main topic.")
+    custom_rep._llm_text = lambda *, user: "graph memory"  # type: ignore[method-assign]
+    packet_out, _ = custom_rep.run(packet_out, store)
+
+    custom_unit = packet_out.units[0]
+    assert custom_unit.metadata["representation"]["custom_topic"] == "graph memory"
+    assert "custom_topic" in custom_unit.representation_elements
 
 
 def test_write_trigger_aligns_decisions_with_units() -> None:
@@ -1905,18 +1908,8 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
         Packet(observation=Observation(text="Alice studies graph memory on 2026-03-24.", source="notes")),
         MemoryStore(),
     )
-    u0 = packet.units[0]
-    packet = replace(
-        packet,
-        units=[
-            replace(
-                u0,
-                metadata={**u0.metadata, "summary": "Alice studies graph memory on 2026-03-24."},
-            )
-        ],
-    )
     packet, store = BasicRepresentation(
-        elements=("text", "entities", "tags", "keywords", "summary", "time_anchor", "relation_tags", "source_type")
+        elements=("text", "entities", "tags", "keywords", "time_anchor", "relation_tags", "source_type")
     ).run(packet, store)
     packet, store = AlwaysTrigger().run(packet, store)
     _, store = AppendOrganization().run(packet, store)
@@ -1924,7 +1917,6 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
     record = store.iter_records()[0]
     rep = record.metadata["representation"]
     assert "keywords" in rep
-    assert "summary" in rep
     assert "time_anchor" in rep
     assert rep["source_type"] == "notes"
 

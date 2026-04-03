@@ -39,9 +39,7 @@ _VALID_ELEMENTS: Final[tuple[str, ...]] = (
     "kv",
     "entities",
     "tags",
-    "description",
     "keywords",
-    "summary",
     "time_anchor",
     "relation_tags",
     "source_type",
@@ -125,6 +123,29 @@ def _normalize_hinted_triples(value: Any) -> list[tuple[str, str, str]]:
             if subject and predicate and obj:
                 triples.append((subject, predicate, obj))
     return list(dict.fromkeys(triples))
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("Expected a JSON list of strings.")
+    normalized: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            normalized.append(text)
+    return list(dict.fromkeys(normalized))
+
+
+def _normalize_string_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object.")
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        key_text = str(key).strip()
+        value_text = str(item).strip()
+        if key_text and value_text:
+            normalized[key_text] = value_text
+    return normalized
 
 class BasicRepresentation(RepresentationModule):
     """Build a configurable representation-element set for each unit.
@@ -218,7 +239,6 @@ class BasicRepresentation(RepresentationModule):
         kv = dict(unit.kv)
         entities = list(unit.entities)
         tags = list(unit.tags)
-        description = unit.description
         representation_meta: dict[str, Any] = dict(unit.metadata.get("representation", {}))
 
         if "text" in self.elements:
@@ -243,18 +263,6 @@ class BasicRepresentation(RepresentationModule):
             if keywords:
                 representation_meta["keywords"] = keywords
                 elements.add("keywords")
-        if "summary" in self.elements:
-            summary = self._build_summary(
-                unit,
-                normalized_text,
-                kv=kv,
-                entities=entities,
-                triples=triples,
-                tags=tags,
-            )
-            if summary:
-                representation_meta["summary"] = summary
-                elements.add("summary")
         if "time_anchor" in self.elements:
             time_anchor = self._build_time_anchor(unit)
             if time_anchor:
@@ -270,10 +278,6 @@ class BasicRepresentation(RepresentationModule):
             if source_type:
                 representation_meta["source_type"] = source_type
                 elements.add("source_type")
-        if "description" in self.elements:
-            description = self._describe_unit(unit, normalized_text, kv=kv, entities=entities, triples=triples, tags=tags)
-            if description:
-                elements.add("description")
 
         represented = replace(
             unit,
@@ -285,7 +289,6 @@ class BasicRepresentation(RepresentationModule):
             kv=kv,
             entities=entities,
             tags=tags,
-            description=description,
         )
         return replace(
             represented,
@@ -378,59 +381,6 @@ class BasicRepresentation(RepresentationModule):
         extras = [entity.casefold() for entity in entities] + [tag.casefold() for tag in tags if len(tag) > 2]
         return list(dict.fromkeys(ranked + extras))
 
-    def _openai_plain_text(self, *, element: str, system: str, user: str) -> str:
-        if not self.api_key or not self.base_url or not self.model:
-            raise ValueError(
-                f"BasicRepresentation element {element!r} requires an OpenAI-compatible API: "
-                "set MEMPRIMITIVE_API_KEY, MEMPRIMITIVE_BASE_URL, and MEMPRIMITIVE_MODEL "
-                "(or pass api_key, base_url, model to the constructor). "
-                "Heuristic fallback is not supported."
-            )
-        from ..utils._runtime import Runtime
-
-        runtime = Runtime(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            model=self.model,
-            embedding_model=self.embedding_model,
-        )
-        runtime.require_llm(capability=f"BasicRepresentation element {element!r}")
-        return runtime.text(system=system, user=user, temperature=0.0).strip()
-
-    def _build_summary(
-        self,
-        unit: MemoryUnit,
-        text: str,
-        *,
-        kv: dict[str, str],
-        entities: list[str],
-        triples: list[tuple[str, str, str]],
-        tags: list[str],
-    ) -> str | None:
-        hinted = unit.metadata.get("summary")
-        if isinstance(hinted, str) and hinted.strip():
-            return hinted.strip()
-        collapsed = " ".join(text.split())
-        if not collapsed:
-            return None
-        prompt = (
-            "Write a concise summary (one to three short sentences) of the main facts in this memory unit, "
-            "suitable for retrieval and indexing.\n"
-            f"unit_type: {unit.unit_type}\n"
-            f"text: {text}\n"
-            f"entities: {entities}\n"
-            f"tags: {tags}\n"
-            f"kv: {kv}\n"
-            f"triples: {triples}\n"
-            "Return plain text only."
-        )
-        out = self._openai_plain_text(
-            element="summary",
-            system="You produce short factual summaries of memory units.",
-            user=prompt,
-        )
-        return out or None
-
     def _build_time_anchor(self, unit: MemoryUnit) -> dict[str, str] | None:
         timestamp = unit.metadata.get("time_anchor") if isinstance(unit.metadata.get("time_anchor"), dict) else None
         if timestamp:
@@ -466,35 +416,6 @@ class BasicRepresentation(RepresentationModule):
         if source is None:
             return None
         return str(source).strip() or None
-
-    def _describe_unit(
-        self,
-        unit: MemoryUnit,
-        text: str,
-        *,
-        kv: dict[str, str],
-        entities: list[str],
-        triples: list[tuple[str, str, str]],
-        tags: list[str],
-    ) -> str:
-        if unit.description is not None:
-            return unit.description
-        prompt = (
-            "Write one concise natural-language description for this memory unit.\n"
-            f"unit_type: {unit.unit_type}\n"
-            f"text: {text}\n"
-            f"entities: {entities}\n"
-            f"tags: {tags}\n"
-            f"kv: {kv}\n"
-            f"triples: {triples}\n"
-            "Return plain text only."
-        )
-        return self._openai_plain_text(
-            element="description",
-            system="You produce short factual descriptions for memory representations.",
-            user=prompt,
-        )
-
 
 class TripleRepresentation(RepresentationModule):
     """LLM-backed triple extraction with direct and two-stage modes."""
@@ -710,6 +631,186 @@ class TripleRepresentation(RepresentationModule):
             ]
         )
         return {"entities": entities, "triples": triples}
+
+
+class LLMRepresentation(RepresentationModule):
+    """Extract one representation field per unit with an LLM."""
+
+    spec = ModuleSpec(
+        name="llm_representation",
+        slot="representation",
+        input_requirements=("units",),
+        output_guarantees=(
+            "units.representation_elements",
+            "units.metadata.representation",
+        ),
+    )
+    requires_contracts = frozenset()
+
+    _LIST_FIELDS: ClassVar[frozenset[str]] = frozenset({"tags", "entities", "keywords", "relation_tags"})
+    _DICT_FIELDS: ClassVar[frozenset[str]] = frozenset({"time_anchor"})
+
+    def __init__(
+        self,
+        *,
+        field: str,
+        prompt: str,
+        embedding_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
+        env = os.environ
+        normalized_field = str(field).strip()
+        if not normalized_field:
+            raise ValueError("LLMRepresentation requires a non-empty field.")
+        normalized_prompt = str(prompt).strip()
+        if not normalized_prompt:
+            raise ValueError("LLMRepresentation requires a non-empty prompt.")
+        self.field = normalized_field
+        self.prompt = normalized_prompt
+        self.embedding_model = embedding_model or env.get(
+            "MEMPRIMITIVE_EMBEDDING_MODEL",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        )
+        self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
+        self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
+        self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
+        produces: list[str] = []
+        if self.field == "entities":
+            produces.append(UNIT_ENTITIES_CONTRACT)
+        if self.field == "tags":
+            produces.append(UNIT_TAGS_CONTRACT)
+        self.produces_contracts = normalize_contracts(produces)
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("LLMRepresentation requires packet.units.")
+
+        represented_units: list[MemoryUnit] = []
+        per_unit_trace: list[dict[str, Any]] = []
+        for unit in packet.units:
+            represented_unit, unit_trace = self._represent_unit(unit)
+            represented_units.append(represented_unit)
+            per_unit_trace.append({"unit_id": represented_unit.unit_id, **unit_trace})
+
+        trace = copy_trace(packet)
+        trace["representation"] = {
+            "module": self.spec.name,
+            "field": self.field,
+            "unit_ids": [unit.unit_id for unit in represented_units],
+            "per_unit": per_unit_trace,
+        }
+        return replace(packet, units=represented_units, trace=trace), store
+
+    def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+        normalized_text = unit.text.strip()
+        normalized_casefold = normalized_text.casefold()
+        payload = self._extract_field(unit, normalized_text)
+        elements = set(unit.representation_elements)
+        elements.add(self.field)
+        representation_meta: dict[str, Any] = dict(unit.metadata.get("representation", {}))
+
+        updated = replace(
+            unit,
+            text=normalized_text,
+            normalized_text=normalized_casefold,
+        )
+        if self.field == "tags":
+            updated = replace(updated, tags=list(payload))
+        elif self.field == "entities":
+            updated = replace(updated, entities=list(payload))
+        elif self.field == "description":
+            updated = replace(updated, description=payload)
+        else:
+            representation_meta[self.field] = payload
+
+        updated = replace(updated, representation_elements=tuple(sorted(elements)))
+        updated = replace(
+            updated,
+            metadata={
+                **updated.metadata,
+                "representation": {
+                    **_representation_summary_from_unit(updated),
+                    **representation_meta,
+                },
+            },
+        )
+
+        trace_value = payload
+        if isinstance(payload, list):
+            trace_value = list(payload)
+        elif isinstance(payload, dict):
+            trace_value = dict(payload)
+        return updated, {"field": self.field, "kind": self._value_kind(), "value": trace_value}
+
+    def _value_kind(self) -> str:
+        if self.field in self._LIST_FIELDS:
+            return "list"
+        if self.field in self._DICT_FIELDS:
+            return "dict"
+        return "text"
+
+    def _runtime(self):
+        from ..utils._runtime import Runtime
+
+        return Runtime(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            embedding_model=self.embedding_model,
+        )
+
+    def _extract_field(self, unit: MemoryUnit, text: str) -> Any:
+        user = json.dumps(
+            {
+                "field": self.field,
+                "prompt": self.prompt,
+                "unit": {
+                    "text": text,
+                    "unit_type": unit.unit_type,
+                    "timestamp": unit.timestamp,
+                    "existing_tags": unit.tags,
+                    "existing_entities": unit.entities,
+                    "existing_description": unit.description,
+                    "existing_metadata": unit.metadata,
+                },
+            },
+            ensure_ascii=False,
+        )
+        if self.field in self._LIST_FIELDS:
+            return _normalize_string_list(self._llm_json(user=user))
+        if self.field in self._DICT_FIELDS:
+            return _normalize_string_dict(self._llm_json(user=user))
+        return self._llm_text(user=user)
+
+    def _llm_text(self, *, user: str) -> str:
+        runtime = self._runtime()
+        runtime.require_llm(capability=f"LLMRepresentation field {self.field!r}")
+        output = runtime.text(
+            system=(
+                "You extract one requested representation field for a memory unit. "
+                "Follow the user-provided prompt exactly and return plain text only."
+            ),
+            user=user,
+            temperature=0.0,
+        ).strip()
+        if not output:
+            raise ValueError(f"LLMRepresentation field {self.field!r} returned empty text.")
+        return output
+
+    def _llm_json(self, *, user: str) -> Any:
+        runtime = self._runtime()
+        runtime.require_llm(capability=f"LLMRepresentation field {self.field!r}")
+        shape = "a strict JSON array of strings" if self.field in self._LIST_FIELDS else "a strict JSON object"
+        return runtime.json(
+            system=(
+                "You extract one requested representation field for a memory unit. "
+                f"Follow the user-provided prompt exactly and return {shape}."
+            ),
+            user=user,
+        )
 
 
 class KeywordRepresentation(BasicRepresentation):
@@ -979,6 +1080,7 @@ BASELINE_SLOT: Final[str] = "representation"
 BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
     BasicRepresentation,
     TripleRepresentation,
+    LLMRepresentation,
     KeywordRepresentation,
     SemanticFieldEnrichmentRepresentation,
     RetrievalOrientedEmbeddingRepresentation,
