@@ -77,7 +77,7 @@ unit_formation
 | `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"` | 把 unit 追加到图层，并补上 graph-oriented metadata。 |
 | `PlacementWithoutAppendOrganization` (`placement_without_append_organization`) | `target_layer="trial_buffer"` | 只产出 placement，不真正落库；适合“先试算/先追踪”的写入路径。 |
 | `GraphAppendLinkReadyOrganization` (`graph_append_link_ready_organization`) | `target_layer="knowledge_graph"`, `note_namespace="note"` | 把富 note 写入图层，并带上后续 link evolution 需要的 link-ready metadata。 |
-| `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `target_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None` | 从 source layer 选中的 records 按组抽共性，写成 target layer 的层级抽象记录，并把 provenance 边写入 `metadata["hierarchical"]`。 |
+| `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 从 source layer 选中的 records 按组抽共性；最终写入不再直接 append，而是把抽象结果构造成 observation 后交给子 `MemoryPipeline.ingest()` 持久化，其中 `target_layer` 与 `memory_pipeline` 二选一。 |
 
 ## `evolution_trigger`
 
@@ -116,7 +116,7 @@ unit_formation
 | `LinkStrengtheningEvolution` (`link_strengthening_evolution`) | `target_layer="knowledge_graph"`, `candidate_k=5`, `max_links_per_record=4`, `note_namespace="note"`, `default_category="Uncategorized"`, `embedding_version="content_context_keywords_tags_v2"`, `strict_llm=True` | 基于富 note 表示先找候选邻居，再用 LLM 选择和强化更可靠的图连接。 |
 | `NeighborContextUpdateEvolution` (`neighbor_context_update_evolution`) | `target_layer="knowledge_graph"`, `candidate_k=5`, `note_namespace="note"`, `default_category="Uncategorized"`, `embedding_version="content_context_keywords_tags_v2"`, `strict_llm=True` | 从当前 note 视角回写邻居上下文、标签或关系说明。 |
 | `ReflectionGenerationEvolution` (`reflection_generation_evolution`) | `target_layer="reflections"`, `memory_size=3`, `window_size=None`, `reflection_generator=None`, `prompt_builder=None` | 从失败轨迹生成 strategy/reflection note，并追加到反思层。 |
-| `HierarchicalEvolution` (`hierarchical_evolution`) | `source_layer`, `target_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None` | 消费 `packet.decisions_store` 或 source layer 全扫描结果，按组生成更高层抽象记录，并把来源关系保留在 `metadata["hierarchical"]`。 |
+| `HierarchicalEvolution` (`hierarchical_evolution`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 消费 `packet.decisions_store` 或 source layer 全扫描结果，按组生成更高层抽象 observation，并通过子 `MemoryPipeline.ingest()` 写入；`target_layer` 模式会构造默认 pipeline，`memory_pipeline` 模式则复用传入 pipeline 与当前 store。 |
 
 ## `retrieval`
 
