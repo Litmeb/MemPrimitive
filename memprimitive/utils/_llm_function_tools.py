@@ -9,6 +9,7 @@ from uuid import uuid4
 from agents.tool import FunctionTool
 
 from ..core import MemoryRecord, MemoryStore, MemoryUnit, Packet
+from ._graph_family import graph_metadata_for_write, remove_graph_links_to_record
 
 
 def _utc_now_iso() -> str:
@@ -114,6 +115,24 @@ def builtin_write_tool_spec(name: str, *, module_name: str) -> WriteToolSpec:
             },
             executor=_build_add_executor(module_name=module_name),
         )
+    if normalized == "GRAPH_ADD":
+        return WriteToolSpec(
+            name="GRAPH_ADD",
+            description="Add one new graph memory record with normalized graph metadata.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "target_layer": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "unit_id": {"type": "string"},
+                    "timestamp": {"type": "string"},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            executor=_build_add_executor(module_name=module_name, graph_aware=True),
+        )
     if normalized == "UPDATE":
         return WriteToolSpec(
             name="UPDATE",
@@ -130,6 +149,22 @@ def builtin_write_tool_spec(name: str, *, module_name: str) -> WriteToolSpec:
             },
             executor=_build_update_executor(module_name=module_name),
         )
+    if normalized == "GRAPH_UPDATE":
+        return WriteToolSpec(
+            name="GRAPH_UPDATE",
+            description="Update one existing graph memory record by record_id and normalize graph metadata.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string"},
+                    "text": {"type": "string"},
+                    "metadata_patch": {"type": "object"},
+                },
+                "required": ["record_id"],
+                "additionalProperties": False,
+            },
+            executor=_build_update_executor(module_name=module_name, graph_aware=True),
+        )
     if normalized == "DELETE":
         return WriteToolSpec(
             name="DELETE",
@@ -145,7 +180,25 @@ def builtin_write_tool_spec(name: str, *, module_name: str) -> WriteToolSpec:
             },
             executor=_build_delete_executor(module_name=module_name),
         )
-    raise ValueError(f"Unknown built-in write tool {name!r}. Supported values: ADD, UPDATE, DELETE.")
+    if normalized == "GRAPH_DELETE":
+        return WriteToolSpec(
+            name="GRAPH_DELETE",
+            description="Delete one graph memory record by record_id and clean same-layer dangling links.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["record_id"],
+                "additionalProperties": False,
+            },
+            executor=_build_delete_executor(module_name=module_name, graph_aware=True),
+        )
+    raise ValueError(
+        f"Unknown built-in write tool {name!r}. Supported values: "
+        "ADD, UPDATE, DELETE, GRAPH_ADD, GRAPH_UPDATE, GRAPH_DELETE."
+    )
 
 
 def build_runtime_tools(
@@ -272,7 +325,11 @@ def _accumulate_effect_ids(state: ToolExecutionState, effects: list[dict[str, An
             state.deleted_record_ids.append(record_id)
 
 
-def _build_add_executor(*, module_name: str) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
+def _build_add_executor(
+    *,
+    module_name: str,
+    graph_aware: bool = False,
+) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
     def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
         text = str(arguments.get("text", "")).strip()
         if not text:
@@ -283,11 +340,20 @@ def _build_add_executor(*, module_name: str) -> Callable[[WriteToolCallContext, 
         metadata = arguments.get("metadata", {})
         if not isinstance(metadata, dict):
             raise ValueError("ADD metadata must be an object.")
+        if graph_aware:
+            _require_graph_layer(context.store, target_layer, tool_name="GRAPH_ADD")
         current_unit = _single_unit_from_packet(context.packet)
         unit_id = str(arguments.get("unit_id", "")).strip() or (current_unit.unit_id if current_unit is not None else _tool_generated_unit_id())
         timestamp = str(arguments.get("timestamp", "")).strip() or (
             current_unit.timestamp if current_unit is not None else _utc_now_iso()
         )
+        normalized_metadata = dict(metadata)
+        if graph_aware:
+            normalized_metadata["graph"] = graph_metadata_for_write(
+                layer=target_layer,
+                unit=current_unit,
+                raw_graph=metadata.get("graph"),
+            )
         record = MemoryRecord(
             record_id=f"rec-{context.store.next_sequence_id()}",
             unit_id=unit_id,
@@ -295,10 +361,10 @@ def _build_add_executor(*, module_name: str) -> Callable[[WriteToolCallContext, 
             text=text,
             timestamp=timestamp,
             metadata={
-                **metadata,
+                **normalized_metadata,
                 "llm_tool": {
                     **(metadata.get("llm_tool", {}) if isinstance(metadata.get("llm_tool"), dict) else {}),
-                    "action": "ADD",
+                    "action": "GRAPH_ADD" if graph_aware else "ADD",
                     "module": module_name,
                     "module_slot": context.module_slot,
                 },
@@ -320,9 +386,15 @@ def _build_add_executor(*, module_name: str) -> Callable[[WriteToolCallContext, 
     return _execute
 
 
-def _build_update_executor(*, module_name: str) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
+def _build_update_executor(
+    *,
+    module_name: str,
+    graph_aware: bool = False,
+) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
     def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
         record = find_record_by_id(context.store, str(arguments.get("record_id", "")).strip())
+        if graph_aware:
+            _require_graph_layer(context.store, record.layer, tool_name="GRAPH_UPDATE")
         metadata_patch = arguments.get("metadata_patch", {})
         if metadata_patch is None:
             metadata_patch = {}
@@ -333,15 +405,22 @@ def _build_update_executor(*, module_name: str) -> Callable[[WriteToolCallContex
             next_text = str(arguments["text"]).strip()
             if not next_text:
                 raise ValueError("UPDATE text must be non-empty when provided.")
+        normalized_patch = dict(metadata_patch)
+        if graph_aware:
+            normalized_patch["graph"] = graph_metadata_for_write(
+                layer=record.layer,
+                record=record,
+                raw_graph=metadata_patch.get("graph"),
+            )
         updated = replace(
             record,
             text=next_text,
             metadata={
                 **record.metadata,
-                **metadata_patch,
+                **normalized_patch,
                 "llm_tool": {
                     **(record.metadata.get("llm_tool", {}) if isinstance(record.metadata.get("llm_tool"), dict) else {}),
-                    "action": "UPDATE",
+                    "action": "GRAPH_UPDATE" if graph_aware else "UPDATE",
                     "module": module_name,
                     "module_slot": context.module_slot,
                 },
@@ -363,25 +442,54 @@ def _build_update_executor(*, module_name: str) -> Callable[[WriteToolCallContex
     return _execute
 
 
-def _build_delete_executor(*, module_name: str) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
+def _build_delete_executor(
+    *,
+    module_name: str,
+    graph_aware: bool = False,
+) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
     def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
         record = find_record_by_id(context.store, str(arguments.get("record_id", "")).strip())
+        if graph_aware:
+            _require_graph_layer(context.store, record.layer, tool_name="GRAPH_DELETE")
         removed = context.store.delete_record(record.layer, record.record_id)
-        return WriteToolResult(
-            effects=[
-                {
-                    "action": "delete",
-                    "record_id": removed.record_id,
-                    "layer": removed.layer,
-                    "status": "applied",
-                    "reason": str(arguments.get("reason", "")).strip(),
-                    "module": module_name,
-                }
-            ],
-            store=context.store,
-        )
+        effects = [
+            {
+                "action": "delete",
+                "record_id": removed.record_id,
+                "layer": removed.layer,
+                "status": "applied",
+                "reason": str(arguments.get("reason", "")).strip(),
+                "module": module_name,
+            }
+        ]
+        if graph_aware:
+            for candidate in list(context.store.iter_records(removed.layer)):
+                rewritten = remove_graph_links_to_record(candidate, target_record_id=removed.record_id)
+                if rewritten is None:
+                    continue
+                context.store.replace_record(candidate.layer, candidate.record_id, rewritten)
+                effects.append(
+                    {
+                        "action": "update",
+                        "record_id": candidate.record_id,
+                        "layer": candidate.layer,
+                        "status": "applied",
+                        "effect_type": "graph_link_cleanup",
+                        "removed_link_record_id": removed.record_id,
+                    }
+                )
+        return WriteToolResult(effects=effects, store=context.store)
 
     return _execute
+
+
+def write_tool_specs_require_graph_contracts(specs: tuple[WriteToolSpec, ...]) -> bool:
+    return any(spec.name in {"GRAPH_ADD", "GRAPH_UPDATE", "GRAPH_DELETE"} for spec in specs)
+
+
+def _require_graph_layer(store: MemoryStore, layer: str, *, tool_name: str) -> None:
+    if store.layer_shape(layer) != "Graph":
+        raise ValueError(f"{tool_name} requires target layer {layer!r} to be Graph.")
 
 
 def find_record_by_id(store: MemoryStore, record_id: str) -> MemoryRecord:
