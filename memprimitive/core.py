@@ -372,6 +372,7 @@ class Packet:
     decisions_store: dict[str, dict[str, Any]] | None = None
     placements: list[Placement] | None = None
     query: Query | None = None
+    queries: list[Query] | None = None
     retrieved: RetrievedSet | None = None
     readout: Readout | None = None
     events: list[str] | None = None

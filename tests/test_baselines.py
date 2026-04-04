@@ -2029,6 +2029,99 @@ def test_recency_retrieval_source_retrieved_reranks_existing_subset_only() -> No
     assert packet_out.retrieved.trace["candidate_count"] == 2
 
 
+def test_multi_query_recency_retrieval_dedupes_repeated_hits_in_query_order() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+
+    store = MemoryStore()
+    for text in ("first item", "second item", "third item"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = RecencyRetrieval(top_k=2).run(
+        Packet(
+            queries=[
+                Query(text="first query"),
+                Query(text="second query"),
+            ]
+        ),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.text for record in packet_out.retrieved.items] == ["third item", "second item"]
+    assert len(packet_out.retrieved.scores) == 2
+    assert packet_out.retrieved.trace["query_count"] == 2
+    assert packet_out.retrieved.trace["merge_strategy"] == "query_order_dedupe"
+    assert [entry["returned_count"] for entry in packet_out.retrieved.trace["per_query"]] == [2, 2]
+
+
+def test_multi_query_keyword_retrieval_flattens_non_overlapping_hits_in_query_order() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval
+
+    store = MemoryStore()
+    for text in ("alice memory", "bob memory", "carol memory"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = KeywordCountRetrieval(top_k=1).run(
+        Packet(
+            queries=[
+                Query(text="alice"),
+                Query(text="bob"),
+            ]
+        ),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.text for record in packet_out.retrieved.items] == ["alice memory", "bob memory"]
+    assert [score["record_id"] for score in packet_out.retrieved.scores] == [
+        packet_out.retrieved.items[0].record_id,
+        packet_out.retrieved.items[1].record_id,
+    ]
+
+
+def test_multi_query_retrieval_accepts_queries_without_primary_query() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval
+
+    store = MemoryStore()
+    for text in ("alice memory", "bob memory"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = KeywordCountRetrieval(top_k=1).run(
+        Packet(
+            queries=[
+                Query(text="bob"),
+            ]
+        ),
+        store,
+    )
+
+    assert packet_out.query is None
+    assert packet_out.queries is not None
+    assert [query.text for query in packet_out.queries] == ["bob"]
+    assert [record.text for record in packet_out.retrieved.items] == ["bob memory"]
+
+
+def test_multi_query_retrieval_prefers_queries_field_over_primary_query() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval
+
+    store = MemoryStore()
+    for text in ("alice memory", "carol memory"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    packet_out, _ = KeywordCountRetrieval(top_k=1).run(
+        Packet(
+            query=Query(text="carol"),
+            queries=[Query(text="alice")],
+        ),
+        store,
+    )
+
+    assert packet_out.query is not None
+    assert packet_out.query.text == "carol"
+    assert [record.text for record in packet_out.retrieved.items] == ["alice memory"]
+    assert packet_out.retrieved.trace["query_ids"] == [packet_out.queries[0].query_id]
+
+
 def test_retrieval_does_not_mutate_store() -> None:
     from memprimitive.baselines import RecencyRetrieval
 
@@ -2587,6 +2680,55 @@ def test_layer_aware_retrieval_returns_valid_empty_result_for_empty_store() -> N
     assert packet_out.retrieved.scores == []
     assert packet_out.trace["retrieval"]["per_layer"][0]["candidate_count"] == 0
     assert store_out.count() == 0
+
+
+def test_layer_aware_retrieval_merges_multi_query_results_and_preserves_per_query_trace() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval, LayerAwareRetrieval
+
+    topology = StoreTopology.from_layers(
+        [
+            StoreLayerSpec(name="working"),
+            StoreLayerSpec(name="semantic"),
+        ]
+    )
+    store = MemoryStore(topology=topology)
+    store.append(
+        MemoryRecord(
+            record_id="rec-working-1",
+            unit_id="unit-working-1",
+            layer="working",
+            text="working memory",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-semantic-1",
+            unit_id="unit-semantic-1",
+            layer="semantic",
+            text="semantic memory",
+            timestamp="2026-01-01T00:00:01+00:00",
+        )
+    )
+
+    packet_out, _ = LayerAwareRetrieval(
+        default_retriever=KeywordCountRetrieval(top_k=1),
+        top_k=1,
+    ).run(
+        Packet(
+            queries=[
+                Query(text="semantic"),
+                Query(text="working"),
+            ]
+        ),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-semantic-1", "rec-working-1"]
+    assert packet_out.retrieved.trace["query_count"] == 2
+    assert packet_out.retrieved.trace["per_query"][0]["trace"]["module"] == "layer_aware_retrieval"
+    assert packet_out.retrieved.trace["per_query"][0]["trace"]["per_layer"][0]["module"] == "keyword_count_retrieval"
 
 
 def test_layer_aware_retrieval_validates_inputs() -> None:
