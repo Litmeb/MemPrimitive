@@ -65,14 +65,6 @@ class ReadoutResolutionState(ResolutionState):
     block_traces: list[BlockRenderTrace] = field(default_factory=list)
 
 
-def template_mode(*, simple_template: str | None, structured_template: dict[str, Any] | list[Any] | None) -> str:
-    simple_present = simple_template is not None
-    structured_present = structured_template is not None
-    if simple_present == structured_present:
-        raise ValueError("TemplateReadout requires exactly one of simple_template or structured_template.")
-    return "simple" if simple_present else "structured"
-
-
 def build_render_context(
     packet: Packet,
     *,

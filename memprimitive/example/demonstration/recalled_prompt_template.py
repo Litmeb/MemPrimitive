@@ -4,8 +4,8 @@ This example shows one practical pattern for the new ``{{ recalled_prompt }}``
 support:
 
 - seed the current store with an earlier profile memory
-- configure an ``LLMRepresentation`` with ``retrieve_pipeline`` plus
-  ``recall_query_template``
+- configure an ``LLMRepresentation`` with ``build_simple_prompt_plan(...)`` that sets
+  ``recall_plan``, ``recall_query_builder``, and ``sub_recall_pipeline``
 - let the representation prompt read ``{{ recalled_prompt }}`` while extracting
   a new summary for the incoming unit
 
