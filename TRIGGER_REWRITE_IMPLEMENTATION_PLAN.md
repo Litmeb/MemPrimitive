@@ -29,7 +29,7 @@
 - `BoundaryEventTrigger`
 - `RuntimeEventTrigger`
 - `ScalarRuleTrigger`
-- `ModelJudgeTrigger`
+- `LLMJudgeTrigger`
 - `PeriodicMaintenanceTrigger`
 - `IdleMaintenanceTrigger`
 
@@ -82,7 +82,6 @@ unit_formation
 - `_BaseTrigger`
 - `AlwaysTrigger`
 - `NeverTrigger`
-- `ThresholdTrigger`
 
 其核心设计已经说明了 repo 的真实方向：
 
@@ -187,7 +186,7 @@ SomeTrigger(slot="evolution_trigger")
 
 - `BoundaryEventTrigger` 处理“事件是否命中”
 - `RuntimeEventTrigger` 处理“运行时事件是否命中”
-- `ModelJudgeTrigger` 才负责主动调用模型判定
+- `LLMJudgeTrigger` 才负责主动调用模型判定
 
 不要把自然语言边界识别、task failure 识别等复杂检测逻辑，偷偷塞进 event trigger 本体。
 
@@ -467,7 +466,7 @@ def __init__(
 
 这类 trigger 和当前 repo 最契合，因为它天然就是在当前 slot 上输出布尔 mask。
 
-## 6.5 ModelJudgeTrigger
+## 6.5 LLMJudgeTrigger
 
 ### 功能定位
 
@@ -485,7 +484,7 @@ def __init__(
 
 类名：
 
-- `ModelJudgeTrigger`
+- `LLMJudgeTrigger`
 
 位置仍是：
 
@@ -671,8 +670,6 @@ def __init__(
 必须保证以下不破坏：
 
 - `MemoryPipeline()` 默认仍然使用 `AlwaysTrigger()` + `NeverTrigger()`
-- `ThresholdTrigger(slot="write_trigger")` 仍工作
-- `ThresholdTrigger(slot="evolution_trigger")` 仍工作
 - `create_baseline_pipeline()` 行为不变
 
 ### 8.3 集成测试
@@ -682,4 +679,4 @@ def __init__(
 1. `BoundaryEventTrigger(slot="evolution_trigger") + SummaryRewriteEvolution`
 2. `RuntimeEventTrigger(slot="evolution_trigger") + ReflectionGenerationEvolution`
 3. `ScalarRuleTrigger(slot="write_trigger") + AppendOrganization`
-4. `ModelJudgeTrigger(slot="write_trigger") + AppendOrganization`
+4. `LLMJudgeTrigger(slot="write_trigger") + AppendOrganization`

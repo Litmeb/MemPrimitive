@@ -15,9 +15,7 @@ python -m memprimitive.example.demonstration.minimal_pipeline
 
 trigger 鐎涙劗閮寸紒鐔峰嚒缂佸繑娈忛弮鑸垫暪缂傗晙璐熼崺铏诡攨 slot trigger閿?
 - `AlwaysTrigger`
-- `ThresholdTrigger`
 - `NeverTrigger`
-- `ThresholdTrigger`
 
 濮濄倕澧犻崺杞扮艾 `signal / scorer / gate / policy` 閻?trigger-family 缂佸嫬鎮庣粈杞扮伐閿涘奔浜掗崣濠佺贩鐠ф牞绻栨禍娑氱矎閸?trigger 閻?Reflexion / TiM / A-MEM 妞嬪孩鐗?demonstration閿涘苯鍑＄紒蹇庣矤閺堫剛娲拌ぐ鏇犘╅梽銈冣偓?
 ## 閸╄櫣顢?pipeline / store 濠曟梻銇?
@@ -40,7 +38,7 @@ trigger 鐎涙劗閮寸紒鐔峰嚒缂佸繑娈忛弮鑸垫暪缂傗晙璐熼崺
 | 濡€虫健閺傚洣娆?| 鐠囧瓨妲?|
 | --- | --- |
 | `graph_append_entity_retrieval.py` | `GraphAppendOrganization` + `EntityRetrieval` 閻ㄥ嫯浜ら柌?graph 缁€杞扮伐閵?|
-| `graph_baseline_pipeline.py` | graph baseline 闂傤厾骞嗛敍姝欸raphAppendOrganization -> ThresholdTrigger -> GraphNeighborAppendEvolution -> GraphSeedAndExpandRetrieval -> GraphReadout`閵?|
+| `graph_baseline_pipeline.py` | graph baseline 闂傤厾骞嗛敍姝欸raphAppendOrganization -> AlwaysTrigger -> GraphNeighborAppendEvolution -> GraphSeedAndExpandRetrieval -> GraphReadout`閵?|
 
 ## 閹恒劏宕橀梼鍛邦嚢妞ゅ搫绨?
 1. `minimal_pipeline.py`

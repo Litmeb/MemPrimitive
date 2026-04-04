@@ -248,7 +248,7 @@
   - 比较器是什么
   - crossing 之后触发什么动作
 
-### E. `ModelJudgeTrigger`
+### E. `LLMJudgeTrigger`
 
 覆盖：
 - `LLMJudge`
@@ -313,7 +313,7 @@
 
 更合理的做法：
 - 先问“score 是谁算的”
-- 再决定落到 `ModelJudgeTrigger` 还是 `ScalarRuleTrigger`
+- 再决定落到 `LLMJudgeTrigger` 还是 `ScalarRuleTrigger`
 
 ### 2. `boolean signal gate` 不应直接是顶层实现类
 
@@ -325,7 +325,7 @@
 
 更合理的做法：
 - 先问“信号是谁发出来的”
-- 再决定落到 `BoundaryEventTrigger`、`RuntimeEventTrigger` 或 `ModelJudgeTrigger`
+- 再决定落到 `BoundaryEventTrigger`、`RuntimeEventTrigger` 或 `LLMJudgeTrigger`
 
 ### 3. `new-write conditioned` 更适合降成 hook
 
@@ -349,7 +349,7 @@
    - 接收执行/系统事件
 4. `ScalarRuleTrigger`
    - 接收标量并做比较
-5. `ModelJudgeTrigger`
+5. `LLMJudgeTrigger`
    - 调模型做 yes/no、score、label 判断
 6. `ScheduledMaintenanceTrigger`
    - 固定周期 / idle / sleep-time
@@ -375,7 +375,7 @@
 - `comparator`
   - 仅 `ScalarRuleTrigger` 需要
 - `model_spec`
-  - 仅 `ModelJudgeTrigger` 需要
+  - 仅 `LLMJudgeTrigger` 需要
 - `schedule_spec`
   - 仅 `ScheduledMaintenanceTrigger` 需要
 
@@ -421,7 +421,7 @@
 - M3-Agent
 
 其实它们更像：
-- `ModelJudgeTrigger`
+- `LLMJudgeTrigger`
 - 或 `ControllerTrigger`
 
 ## 最后的结论
@@ -441,7 +441,7 @@
 其中真正值得在 `MemPrimitive` 里优先做成一等实现的，是：
 
 - `RuntimeEventTrigger`
-- `ModelJudgeTrigger`
+- `LLMJudgeTrigger`
 - `ScalarRuleTrigger`
 - `ScheduledMaintenanceTrigger`
 - `BoundaryEventTrigger`

@@ -2,7 +2,6 @@
 
 Concrete classes live in one module per DSL slot (see README.md in this package).
 Public names are derived from each file's ``BASELINE_CLASSES`` (see ``registry.py``).
-The ``simple`` submodule re-exports the same symbols for backward compatibility.
 """
 
 from __future__ import annotations

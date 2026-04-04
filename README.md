@@ -1,240 +1,240 @@
 # MemPrimitive
 
-## 椤圭洰绠€浠?
+## 项目简介
 
-`MemPrimitive` 鏄竴涓潰鍚?agent memory research 鐨勭郴缁熷寲鐮旂┒妗嗘灦銆傝繖涓」鐩殑鏍稿績鐩爣锛屼笉鏄啀鎻愬嚭涓€涓崟鐙殑 memory 鏂规硶锛岃€屾槸璇曞浘鍥炵瓟涓€涓洿鍩虹鐨勯棶棰橈細
+`MemPrimitive` 是一个面向 agent memory research 的系统化研究框架。这个项目的核心目标，不是再提出一个单独的 memory 方法，而是试图回答一个更基础的问题：
 
-**鎴戜滑鑳藉惁鐢ㄧ粺涓€銆佹満鍒剁骇銆佸彲缁勫悎鐨勬柟寮忔潵鎻忚堪 agent memory 鐨勮璁＄┖闂达紝浠庤€屾妸鐜版湁鏂规硶鏀惧埌鍚屼竴涓鏋朵笅姣旇緝銆侀噸缁勪笌鎼滅储锛?*
+**我们能否用统一、机制级、可组合的方式来描述 agent memory 的设计空间，从而把现有方法放到同一个框架下比较、重组与搜索？**
 
-褰撳墠鍏充簬 agent memory 鐨勭爺绌跺凡缁忓嚭鐜颁簡澶ч噺鏂规硶锛屽畠浠湪琛ㄩ潰褰㈠紡涓婂樊寮傚緢澶э紝鏈夌殑寮鸿皟 episodic memory锛屾湁鐨勫己璋?semantic memory锛屾湁鐨勪緷璧栧悜閲忔绱紝鏈夌殑寮鸿皟鍙嶆€濄€佹憳瑕併€佸浘缁撴瀯銆佹妧鑳藉簱鎴?agent 涓诲姩鎺у埗鐨勮蹇嗚鍐欍€備絾濡傛灉浠庡簳灞傛満鍒舵潵鐪嬶紝杩欎簺鏂规硶寰€寰€閮藉湪閲嶅鑻ュ共鐩镐技鐨勮璁″姩浣滐紝渚嬪锛?
+当前关于 agent memory 的研究已经出现了大量方法，它们在表面形式上差异很大，有的强调 episodic memory，有的强调 semantic memory，有的依赖向量检索，有的强调反思、摘要、图结构、技能库或 agent 主动控制的记忆读写。但如果从底层机制来看，这些方法往往都在重复若干相似的设计动作，例如：
 
-- 鎶婅緭鍏ュ垏鎴愭煇绉嶈蹇嗗崟鍏?
-- 鍐冲畾鍝簺鍐呭鍊煎緱鍐欏叆
-- 鍐冲畾璁板繂濡備綍缁勭粐涓庢洿鏂?
-- 鍦ㄩ渶瑕佹椂浠庤蹇嗕腑妫€绱㈢浉鍏冲唴瀹?
-- 瀵硅蹇嗗仛鍘嬬缉銆佹娊璞°€佺淮鎶ゅ拰閬楀繕
+- 把输入切成某种记忆单元
+- 决定哪些内容值得写入
+- 决定记忆如何组织与更新
+- 在需要时从记忆中检索相关内容
+- 对记忆做压缩、抽象、维护和遗忘
 
-鐜版湁宸ヤ綔鐨勯棶棰樺湪浜庯紝杩欎簺鍔ㄤ綔閫氬父琚皝瑁呭湪鍗曠瘒璁烘枃鎻愬嚭鐨勫叿浣撶粨鏋勪腑锛屽鑷?memory design space 闅句互琚樉寮忚〃杈俱€傜粨鏋滄槸锛?
+现有工作的问题在于，这些动作通常被封装在单篇论文提出的具体结构中，导致 memory design space 难以被显式表达。结果是：
 
-- 涓嶅悓鏂规硶涔嬮棿闅句互鍏钩姣旇緝
-- 鐩镐技鏈哄埗寰€寰€琚笉鍚屾湳璇噸澶嶅懡鍚?
-- 妯″潡鏃犳硶鏂逛究鍦版媶瑙ｃ€佹浛鎹㈠拰澶嶇敤
-- 鏂版柟娉曠殑璁捐鏇村渚濊禆缁忛獙锛岃€岄潪绯荤粺鎼滅储
-- 寰堥毦浠庡涓垚鍔熸柟娉曚腑褰掔撼 recurring motifs
+- 不同方法之间难以公平比较
+- 相似机制往往被不同术语重复命名
+- 模块无法方便地拆解、替换和复用
+- 新方法的设计更多依赖经验，而非系统搜索
+- 很难从多个成功方法中归纳 recurring motifs
 
-`MemPrimitive` 鐨勫嚭鍙戠偣锛屽氨鏄妸 memory system 浠庘€滃崟涓€鏂规硶鈥濋噸鍐欎负鈥滃彲缁勫悎绯荤粺鈥濄€?
-
----
-
-## 鏍稿績涓诲紶
-
-鏈」鐩彁鍑轰竴涓?**compositional memory DSL**锛屽皢 agent memory system 鍒嗚В涓轰竴缁勫彲缁勫悎鐨?primitive銆傛瘡涓?primitive 瀵瑰簲 memory 娴佺▼涓殑涓€绉嶅熀纭€鏈哄埗锛岃€屼笉鏄煇绡囪鏂囦腑鐨勬暣浣撴灦鏋勩€?
-
-杩欎簺 primitive 鍖呮嫭浣嗕笉闄愪簬锛?
-
-- `unit formation`锛氬浣曟妸鍘熷 observation 褰㈡垚璁板繂鍗曞厓
-- `representation`锛氳蹇嗗崟鍏冨浣曠紪鐮併€佺粨鏋勫寲鍜岀储寮曞寲
-- `write trigger`锛氱郴缁熶綍鏃跺喅瀹氬啓鍏ヨ蹇?
-- `organization`锛歩ngest-time 濡備綍鍐冲畾鏀剧疆浣嶇疆銆佸叧绯荤粨鏋勫苟瀹屾垚甯歌鍐欏叆
-- `memory evolution`锛氶粯璁や笉鍚姩鏃讹紝宸叉湁璁板繂濡備綍琚澶栧湴閲嶅啓銆佸帇缂┿€佽縼绉汇€佹竻鐞嗗拰鏁寸悊
-- `retrieval`锛氱粰瀹?query 濡備綍閫夊彇鐩稿叧璁板繂
-- `readout`锛氭绱㈢粨鏋滃浣曡浆鍖栦负 agent 鍙娇鐢ㄧ殑涓婁笅鏂?
-
-杩欓噷鏈€閲嶈鐨勬€濇兂鏄細
-
-**memory system 涓嶆槸涓€涓暣浣撴ā鍧楋紝鑰屾槸涓€鏉＄敱澶氫釜 primitive 缁勬垚鐨勬満鍒堕摼銆?*
-
-涓€鏃﹀皢绯荤粺鎷嗘垚杩欎簺 primitive锛屽氨鍙互鎶娾€滄柟娉曡璁♀€濊浆鍖栦负鈥滄ā鍧楃粍鍚堥棶棰樷€濓紝鎶娾€滄柊鏂规硶鍙戠幇鈥濊浆鍖栦负鈥滈厤缃悳绱㈤棶棰樷€濓紝鎶娾€滅粡楠岃瀵熲€濊浆鍖栦负鈥渕otif 褰掔撼闂鈥濄€?
+`MemPrimitive` 的出发点，就是把 memory system 从“单一方法”重写为“可组合系统”。
 
 ---
 
-## 杩欎釜椤圭洰鎯宠В鍐充粈涔堥棶棰?
+## 核心主张
 
-### 1. 缁熶竴鎻忚堪闂
+本项目提出一个 **compositional memory DSL**，将 agent memory system 分解为一组可组合的 primitive。每个 primitive 对应 memory 流程中的一种基础机制，而不是某篇论文中的整体架构。
 
-鏈」鐩鍏堟兂瑙ｅ喅鐨勬槸涓€涓〃绀哄眰闂锛氬浣曠敤缁熶竴璇█閲嶈〃杈惧凡鏈?agent memory 鏂规硶銆?
+这些 primitive 包括但不限于：
 
-濡傛灉娌℃湁缁熶竴鎻忚堪妗嗘灦锛岄偅涔堜笉鍚屽伐浣滀箣闂村線寰€鍙兘鍋滅暀鍦ㄨ嚜鐒惰瑷€灞傞潰鐨勭矖鐣ユ瘮杈冿紝渚嬪鈥滆繖涓柟娉曠敤浜嗛暱鏈熻蹇嗭紝閭ｄ釜鏂规硶鐢ㄤ簡鍙嶆€濃€濄€備絾杩欐牱鐨勬瘮杈冨苟涓嶈兘鎻ず鏈哄埗宸紓銆?
+- `unit formation`：如何把原始 observation 形成记忆单元
+- `representation`：记忆单元如何编码、结构化和索引化
+- `write trigger`：系统何时决定写入记忆
+- `organization`：ingest-time 如何决定放置位置、关系结构并完成常规写入
+- `memory evolution`：默认不启动时，已有记忆如何被额外地重写、压缩、迁移、清理和整理
+- `retrieval`：给定 query 如何选取相关记忆
+- `readout`：检索结果如何转化为 agent 可使用的上下文
 
-鎴戜滑甯屾湜灏嗘瘡涓?memory system 鏄庣‘鍒嗚В涓猴細
+这里最重要的思想是：
 
-- 瀹冨浣曞舰鎴愯蹇嗗崟鍏?
-- 瀹冨浣曡〃绀鸿蹇?
-- 瀹冧綍鏃跺啓鍏?
-- 瀹冨浣曠粍缁囧苟甯歌鍐欏叆璁板繂
-- 瀹冨浣曟绱笌浣跨敤璁板繂
-- 瀹冩槸鍚﹁繘琛岄澶栫殑鍘嬬缉銆佸弽鎬濇垨缁存姢璁板繂
+**memory system 不是一个整体模块，而是一条由多个 primitive 组成的机制链。**
 
-杩欐牱锛屽儚 MemGPT銆丷eflexion銆丄-MEM 绛夌粡鍏哥郴缁燂紝灏卞彲浠ヨ鐪嬩綔鍚屼竴璇█涓殑涓嶅悓閰嶇疆锛岃€屼笉鏄郊姝ゅ绔嬬殑鏂规硶鍚嶃€?
-
-### 2. 鍙瘮杈冮棶棰?
-
-濡傛灉涓嶅悓绯荤粺鑳借閲嶅啓鎴愬悓涓€绉嶇粨鏋勫寲琛ㄧず锛屽氨鍙互鍋氱湡姝ｇ殑鎺у埗鍙橀噺姣旇緝銆?
-
-渚嬪锛?
-
-- 鍥哄畾 `unit formation`锛屽彧姣旇緝涓嶅悓 `retrieval`
-- 鍥哄畾 `retrieval`锛屽彧姣旇緝涓嶅悓 `write trigger`
-- 鍥哄畾 `representation`锛屾瘮杈冧笉鍚岄澶?`memory evolution`
-
-杩欎娇寰?memory 鐮旂┒浠庘€滄柟娉曞鏂规硶鈥濈殑姣旇緝锛岃浆鍚戔€滄満鍒跺鏈哄埗鈥濈殑姣旇緝銆?
-
-### 3. 鍙悳绱㈤棶棰?
-
-鏈」鐩殑绗簩涓牳蹇冮棶棰樻槸锛?*memory architecture 鑳藉惁鍍?program space 涓€鏍疯绯荤粺鎼滅储锛?*
-
-涓€鏃︽瘡涓?primitive 閮借鍐欐垚鏍囧噯妯″潡鎺ュ彛锛屽苟涓旀瘡涓?slot 閮芥湁鏄庣‘鐨勫€欓€夊疄鐜帮紝閭ｄ箞涓€涓?memory system 灏卞彲浠ヨ鐪嬩綔锛?
-
-`LayeredStoreTopology 脳 PrimitiveChoices 脳 Hyperparameters 脳 Constraints`
-
-杩欐剰鍛崇潃鎴戜滑涓嶅啀鍙槸鎵嬪伐璁捐涓€涓?memory 鏂规硶锛岃€屾槸鍙互锛?
-
-- 鏋氫妇鏌愪竴绫?memory configuration
-- 鍦ㄧ害鏉熶笅鑷姩缁勫悎涓嶅悓妯″潡
-- 鎼滅储姣旂幇鏈夋枃鐚洿浼樻垨鏇寸ǔ鍋ョ殑閰嶇疆
-- 瑙傚療鍝簺 primitive 缁勫悎鍙嶅鍦ㄤ笉鍚屼换鍔′笂鍑虹幇
-
-### 4. 鏈哄埗褰掔撼闂
-
-濡傛灉鎼滅储鑳藉湪澶ц妯￠厤缃┖闂翠腑鎵惧埌澶氫釜楂樻€ц兘 memory systems锛岄偅涔堟洿楂樺眰鐨勯棶棰樺氨鍙樻垚锛?
-
-**楂樻€ц兘 agent memory 鏄惁瀛樺湪 recurring motifs锛?*
-
-渚嬪锛屾湭鏉ュ彲鑳借瀵熷埌锛?
-
-- 寰堝鏈夋晥绯荤粺閮介噰鐢ㄢ€滅粨鏋勫寲鎶藉彇 + selective write + hybrid retrieval鈥?
-- 鏌愪簺浠诲姟鏇村亸濂解€渁ppend-only + periodic summarization鈥?
-- 鏌愪簺闀挎湡浜や簰鍦烘櫙鏇撮渶瑕佲€渆ntity merge + profile update + extra memory evolution鈥?
-
-杩欑被缁撹涓嶆槸浠庡崟绡囨柟娉曚腑寰楀埌鐨勶紝鑰屾槸浠庣郴缁熸悳绱㈠拰鏈哄埗姣旇緝涓綊绾冲嚭鏉ョ殑銆?
+一旦将系统拆成这些 primitive，就可以把“方法设计”转化为“模块组合问题”，把“新方法发现”转化为“配置搜索问题”，把“经验观察”转化为“motif 归纳问题”。
 
 ---
 
-## 椤圭洰鐨勭爺绌惰瑙?
+## 这个项目想解决什么问题
 
-`MemPrimitive` 鍏虫敞鐨勬槸 **mechanism-level memory design**锛岃€屼笉鏄叿浣撳伐绋嬪疄鐜般€?
+### 1. 统一描述问题
 
-涔熷氨鏄锛岃繖涓」鐩叧蹇冪殑闂涓昏鏄細
+本项目首先想解决的是一个表示层问题：如何用统一语言重表达已有 agent memory 方法。
 
-- memory system 鐨勬瀯鎴愮淮搴︽湁鍝簺
-- 鍚勭淮搴︿箣闂寸殑杈圭晫搴斿浣曞垝鍒?
-- 鍝簺妯″潡搴旇鐙珛鍑烘潵浣滀负 primitive
-- 妯″潡涔嬮棿鏈夊摢浜涘吋瀹规€х害鏉?
-- 鍝簺缁勫悎鏋勬垚鐜版湁缁忓吀宸ヤ綔
-- 鍝簺鍖哄煙灏氭湭琚帰绱?
+如果没有统一描述框架，那么不同工作之间往往只能停留在自然语言层面的粗略比较，例如“这个方法用了长期记忆，那个方法用了反思”。但这样的比较并不能揭示机制差异。
 
-鍥犳锛屾湰椤圭洰涓嶆槸涓€涓崟绾殑鈥渕emory 搴撯€濇垨鈥渁gent 妗嗘灦鈥濓紝鑰屾洿鎺ヨ繎涓€涓爺绌跺熀纭€璁炬柦銆傚畠鐨勪环鍊煎湪浜庢彁渚涳細
+我们希望将每个 memory system 明确分解为：
 
-- 涓€涓粺涓€鐨勬弿杩拌瑷€
-- 涓€涓竻鏅扮殑妯″潡鎺ュ彛灞?
-- 涓€涓彲鍒嗘瀽銆佸彲鎼滅储鐨勮璁＄┖闂?
-- 涓€涓府鍔╁綊绾?memory 鏈哄埗瑙勫緥鐨勭爺绌惰瑙?
+- 它如何形成记忆单元
+- 它如何表示记忆
+- 它何时写入
+- 它如何组织并常规写入记忆
+- 它如何检索与使用记忆
+- 它是否进行额外的压缩、反思或维护记忆
 
----
+这样，像 MemGPT、Reflexion、A-MEM 等经典系统，就可以被看作同一语言中的不同配置，而不是彼此孤立的方法名。
 
-## 鏁翠綋绯荤粺瑙?
+### 2. 可比较问题
 
-鏈」鐩皢 agent memory system 鐞嗚В涓轰竴涓甫鏈夊壇浣滅敤鐨勬暟鎹祦绯荤粺銆?
+如果不同系统能被重写成同一种结构化表示，就可以做真正的控制变量比较。
 
-浠庡閮ㄨ緭鍏ュ埌鏈€缁堣 agent 浣跨敤锛宮emory 鐨勭敓鍛藉懆鏈熷ぇ鑷村寘鎷互涓嬮樁娈碉細
+例如：
 
-1. 澶栭儴 observation 鍒拌揪绯荤粺
-2. observation 琚垏鍒嗘垨鎶藉彇涓?memory units
-3. memory units 琚紪鐮佷负鍙瓨鍌ㄣ€佸彲绱㈠紩銆佸彲姣旇緝鐨勮〃绀?
-4. 绯荤粺鍐冲畾鍝簺 unit 鍊煎緱鍐欏叆
-5. unit 琚斁缃埌鍚堥€傜殑 store锛屽苟涓庡凡鏈夎蹇嗗缓绔嬪叧绯?
-6. store 琚洿鏂帮紝鍙兘鍙戠敓杩藉姞銆佹浛鎹€佸悎骞舵垨閲嶅啓
-7. 鍦ㄥ悗鍙版垨棰濆瑙﹀彂璺緞涓墽琛屽帇缂┿€佹娊璞°€佹暣鐞嗐€侀仐蹇樻垨杩佺Щ
-8. 褰?agent 鏈?query 鎴栧綋鍓嶄换鍔￠渶瑕佹椂锛岀郴缁熸绱㈢浉鍏宠蹇?
-9. 妫€绱㈢粨鏋滆缁勭粐鎴?agent 鍙秷璐圭殑 readout
-10. agent 灏?readout 绾冲叆鑷繁鐨勬帹鐞嗐€佽鍒掑拰鍝嶅簲杩囩▼
+- 固定 `unit formation`，只比较不同 `retrieval`
+- 固定 `retrieval`，只比较不同 `write trigger`
+- 固定 `representation`，比较不同额外 `memory evolution`
 
-杩欎釜瑙嗚寮鸿皟涓ょ偣锛?
+这使得 memory 研究从“方法对方法”的比较，转向“机制对机制”的比较。
 
-- memory 涓嶆槸闈欐€佹暟鎹簱锛岃€屾槸鍔ㄦ€佹紨鍖栫郴缁?
-- memory 鐮旂┒涓嶅簲鍙湅 retrieval锛岃€屽簲瑕嗙洊鍐欏叆銆佺粍缁囥€佹娊璞″拰缁存姢鐨勫畬鏁撮棴鐜?
+### 3. 可搜索问题
 
----
+本项目的第二个核心问题是：**memory architecture 能否像 program space 一样被系统搜索？**
 
-## 涓轰粈涔堥渶瑕?DSL
+一旦每个 primitive 都被写成标准模块接口，并且每个 slot 都有明确的候选实现，那么一个 memory system 就可以被看作：
 
-鏈」鐩娇鐢?DSL锛屼笉鏄负浜嗚拷姹傝娉曞舰寮忔湰韬紝鑰屾槸鍥犱负鑷劧璇█鎻忚堪涓嶈冻浠ユ敮鎾戠郴缁熺爺绌躲€?
+`LayeredStoreTopology × PrimitiveChoices × Hyperparameters × Constraints`
 
-涓€涓悎鏍肩殑 memory DSL 鑷冲皯搴旇鏀寔鍥涗欢浜嬶細
+这意味着我们不再只是手工设计一个 memory 方法，而是可以：
 
-### 1. 閲嶈〃杈惧凡鏈夋柟娉?
+- 枚举某一类 memory configuration
+- 在约束下自动组合不同模块
+- 搜索比现有文献更优或更稳健的配置
+- 观察哪些 primitive 组合反复在不同任务上出现
 
-DSL 搴旇鑳芥妸宸叉湁 memory 宸ヤ綔閲嶆柊鍐欐垚缁熶竴閰嶇疆銆傚褰撳墠闃舵鑰岃█锛岄噸鐐逛笉鍐嶅彧鏄寫閫夊皯鏁扮粡鍏稿伐浣滃仛灞曠ず锛岃€屾槸灏藉彲鑳芥妸璋冪爺鑼冨洿浠庣粡鍏镐唬琛ㄦ柟娉曟墿灞曞埌鏇村箍娉涖€佹洿澶氭牱鐨?agent memory 鏂囩尞锛屽苟鐢ㄧ粺涓€璇█鎸佺画鍚哥撼杩欎簺鏂规硶銆?
+### 4. 机制归纳问题
 
-褰撳墠鏇村叿浣撶殑鐩爣鏄細
+如果搜索能在大规模配置空间中找到多个高性能 memory systems，那么更高层的问题就变成：
 
-- 灏嗚皟鐮旇鐩栭潰鎵╁睍鍒扮害 40 绡囦笉鍚岄鏍肩殑 memory 宸ヤ綔锛岃€屼笉鍙仠鐣欏湪灏戞暟缁忓吀妗堜緥
-- 灏介噺璁╁叾涓害 1/4 鐨勬柟娉曞彲浠ヨ **瀹屽叏閲嶈〃杈?* 涓虹粺涓€鐨?primitive 缁勫悎涓庨厤缃?
-- 瀵规殏鏃惰繕鏃犳硶瀹屽叏閲嶈〃杈剧殑鏂规硶锛屼篃鑷冲皯鍋氬埌缁撴瀯鍖栨媶瑙ｃ€佸畾浣嶇己澶辨満鍒讹紝骞跺弽杩囨潵鎺ㄥ姩 module 杈圭晫缁х画鎵╁睍
+**高性能 agent memory 是否存在 recurring motifs？**
 
-鍙湁杩欐牱锛岃繖濂楄瑷€鎵嶄笉鏄┖娲?taxonomy锛岃€屾槸鐪熸鍏锋湁瑙ｉ噴鍔涖€佹墿灞曟€у拰鏂囩尞鎵胯浇鑳藉姏鐨勭爺绌跺伐鍏枫€?
+例如，未来可能观察到：
 
-### 2. 琛ㄨ揪妯″潡缁勫悎
+- 很多有效系统都采用“结构化抽取 + selective write + hybrid retrieval”
+- 某些任务更偏好“append-only + periodic summarization”
+- 某些长期交互场景更需要“entity merge + profile update + extra memory evolution”
 
-寰堝 memory 鏂规硶涓嶆槸鍗曟ā鍧楀喅绛栵紝鑰屾槸澶氭満鍒剁粍鍚堬紝渚嬪锛?
-
-- 妫€绱腑鍚屾椂浣跨敤 similarity銆乺ecency銆乮mportance
-- 涓嶅悓 observation type 浣跨敤涓嶅悓 unit formation
-- recall 鍜?rerank 鍒嗕袱闃舵鎵ц
-
-鍥犳 DSL 涓嶈兘鍙敮鎸佲€滃崟瀛楁閰嶇疆鈥濓紝杩樺簲鏀寔缁勫悎銆佺骇鑱斿拰鏉′欢鍒嗗彂銆?
-
-### 3. 鏀寔绾︽潫
-
-memory primitive 涔嬮棿骞堕潪瀹屽叏鑷敱缁勫悎銆?
-
-渚嬪锛?
-
-- graph retrieval 闇€瑕佸浘缁撴瀯鎴栧浘閾炬帴
-- entity-based memory evolution 闇€瑕?entity-aware units
-- similarity retrieval 闇€瑕?embedding
-- hierarchical retrieval 寰€寰€闇€瑕佸眰绾у帇缂╂垨灞傜骇缁勭粐
-
-鎵€浠?DSL 蹇呴』涓嶄粎琛ㄨ揪鈥滈€変粈涔堚€濓紝杩樿琛ㄨ揪鈥滃摢浜涚粍鍚堟槸鍚堟硶鐨勨€濄€?
-
-### 4. 闈㈠悜鎼滅储
-
-濡傛灉鏈潵瑕佸仛鑷姩鎼滅储锛岄偅涔?DSL 閲岀殑姣忎竴涓€夋嫨閮藉簲璇ユ槸鍙灇涓俱€佸彲楠岃瘉銆佸彲閲囨牱鐨勩€備篃灏辨槸璇达紝DSL 搴旇澶╃劧瀵瑰簲涓€涓彲鎿嶄綔鐨?configuration space锛岃€屼笉浠呬粎鏄汉绫诲彲璇荤殑璇存槑鏂囨。銆?
+这类结论不是从单篇方法中得到的，而是从系统搜索和机制比较中归纳出来的。
 
 ---
 
-## 鏈」鐩腑鐨?design space
+## 项目的研究视角
 
-鍦?`MemPrimitive` 涓紝memory design space 鐢变笁灞傚叡鍚屾瀯鎴愩€?
+`MemPrimitive` 关注的是 **mechanism-level memory design**，而不是具体工程实现。
 
-### 1. 缁撴瀯灞?
+也就是说，这个项目关心的问题主要是：
 
-缁撴瀯灞傛弿杩?memory store 鐨勯鏋讹紝鍖呮嫭锛?
+- memory system 的构成维度有哪些
+- 各维度之间的边界应如何划分
+- 哪些模块应该独立出来作为 primitive
+- 模块之间有哪些兼容性约束
+- 哪些组合构成现有经典工作
+- 哪些区域尚未被探索
 
-- 鏈夊嚑灞?memory layer
-- 姣忓眰鐨勪富棰樻槸浠€涔?
-- 姣忓眰鏄?`Flat` 杩樻槸 `Graph`
-- 鍚勫眰鏈夊摢浜?index
+因此，本项目不是一个单纯的“memory 库”或“agent 框架”，而更接近一个研究基础设施。它的价值在于提供：
 
-杩欐槸鏁翠釜绯荤粺鐨?structural prior銆傝繖閲岀殑 hierarchical 涓嶅啀琚涓轰竴绉嶅崟鐙殑 store type锛岃€屾槸鈥滃瓨鍦ㄥ灞?layer鈥濊繖涓€缁撴瀯浜嬪疄鏈韩銆?
+- 一个统一的描述语言
+- 一个清晰的模块接口层
+- 一个可分析、可搜索的设计空间
+- 一个帮助归纳 memory 机制规律的研究视角
 
-### 2. 妯″潡灞?
+---
 
-妯″潡灞傛弿杩版瘡涓?primitive slot 閫夋嫨鍝瀹炵幇銆?
+## 整体系统观
 
-渚嬪锛?
+本项目将 agent memory system 理解为一个带有副作用的数据流系统。
 
-- `unit formation` 閫夋嫨 turn-level銆乫act extraction 杩樻槸 multi-granularity
-- `write trigger` 閫夋嫨 always write銆乮mportance gate銆丩LM judge 杩樻槸 agent-controlled write
-- `retrieval` 閫夋嫨 similarity銆乬raph hop銆丩LM-controlled retrieval 杩樻槸 hybrid retrieval
+从外部输入到最终被 agent 使用，memory 的生命周期大致包括以下阶段：
 
-妯″潡灞傛槸 design space 鐨勪富浣撱€?
+1. 外部 observation 到达系统
+2. observation 被切分或抽取为 memory units
+3. memory units 被编码为可存储、可索引、可比较的表示
+4. 系统决定哪些 unit 值得写入
+5. unit 被放置到合适的 store，并与已有记忆建立关系
+6. store 被更新，可能发生追加、替换、合并或重写
+7. 在后台或额外触发路径中执行压缩、抽象、整理、遗忘或迁移
+8. 当 agent 有 query 或当前任务需要时，系统检索相关记忆
+9. 检索结果被组织成 agent 可消费的 readout
+10. agent 将 readout 纳入自己的推理、规划和响应过程
 
-### 3. 鍙傛暟灞?
+这个视角强调两点：
 
-鍙傛暟灞傛弿杩版瘡涓?primitive 鍐呴儴鐨勮秴鍙傛暟銆侀槇鍊煎拰绛栫暐閫夐」銆?
+- memory 不是静态数据库，而是动态演化系统
+- memory 研究不应只看 retrieval，而应覆盖写入、组织、抽象和维护的完整闭环
 
-渚嬪锛?
+---
+
+## 为什么需要 DSL
+
+本项目使用 DSL，不是为了追求语法形式本身，而是因为自然语言描述不足以支撑系统研究。
+
+一个合格的 memory DSL 至少应该支持四件事：
+
+### 1. 重表达已有方法
+
+DSL 应该能把已有 memory 工作重新写成统一配置。对当前阶段而言，重点不再只是挑选少数经典工作做展示，而是尽可能把调研范围从经典代表方法扩展到更广泛、更多样的 agent memory 文献，并用统一语言持续吸纳这些方法。
+
+当前更具体的目标是：
+
+- 将调研覆盖面扩展到约 40 篇不同风格的 memory 工作，而不只停留在少数经典案例
+- 尽量让其中约 1/4 的方法可以被 **完全重表达** 为统一的 primitive 组合与配置
+- 对暂时还无法完全重表达的方法，也至少做到结构化拆解、定位缺失机制，并反过来推动 module 边界继续扩展
+
+只有这样，这套语言才不是空洞 taxonomy，而是真正具有解释力、扩展性和文献承载能力的研究工具。
+
+### 2. 表达模块组合
+
+很多 memory 方法不是单模块决策，而是多机制组合，例如：
+
+- 检索中同时使用 similarity、recency、importance
+- 不同 observation type 使用不同 unit formation
+- recall 和 rerank 分两阶段执行
+
+因此 DSL 不能只支持“单字段配置”，还应支持组合、级联和条件分发。
+
+### 3. 支持约束
+
+memory primitive 之间并非完全自由组合。
+
+例如：
+
+- graph retrieval 需要图结构或图链接
+- entity-based memory evolution 需要 entity-aware units
+- similarity retrieval 需要 embedding
+- hierarchical retrieval 往往需要层级压缩或层级组织
+
+所以 DSL 必须不仅表达“选什么”，还要表达“哪些组合是合法的”。
+
+### 4. 面向搜索
+
+如果未来要做自动搜索，那么 DSL 里的每一个选择都应该是可枚举、可验证、可采样的。也就是说，DSL 应该天然对应一个可操作的 configuration space，而不仅仅是人类可读的说明文档。
+
+---
+
+## 本项目中的 design space
+
+在 `MemPrimitive` 中，memory design space 由三层共同构成。
+
+### 1. 结构层
+
+结构层描述 memory store 的骨架，包括：
+
+- 有几层 memory layer
+- 每层的主题是什么
+- 每层是 `Flat` 还是 `Graph`
+- 各层有哪些 index
+
+这是整个系统的 structural prior。这里的 hierarchical 不再被视为一种单独的 store type，而是“存在多层 layer”这一结构事实本身。
+
+### 2. 模块层
+
+模块层描述每个 primitive slot 选择哪种实现。
+
+例如：
+
+- `unit formation` 选择 turn-level、fact extraction 还是 multi-granularity
+- `write trigger` 选择 always write、importance gate、LLM judge 还是 agent-controlled write
+- `retrieval` 选择 similarity、graph hop、LLM-controlled retrieval 还是 hybrid retrieval
+
+模块层是 design space 的主体。
+
+### 3. 参数层
+
+参数层描述每个 primitive 内部的超参数、阈值和策略选项。
+
+例如：
 
 - top-k
 - similarity threshold
@@ -242,135 +242,139 @@ memory primitive 涔嬮棿骞堕潪瀹屽叏鑷敱缁勫悎銆?
 - summary batch size
 - merge policy
 
-鍙傛暟灞傚喅瀹氱殑鏄悓涓€鏈哄埗瀹舵棌鍐呴儴鐨勮涓哄樊寮傘€?
+参数层决定的是同一机制家族内部的行为差异。
 
 ---
 
-## 鎼滅储涓嶆槸绌蜂妇锛岃€屾槸鍙楃害鏉熺殑缁勫悎鎺㈢储
+## 搜索不是穷举，而是受约束的组合探索
 
-鏈」鐩墍璁炬兂鐨勬悳绱紝涓嶆槸瀵规墍鏈夋ā鍧楄繘琛屾棤宸埆绌蜂妇锛岃€屾槸 **constraint-aware search**銆?
+本项目所设想的搜索，不是对所有模块进行无差别穷举，而是 **constraint-aware search**。
 
-鍘熷洜寰堢畝鍗曪細primitive 铏界劧琚帴鍙ｅ寲浜嗭紝浣嗗畠浠箣闂翠粛鐒跺瓨鍦ㄨ涔夎€﹀悎銆?
+原因很简单：primitive 虽然被接口化了，但它们之间仍然存在语义耦合。
 
-渚嬪锛?
+例如：
 
-- `representation` 鍜?`retrieval` 寰€寰€寮鸿€﹀悎
-- `unit formation` 涓?`organization` / `memory evolution` 甯稿父寮鸿€﹀悎
-- `organization` 鍐冲畾浜嗗悗缁兘鍚﹁繘琛?graph 鎴?hierarchical retrieval锛屼篃鎵挎媴甯歌鍐欏叆
+- `representation` 和 `retrieval` 往往强耦合
+- `unit formation` 与 `organization` / `memory evolution` 常常强耦合
+- `organization` 决定了后续能否进行 graph 或 hierarchical retrieval，也承担常规写入
 
-鍥犳锛屼竴涓湁鏁堢殑鎼滅储绌洪棿蹇呴』鍚屾椂鍖呭惈锛?
+因此，一个有效的搜索空间必须同时包含：
 
-- 鍙粍鍚堟€?
-- 绫诲瀷涓€鑷存€?
-- 鑳藉姏绾︽潫
-- 妯″潡闂村吋瀹规€?
+- 可组合性
+- 类型一致性
+- 能力约束
+- 模块间兼容性
 
-鎹㈣█涔嬶紝`MemPrimitive` 杩芥眰鐨勪笉鏄€滃畬鍏ㄨ嚜鐢辩粍鍚堚€濓紝鑰屾槸鈥滃湪褰㈠紡鍖栫害鏉熶笅鐨勫彲鎺х粍鍚堚€濄€?
+换言之，`MemPrimitive` 追求的不是“完全自由组合”，而是“在形式化约束下的可控组合”。
 
-褰撳墠瀹炵幇澶勪簬涓€娆＄害鏉熸満鍒堕噸鏋勮繃娓℃湡锛?
+当前实现处于一次约束机制重构过渡期：
 
-- `MemoryPipeline` 浠嶇劧浼氬湪鏋勯€犳湡妫€鏌?slot 鎶借薄绫诲瀷涓?`ModuleSpec.slot` 鏄惁瀵归綈
-- 鏃х殑 baseline 渚?store/topology eager compatibility check 宸茬Щ闄?
-- baseline/runtime 渚х幇宸叉敼涓轰互 `MemoryStore.check()` 涓轰腑蹇冪殑缁勫悎鍚堟硶鎬ф楠岋細`MemoryPipeline` 璐熻矗鎶婃ā鍧楀０鏄庣殑 `requires_contracts` / `produces_contracts` 娉ㄥ唽鍒板叡浜?store锛岄殢鍚庣敱璋冪敤鏂瑰湪闇€瑕佹椂鏄惧紡鎵ц `store.check()`
-
----
-
-## 杩欎釜椤圭洰甯屾湜瑕嗙洊鍝簺宸叉湁 memory 鐮旂┒
-
-杩欎釜椤圭洰鐨勭洰鏍囦箣涓€锛屾槸璁╀笉鍚岄鏍肩殑 agent memory 鏂规硶閮借兘琚斁鍒颁竴涓粺涓€妗嗘灦涓悊瑙ｃ€傚綋鍓嶉樁娈典細涓诲姩鎶婃枃鐚睜浠庣粡鍏稿伐浣滄墿灞曞埌灏藉彲鑳藉鐨勪唬琛ㄦ€т笌寮傝川鎬у伐浣滐紝鐩爣瑙勬ā绾︿负 40 绡囷紱鍏朵腑浼氶噸鐐规寫閫夌害 1/4 浣滀负瀹屽叏閲嶈〃杈惧璞★紝鍏朵綑宸ヤ綔涔熶細绾冲叆缁熶竴鎷嗚В涓庡鐓у垎鏋愩€傝鐩栬寖鍥村寘鎷絾涓嶉檺浜庯細
-
-- 浠?observation stream 涓烘牳蹇冪殑 episodic memory
-- 浠ヤ簨瀹炴娊鍙栥€佸睘鎬ф洿鏂颁负鏍稿績鐨?semantic/profile memory
-- 浠ュ弽鎬濄€佹€荤粨鍜屾娊璞′负鏍稿績鐨?reflective memory
-- 浠ユ妧鑳姐€佷唬鐮佺墖娈典负鏍稿績鐨?skill memory
-- 浠ュ浘鑺傜偣涓庡叧绯婚摼鎺ヤ负鏍稿績鐨?graph memory
-- 浠?agent 涓诲姩宸ュ叿璋冪敤涓烘牳蹇冪殑 self-managed memory
-- 浠ュ伐浣滆蹇嗐€侀暱鏈熻蹇嗐€佸綊妗ｈ蹇嗗垎灞備负鏍稿績鐨?multi-store memory
-
-杩欎簺绯荤粺铏界劧琛ㄩ潰褰㈠紡涓嶅悓锛屼絾鐞嗘兂鐘舵€佷笅閮藉簲琚繕鍘熶负涓€缁?primitive 鐨勪笉鍚屽彇鍊煎拰涓嶅悓缁勫悎鏂瑰紡銆傝嫢鐜版湁妯″潡杩樹笉瓒充互鎵胯浇鏌愪竴绫绘柟娉曪紝閭ｄ箞鎵╁睍 module 鏈韩灏辨槸褰撳墠闃舵鐨勯噸瑕佺爺绌跺伐浣滐紝鑰屼笉鏄緥澶栨儏鍐点€?
+- `MemoryPipeline` 仍然会在构造期检查 slot 抽象类型与 `ModuleSpec.slot` 是否对齐
+- 旧的 baseline 侧 store/topology eager compatibility check 已移除
+- baseline/runtime 侧现已改为以 `MemoryStore.check()` 为中心的组合合法性检验：`MemoryPipeline` 负责把模块声明的 `requires_contracts` / `produces_contracts` 注册到共享 store，随后由调用方在需要时显式执行 `store.check()`
 
 ---
 
-## 杩欎釜椤圭洰鏈€缁堟兂浜у嚭浠€涔?
+## 这个项目希望覆盖哪些已有 memory 研究
 
-浠庣爺绌剁洰鏍囦笂鐪嬶紝`MemPrimitive` 甯屾湜鏈€缁堟敮鎸佷互涓嬪嚑绫讳骇鍑恒€傚氨褰撳墠闃舵鑰岃█锛屾渶浼樺厛鐨勪腑鏈熺洰鏍囨槸锛氭妸鏂囩尞瑕嗙洊闈㈡墿灞曞埌绾?40 绡囷紝骞跺敖閲忎娇鍏朵腑绾?1/4 鑳藉琚瘮杈冩湁璇存湇鍔涘湴澹扮О涓衡€滃畬鍏ㄩ噸琛ㄨ揪鈥濓紱涓烘锛岄」鐩細缁х画鎵╁睍 module families 涓庣粍鍚堣竟鐣岋紝璁╂洿澶氳繃鍘绘柟娉曞彲浠ヨ惤鍒扮粺涓€妗嗘灦涓€?
+这个项目的目标之一，是让不同风格的 agent memory 方法都能被放到一个统一框架中理解。当前阶段会主动把文献池从经典工作扩展到尽可能多的代表性与异质性工作，目标规模约为 40 篇；其中会重点挑选约 1/4 作为完全重表达对象，其余工作也会纳入统一拆解与对照分析。覆盖范围包括但不限于：
 
-### 1. 涓€濂楃粺涓€鐨?memory 鎻忚堪璇█
+- 以 observation stream 为核心的 episodic memory
+- 以事实抽取、属性更新为核心的 semantic/profile memory
+- 以反思、总结和抽象为核心的 reflective memory
+- 以技能、代码片段为核心的 skill memory
+- 以图节点与关系链接为核心的 graph memory
+- 以 agent 主动工具调用为核心的 self-managed memory
+- 以工作记忆、长期记忆、归档记忆分层为核心的 multi-store memory
 
-鐢ㄤ簬琛ㄨ揪銆佹瘮杈冨拰閲嶆瀯宸叉湁 agent memory 绯荤粺銆?
-
-### 2. 涓€濂楁満鍒剁骇 primitive ontology
-
-鏄庣‘ memory system 鐢卞摢浜涘熀纭€鏈哄埗缁勬垚锛屾瘡绉嶆満鍒舵湁鍝簺瀹炵幇鍙樹綋锛屽畠浠箣闂村浣曞吋瀹规垨鍐茬獊銆?
-
-### 3. 涓€涓彲鎼滅储鐨?memory configuration space
-
-浣?memory design 浠庢墜宸ュ惎鍙戝紡璁捐锛岃浆鍚戝彲绾︽潫鐨勭郴缁熸帰绱€?
-
-### 4. 涓€缁?recurring motifs
-
-閫氳繃瀵圭粡鍏告柟娉曞拰鎼滅储缁撴灉鐨勫垎鏋愶紝褰掔撼鍑洪珮鎬ц兘 memory systems 涓弽澶嶅嚭鐜扮殑璁捐妯″紡銆?
-
-### 5. 涓€涓柊鐨勭爺绌堕棶棰樻鏋?
-
-鍗虫妸 agent memory 鐮旂┒浠庘€滄彁鍑轰竴涓柊鏋舵瀯鈥濓紝鎺ㄨ繘鍒扳€滅爺绌?memory design space 鐨勭粍缁囪寰嬨€佺粨鏋勫亸缃笌鎼滅储鏂规硶鈥濄€?
+这些系统虽然表面形式不同，但理想状态下都应被还原为一组 primitive 的不同取值和不同组合方式。若现有模块还不足以承载某一类方法，那么扩展 module 本身就是当前阶段的重要研究工作，而不是例外情况。
 
 ---
 
-## 鏈粨搴撳綋鍓嶆枃妗ｇ殑鍒嗗伐
+## 这个项目最终想产出什么
+
+从研究目标上看，`MemPrimitive` 希望最终支持以下几类产出。就当前阶段而言，最优先的中期目标是：把文献覆盖面扩展到约 40 篇，并尽量使其中约 1/4 能够被比较有说服力地声称为“完全重表达”；为此，项目会继续扩展 module families 与组合边界，让更多过去方法可以落到统一框架中。
+
+### 1. 一套统一的 memory 描述语言
+
+用于表达、比较和重构已有 agent memory 系统。
+
+### 2. 一套机制级 primitive ontology
+
+明确 memory system 由哪些基础机制组成，每种机制有哪些实现变体，它们之间如何兼容或冲突。
+
+### 3. 一个可搜索的 memory configuration space
+
+使 memory design 从手工启发式设计，转向可约束的系统探索。
+
+### 4. 一组 recurring motifs
+
+通过对经典方法和搜索结果的分析，归纳出高性能 memory systems 中反复出现的设计模式。
+
+### 5. 一个新的研究问题框架
+
+即把 agent memory 研究从“提出一个新架构”，推进到“研究 memory design space 的组织规律、结构偏置与搜索方法”。
+
+---
+
+## 本仓库当前文档的分工
 
 - `memprimitive/baselines/README.md`
-  璇存槑闃舵涓€ baseline 浠ｇ爜濡備綍鎸?primitive slot 鎷嗗垎鍒板涓?`.py` 鏂囦欢銆乣__init__.py` 涓?`simple.py` 鐨勫鍑哄叧绯伙紝浠ュ強鎵╁睍鏂板疄鐜版椂鐨勭害瀹氥€?  褰撳墠 `RecencyRetrieval` 璇箟宸插浐瀹氫负鈥滅洿鎺ヨ繑鍥炴渶鏂扮殑 top-k 璁板綍鈥濓紝涓嶅啀鏍规嵁 query token 鍏堝仛鏂囨湰杩囨护銆?  褰撳墠 trigger-family baseline 宸茶鐩?metadata-gated write銆乲ey-ready write銆乷utcome-conditioned evolution trigger 涓?new-write local-maintenance trigger 杩欑被闈?graph motif锛屽彲鐩存帴鐢ㄧǔ瀹氱被鍚嶅拰 builder 琛ㄨ揪 TiM銆丷eflexion銆丮emGPT 椋庢牸瑙﹀彂璇箟銆?  鍚屾椂锛孯eflexion-like back-half motif 鐜板湪涔熷凡鏈夐€氱敤 baseline锛歚PlacementWithoutAppendOrganization`銆乣ReflectionGenerationEvolution`銆乣BufferRetrieval`銆乣PromptContextReadout`锛宑lassic Reflexion wrapper 鐩存帴澶嶇敤杩欎簺 slot-level 瀹炵幇銆?
+  说明阶段一 baseline 代码如何按 primitive slot 拆分到多个 `.py` 文件、`__init__.py` 的聚合导出，以及扩展新实现时的约定。
+  当前 `RecencyRetrieval` 语义已固定为“直接返回最新的 top-k 记录”，不再根据 query token 先做文本过滤。
+  当前 trigger-family baseline 已覆盖 metadata-gated write、key-ready write、outcome-conditioned evolution trigger 与 new-write local-maintenance trigger 这类非 graph motif，可直接用稳定类名和 builder 表达 TiM、Reflexion、MemGPT 风格触发语义。
+  同时，Reflexion-like back-half motif 现在也已有通用 baseline：`PlacementWithoutAppendOrganization`、`ReflectionGenerationEvolution`、`BufferRetrieval`、`PromptContextReadout`，classic Reflexion wrapper 直接复用这些 slot-level 实现。
+
 - `memprimitive/example/demonstration/README.md`
-  姹囨€诲彲杩愯 demonstration锛屽寘鎷け璐?/ 鎴愬姛 trial 鐨?Reflexion 椋庢牸瑙﹀彂銆佸畬鏁寸殑 failed-trial -> reflection -> next-recall context Reflexion-like 闂幆锛屼互鍙?partition-ready local maintenance 鐨?TiM 椋庢牸瑙﹀彂婕旂ず銆?
-  杩欎簺 demonstration 榛樿搴斾互鏈€绠€娲佺殑 `MemoryPipeline + module composition` 褰㈠紡灞曠ず DSL 鐢ㄦ硶锛岃€屼笉鏄緷璧栨洿楂樺眰鐨?workflow 灏佽銆?
+  汇总可运行 demonstration，包括失败 / 成功 trial 的 Reflexion 风格触发、完整的 failed-trial -> reflection -> next-recall context Reflexion-like 闭环，以及 partition-ready local maintenance 的 TiM 风格触发演示。
+  这些 demonstration 默认应以最简洁的 `MemoryPipeline + module composition` 形式展示 DSL 用法，而不是依赖更高层的 workflow 封装。
 
 - `DSLIO.md`
-  璁ㄨ memory system 鍚勬ā鍧楃殑鏍囧噯杈撳叆杈撳嚭鎺ュ彛锛屾槑纭郴缁熶腑鐨勫叡浜璞°€佹ā鍧楃鍚嶃€佸壇浣滅敤涓庤兘鍔涚害鏉熴€?
+  讨论 memory system 各模块的标准输入输出接口，明确系统中的共享对象、模块签名、副作用与能力约束。
 
 - `DSLgrammar.md`
-  灏嗘帴鍙ｅ眰鎶借薄鎴愬０鏄庡紡璇█锛屽畾涔?memory system 鐨勫舰寮忚娉曘€佺粍鍚堢畻瀛愩€佺害鏉熻〃杈炬柟寮忥紝浠ュ強濡備綍鐢ㄨ璇█閲嶈〃杈剧粡鍏告柟娉曘€?
+  将接口层抽象成声明式语言，定义 memory system 的形式语法、组合算子、约束表达方式，以及如何用该语言重表达经典方法。
 
 - `Primitives.md`
-  鏋氫妇姣忎釜 primitive slot 鐨勫彲鑳藉疄鐜帮紝鍒荤敾鎼滅储绌洪棿銆佸吋瀹规€х害鏉熴€佸凡鏈夊伐浣滃垎瑙ｅ拰娼滃湪鏈帰绱㈢粍鍚堛€?
+  枚举每个 primitive slot 的可能实现，刻画搜索空间、兼容性约束、已有工作分解和潜在未探索组合。
 
-杩欎笁涓枃妗ｅ叡鍚屾瀯鎴愪簡椤圭洰鐨勭爺绌跺熀纭€锛?
+这三个文档共同构成了项目的研究基础：
 
-- `DSLIO.md` 鍥炵瓟鈥滄ā鍧楁帴鍙ｆ槸浠€涔堚€?
-- `DSLgrammar.md` 鍥炵瓟鈥滅郴缁熷浣曡璇█鍖栨弿杩扳€?
-- `Primitives.md` 鍥炵瓟鈥滄悳绱㈢┖闂撮噷鍒板簳鏈変粈涔堚€?
-
----
-
-## 閫傜敤鍦烘櫙
-
-`MemPrimitive` 閫傚悎浠ヤ笅鍑犵被鐮旂┒宸ヤ綔锛?
-
-- 鎯崇郴缁熸暣鐞?agent memory 鏂囩尞鐨勪汉
-- 鎯虫瘮杈冧笉鍚?memory 鏈哄埗鑰屼笉鏄粎姣旇緝瀹屾暣鏂规硶鐨勪汉
-- 鎯虫妸宸叉湁 memory 鏋舵瀯閲嶅啓鎴愮粺涓€褰㈠紡鐨勪汉
-- 鎯冲紑灞?memory architecture search 鐨勪汉
-- 鎯充粠鎼滅储缁撴灉涓綊绾?recurring motifs 鐨勪汉
-- 鎯崇爺绌?long-term memory銆乻emantic memory銆乺eflective memory銆乻kill memory 涔嬮棿鍏崇郴鐨勪汉
+- `DSLIO.md` 回答“模块接口是什么”
+- `DSLgrammar.md` 回答“系统如何被语言化描述”
+- `Primitives.md` 回答“搜索空间里到底有什么”
 
 ---
 
-## 涓嶅湪褰撳墠鑼冨洿鍐呯殑鍐呭
+## 适用场景
 
-鏈」鐩綋鍓嶅叧娉ㄧ殑鏄郴缁熻璁′笌鐮旂┒鎶借薄锛屽洜姝ゆ殏涓嶆妸閲嶇偣鏀惧湪浠ヤ笅鏂归潰锛?
+`MemPrimitive` 适合以下几类研究工作：
 
-- 鍏蜂綋宸ョ▼瀹炵幇缁嗚妭
-- 鍏蜂綋妯″瀷璋冪敤涓庝唬鐮佺粍缁?
-- 鍏蜂綋 benchmark 鐨勮繍琛岃剼鏈?
-- 鐗瑰畾妗嗘灦涓嬬殑閮ㄧ讲鏂瑰紡
-- 闈㈠悜鐢熶骇鐜鐨勪紭鍖栫粏鑺?
-
-杩欎簺鍐呭鏈潵閮藉彲浠ュ缓绔嬪湪褰撳墠鐮旂┒鎶借薄涔嬩笂锛屼絾涓嶆槸褰撳墠闃舵鐨勬牳蹇冪洰鏍囥€?
+- 想系统整理 agent memory 文献的人
+- 想比较不同 memory 机制而不是仅比较完整方法的人
+- 想把已有 memory 架构重写成统一形式的人
+- 想开展 memory architecture search 的人
+- 想从搜索结果中归纳 recurring motifs 的人
+- 想研究 long-term memory、semantic memory、reflective memory、skill memory 之间关系的人
 
 ---
 
-## 涓€鍙ヨ瘽姒傛嫭
+## 不在当前范围内的内容
 
-`MemPrimitive` 鎯冲仛鐨勪簨鏄細
+本项目当前关注的是系统设计与研究抽象，因此暂不把重点放在以下方面：
 
-**鎶?agent memory 浠庘€滄柟娉曢泦鍚堚€濋噸鏋勪负鈥滃彲缁勫悎銆佸彲鎼滅储銆佸彲褰掔撼鐨勬満鍒剁┖闂粹€濓紱鑰屽綋鍓嶉樁娈垫渶鏍稿績鐨勭洰鏍囷紝鏄妸灏藉彲鑳藉鐨勬棦鏈夋柟娉曠撼鍏ョ粺涓€閲嶈〃杈炬鏋朵腑锛屾墿灞曞埌绾?40 绡囨枃鐚紝骞朵簤鍙栧叾涓害 1/4 杈惧埌瀹屽叏閲嶈〃杈俱€?*
+- 具体工程实现细节
+- 具体模型调用与代码组织
+- 具体 benchmark 的运行脚本
+- 特定框架下的部署方式
+- 面向生产环境的优化细节
+
+这些内容未来都可以建立在当前研究抽象之上，但不是当前阶段的核心目标。
+
+---
+
+## 一句话概括
+
+`MemPrimitive` 想做的事是：
+
+**把 agent memory 从“方法集合”重构为“可组合、可搜索、可归纳的机制空间”；而当前阶段最核心的目标，是把尽可能多的既有方法纳入统一重表达框架中，扩展到约 40 篇文献，并争取其中约 1/4 达到完全重表达。**
