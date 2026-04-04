@@ -64,7 +64,7 @@ class ResolutionState:
     filter_trace: list[dict[str, Any]] = field(default_factory=list)
 
 
-def build_simple_prompt_plan(
+def text_prompt(
     template: str,
     *,
     context_builder: ContextBuilder | None = None,
@@ -86,7 +86,7 @@ def build_simple_prompt_plan(
     )
 
 
-def build_structured_prompt_plan(
+def structured_prompt(
     template: dict[str, Any] | list[Any],
     *,
     context_builder: ContextBuilder | None = None,
@@ -117,7 +117,7 @@ def ensure_prompt_plan(
     if isinstance(prompt, PromptPlan):
         plan = prompt
     else:
-        plan = build_simple_prompt_plan(str(prompt), metadata_mode=metadata_mode or "prompt")
+        plan = text_prompt(str(prompt), metadata_mode=metadata_mode or "prompt")
     if metadata_mode is not None and plan.metadata_mode != metadata_mode:
         plan = replace(plan, metadata_mode=metadata_mode)
     if context_builder is not None:

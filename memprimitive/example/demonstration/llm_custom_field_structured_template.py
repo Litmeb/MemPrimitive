@@ -7,7 +7,7 @@ This demonstration builds the full pipeline in two stages:
   - uses ``LLMRepresentation`` to extract custom fields
 - recall pipeline:
   - retrieves relevant profile records with embedding similarity
-- renders them through ``TemplateReadout(prompt=build_structured_prompt_plan(...))``
+- renders them through ``TemplateReadout(prompt=structured_prompt(...))``
 
 The template directly reads custom representation fields such as
 ``item.representation.user_profile`` and ``item.representation.response_hint``.
@@ -45,7 +45,7 @@ from memprimitive.baselines import (
     LLMRepresentation,
     TemplateReadout,
 )
-from memprimitive.utils._template import build_structured_prompt_plan
+from memprimitive.utils._template import structured_prompt
 
 
 def main() -> None:
@@ -111,7 +111,7 @@ def main() -> None:
     recall = MemoryPipeline(
         retrieval=EmbeddingSimilarityRetrieval(top_k=3, layer="profile"),
         readout=TemplateReadout(
-            prompt=build_structured_prompt_plan({
+            prompt=structured_prompt({
                 "blocks": [
                     {
                         "id": "query",
