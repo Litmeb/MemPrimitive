@@ -26,6 +26,7 @@ from ..utils._hierarchical_family import (
     resolve_source_records,
     validate_hierarchical_config,
 )
+from ..utils._template import PromptPlan, ensure_prompt_plan
 from ..utils._reflexion_family import DEFAULT_TRIAL_LAYER
 from ..utils._trace import copy_trace
 
@@ -454,9 +455,7 @@ class HierarchicalOrganization(OrganizationModule):
         extract_mode: str,
         extract_fields: tuple[str, ...],
         group_by: tuple[str, ...] = (),
-        prompt: str | None = None,
-        retrieve_pipeline=None,
-        recall_query_template: str | None = None,
+        prompt: PromptPlan | str | None = None,
         target_layer: str | None = None,
         memory_pipeline=None,
     ) -> None:
@@ -476,8 +475,6 @@ class HierarchicalOrganization(OrganizationModule):
         self.extract_fields = config["extract_fields"]
         self.group_by = config["group_by"]
         self.prompt = config["prompt"]
-        self.retrieve_pipeline = retrieve_pipeline
-        self.recall_query_template = None if recall_query_template is None else str(recall_query_template)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         require_aligned_units_decisions(packet, include_placements=False)
@@ -503,8 +500,6 @@ class HierarchicalOrganization(OrganizationModule):
             group_by=self.group_by,
             grouped_records=grouped,
             prompt=self.prompt,
-            retrieve_pipeline=self.retrieve_pipeline,
-            recall_query_template=self.recall_query_template,
         )
         effective_target_layer = inferred_target_layer(
             target_layer=self.target_layer,
@@ -519,7 +514,17 @@ class HierarchicalOrganization(OrganizationModule):
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
             "group_by": list(self.group_by),
-            "prompt_is_template": bool(self.prompt and "{{" in self.prompt and "}}" in self.prompt),
+            "prompt_is_template": bool(
+                self.prompt is not None
+                and (
+                    ensure_prompt_plan(self.prompt, metadata_mode="prompt").mode == "structured"
+                    or (
+                        isinstance(ensure_prompt_plan(self.prompt, metadata_mode="prompt").template, str)
+                        and "{{" in str(ensure_prompt_plan(self.prompt, metadata_mode="prompt").template)
+                        and "}}" in str(ensure_prompt_plan(self.prompt, metadata_mode="prompt").template)
+                    )
+                )
+            ),
             "selection_source": selection_source,
             "selected_record_count": len(selected_records),
             "group_count": len(grouped),

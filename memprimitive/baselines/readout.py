@@ -19,14 +19,10 @@ from ..utils._reflexion_family import (
     last_attempt_from_query_metadata,
     strategy_from_query_metadata,
 )
-from ..utils._template_readout import (
-    ReadoutResolutionState,
-    build_render_context,
-    collect_template_references,
-    metadata_from_state,
-    render_simple_template,
-    render_structured_template,
-    template_mode,
+from ..utils._template import (
+    PromptPlan,
+    ensure_prompt_plan,
+    render_prompt_plan,
 )
 from ..utils._trace import copy_trace
 
@@ -387,50 +383,43 @@ class TemplateReadout(ReadoutModule):
     def __init__(
         self,
         *,
-        simple_template: str | None = None,
-        structured_template: dict[str, Any] | list[Any] | None = None,
+        prompt: PromptPlan | str,
         filters: dict[str, Callable[..., Any]] | None = None,
         missing_value: str = "",
         note_namespace: str = DEFAULT_NOTE_NAMESPACE,
         default_category: str = DEFAULT_CATEGORY,
         runtime_now_factory: Callable[[], str] | None = None,
     ) -> None:
-        self.simple_template = simple_template
-        self.structured_template = structured_template
+        self.prompt = prompt
         self.filters = {} if filters is None else dict(filters)
         self.missing_value = missing_value
         self.note_namespace = note_namespace
         self.default_category = default_category
         self.runtime_now_factory = runtime_now_factory
-        self._template_mode = template_mode(
-            simple_template=self.simple_template,
-            structured_template=self.structured_template,
-        )
         if self.filters:
             raise ValueError("TemplateReadout custom filters are not supported yet.")
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        context = build_render_context(
-            packet,
-            note_namespace=self.note_namespace,
-            default_category=self.default_category,
-            runtime_now_factory=self.runtime_now_factory,
+        plan = ensure_prompt_plan(
+            self.prompt,
+            metadata_mode="readout",
         )
-        state = ReadoutResolutionState()
-        if self._template_mode == "simple":
-            template = self.simple_template if isinstance(self.simple_template, str) else ""
-            declared_variables = collect_template_references(template, structured=False)
-            text = render_simple_template(template, context, state, missing_value=self.missing_value)
-        else:
-            template = self.structured_template if self.structured_template is not None else {}
-            declared_variables = collect_template_references(template, structured=True)
-            text = render_structured_template(template, context, state, missing_value=self.missing_value)
-
-        metadata = metadata_from_state(
-            template_mode_name=self._template_mode,
-            declared_variables=declared_variables,
-            context=context,
-            state=state,
+        if plan.missing_value != self.missing_value:
+            plan = PromptPlan(
+                mode=plan.mode,
+                template=plan.template,
+                context_builder=plan.context_builder,
+                recall_plan=plan.recall_plan,
+                recall_query_builder=plan.recall_query_builder,
+                missing_value=self.missing_value,
+                metadata_mode="readout",
+                sub_recall_pipeline=plan.sub_recall_pipeline,
+            )
+        text, metadata, store = render_prompt_plan(
+            plan,
+            packet=packet,
+            store=store,
+            runtime_now_factory=self.runtime_now_factory,
         )
         readout = Readout(
             text=text,
@@ -440,8 +429,8 @@ class TemplateReadout(ReadoutModule):
         trace = copy_trace(packet)
         trace["readout"] = {
             "module": self.spec.name,
-            "template_mode": self._template_mode,
-            "resolved_variable_count": len(state.resolutions),
+            "template_mode": metadata.get("template_mode"),
+            "resolved_variable_count": len(metadata.get("resolved_variables", [])),
             "missing_variable_count": len(metadata["missing_variables"]),
             "used_record_ids": list(metadata["used_record_ids"]),
             "used_group_ids": list(metadata["used_group_ids"]),

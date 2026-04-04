@@ -25,8 +25,9 @@ _template_readout
     template parsing, filter application, and structured block rendering.
 
 _template
-    Shared simple-template helpers for prompt rendering and stable lightweight
-    projections of packet/query/unit/record data.
+    Shared prompt-template helpers for `PromptPlan` construction/rendering,
+    sub-recall execution, and stable lightweight projections of
+    packet/query/unit/record data.
 
 _trace
     Lightweight packet-trace copy utility.

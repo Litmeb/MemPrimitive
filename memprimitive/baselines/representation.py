@@ -32,12 +32,10 @@ from ..utils._amem_family import (
     representation_from_note_payload,
 )
 from ..utils._template import (
-    looks_like_template,
-    metadata_from_resolution_state,
+    PromptPlan,
+    ensure_prompt_plan,
     project_unit_for_template,
-    render_prompt_template,
-    render_prompt_template_with_recall,
-    utc_now_iso,
+    render_prompt_plan,
 )
 from ..utils._trace import copy_trace
 
@@ -547,9 +545,7 @@ class LLMRepresentation(RepresentationModule):
         self,
         *,
         field: str,
-        prompt: str,
-        retrieve_pipeline=None,
-        recall_query_template: str | None = None,
+        prompt: PromptPlan | str,
         embedding_model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -560,13 +556,14 @@ class LLMRepresentation(RepresentationModule):
         normalized_field = str(field).strip()
         if not normalized_field:
             raise ValueError("LLMRepresentation requires a non-empty field.")
-        normalized_prompt = str(prompt).strip()
-        if not normalized_prompt:
+        if isinstance(prompt, str):
+            normalized_prompt = prompt.strip()
+        else:
+            normalized_prompt = prompt
+        if isinstance(normalized_prompt, str) and not normalized_prompt:
             raise ValueError("LLMRepresentation requires a non-empty prompt.")
         self.field = normalized_field
         self.prompt = normalized_prompt
-        self.retrieve_pipeline = retrieve_pipeline
-        self.recall_query_template = None if recall_query_template is None else str(recall_query_template)
         self.embedding_model = embedding_model or env.get(
             "MEMPRIMITIVE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
@@ -588,24 +585,25 @@ class LLMRepresentation(RepresentationModule):
         represented_units: list[MemoryUnit] = []
         per_unit_trace: list[dict[str, Any]] = []
         for unit in packet.units:
-            represented_unit, unit_trace, store = self._represent_unit(unit, store)
+            represented_unit, unit_trace, store = self._represent_unit(packet, unit, store)
             represented_units.append(represented_unit)
             per_unit_trace.append({"unit_id": represented_unit.unit_id, **unit_trace})
 
         trace = copy_trace(packet)
+        prompt_plan = ensure_prompt_plan(self.prompt, metadata_mode="prompt")
         trace["representation"] = {
             "module": self.spec.name,
             "field": self.field,
-            "prompt_is_template": looks_like_template(self.prompt),
+            "prompt_is_template": prompt_plan.mode == "structured" or (isinstance(prompt_plan.template, str) and "{{" in prompt_plan.template and "}}" in prompt_plan.template),
             "unit_ids": [unit.unit_id for unit in represented_units],
             "per_unit": per_unit_trace,
         }
         return replace(packet, units=represented_units, trace=trace), store
 
-    def _represent_unit(self, unit: MemoryUnit, store: MemoryStore) -> tuple[MemoryUnit, dict[str, Any], MemoryStore]:
+    def _represent_unit(self, packet: Packet, unit: MemoryUnit, store: MemoryStore) -> tuple[MemoryUnit, dict[str, Any], MemoryStore]:
         normalized_text = unit.text.strip()
         normalized_casefold = normalized_text.casefold()
-        payload, prompt_trace, store = self._extract_field(unit, normalized_text, store)
+        payload, prompt_trace, store = self._extract_field(packet, unit, normalized_text, store)
         elements = set(unit.representation_elements)
         elements.add(self.field)
         representation_meta: dict[str, Any] = dict(unit.metadata.get("representation", {}))
@@ -667,8 +665,8 @@ class LLMRepresentation(RepresentationModule):
             embedding_model=self.embedding_model,
         )
 
-    def _extract_field(self, unit: MemoryUnit, text: str, store: MemoryStore) -> tuple[Any, dict[str, Any], MemoryStore]:
-        rendered_prompt, prompt_trace, store = self._render_prompt(unit, store)
+    def _extract_field(self, packet: Packet, unit: MemoryUnit, text: str, store: MemoryStore) -> tuple[Any, dict[str, Any], MemoryStore]:
+        rendered_prompt, prompt_trace, store = self._render_prompt(packet, unit, store)
         user = json.dumps(
             {
                 "field": self.field,
@@ -691,47 +689,16 @@ class LLMRepresentation(RepresentationModule):
             return _normalize_string_dict(self._llm_json(user=user)), prompt_trace, store
         return self._llm_text(user=user), prompt_trace, store
 
-    def _render_prompt(self, unit: MemoryUnit, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
-        if not looks_like_template(self.prompt):
-            return self.prompt, {
-                "prompt_is_template": False,
-                "rendered_prompt": self.prompt,
-                "rendered_prompt_preview": self.prompt[:200],
-                "missing_variables": [],
-                "recalled_prompt": "",
-                "recalled_prompt_preview": "",
-                "recall_prompt": {
-                    "enabled": False,
-                    "disabled_reason": "prompt_not_template",
-                    "rendered_recall_query": "",
-                    "rendered_recall_query_preview": "",
-                    "recall_query_template": self.recall_query_template,
-                    "recall_query_template_is_template": bool(
-                        self.recall_query_template and looks_like_template(self.recall_query_template)
-                    ),
-                    "matched": False,
-                    "recalled_prompt": "",
-                    "recalled_prompt_preview": "",
-                    "missing_variables": [],
-                    "resolved_variables": [],
-                    "used_record_ids": [],
-                    "used_group_ids": [],
-                    "filter_trace": [],
-                },
-            }, store
-        context = {
-            "field": self.field,
-            "unit": project_unit_for_template(unit),
-            "runtime": {"now": utc_now_iso()},
-        }
-        rendered_prompt, metadata, store = render_prompt_template_with_recall(
+    def _render_prompt(self, packet: Packet, unit: MemoryUnit, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
+        plan = ensure_prompt_plan(
             self.prompt,
-            context,
-            store=store,
-            retrieve_pipeline=self.retrieve_pipeline,
-            recall_query_template=self.recall_query_template,
+            metadata_mode="prompt",
+            context_builder=lambda packet, current_store: {
+                "field": self.field,
+                "unit": project_unit_for_template(unit),
+            },
         )
-        return rendered_prompt, metadata, store
+        return render_prompt_plan(plan, packet=packet, store=store)
 
     def _llm_text(self, *, user: str) -> str:
         runtime = self._runtime()
