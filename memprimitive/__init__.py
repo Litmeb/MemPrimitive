@@ -25,6 +25,7 @@ from .dispatch import (
     DispatchWriteTrigger,
 )
 from .utils.exceptions import IncompatibleCompositionError
+from .utils._llm_function_tools import WriteToolCallContext, WriteToolResult, WriteToolSpec
 from .pipeline import MemoryPipeline, create_baseline_pipeline
 
 __all__ = [
@@ -50,5 +51,8 @@ __all__ = [
     "RetrievedSet",
     "StoreLayerSpec",
     "StoreTopology",
+    "WriteToolCallContext",
+    "WriteToolResult",
+    "WriteToolSpec",
     "create_baseline_pipeline",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import asyncio
 import json
 from typing import Any
 import pytest
@@ -123,6 +124,10 @@ def _seed_layer_with_metadata(store: MemoryStore, layer: str, units: list[dict[s
             metadata=dict(payload.get("metadata", {})),
         )
         store.append(MemoryRecord.from_unit(unit=unit, layer=layer, sequence_id=store.next_sequence_id()))
+
+
+def _invoke_runtime_tool(tool, arguments: dict[str, Any]) -> Any:
+    return asyncio.run(tool.on_invoke_tool(None, json.dumps(arguments, ensure_ascii=False)))
 
 
 def test_unit_formation_returns_one_unit_with_provenance() -> None:
@@ -454,6 +459,275 @@ def test_llm_representation_prompt_template_empty_recalled_prompt_falls_back_to_
     assert prompt_trace["recall_prompt"]["enabled"] is True
     assert prompt_trace["recall_prompt"]["matched"] is False
     assert prompt_trace["recalled_prompt"] == ""
+
+
+def test_memory_store_delete_record_removes_expected_record() -> None:
+    store = MemoryStore()
+    _seed_layer(store, "default", ["first", "second"])
+
+    removed = store.delete_record("default", "rec-1")
+
+    assert removed.record_id == "rec-1"
+    assert [record.record_id for record in store.iter_records("default")] == ["rec-2"]
+
+
+def test_memory_store_delete_record_rejects_unknown_record() -> None:
+    store = MemoryStore()
+    _seed_layer(store, "default", ["first"])
+
+    with pytest.raises(KeyError, match="not found"):
+        store.delete_record("default", "rec-missing")
+
+
+def test_llm_function_call_organization_adds_record_and_renders_prompt_template() -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
+        MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="default"), StoreLayerSpec(name="profile")])),
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(
+        prompt="Store {{ unit.text }} in {{ default_target_layer }}",
+        tools=["ADD"],
+        target_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Store Alice likes tea. in profile"
+        _invoke_runtime_tool(tools[0], {"text": "Alice profile note"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    profile_records = store.iter_records("profile")
+    assert len(profile_records) == 1
+    assert profile_records[0].text == "Alice profile note"
+    assert profile_records[0].metadata["llm_tool"]["action"] == "ADD"
+    assert packet_out.placements[0].target_layer == "profile"
+    assert packet_out.trace["organization"]["written_record_ids"] == [profile_records[0].record_id]
+    assert packet_out.trace["organization"]["per_unit"][0]["rendered_prompt"] == "Store Alice likes tea. in profile"
+
+
+def test_llm_function_call_organization_updates_existing_record() -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+
+    store = MemoryStore()
+    _seed_layer(store, "default", ["old text"])
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="trigger update", source="notes")),
+        store,
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(
+        prompt="Update memory for {{ unit.text }}",
+        tools=["UPDATE"],
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert "trigger update" in rendered_prompt
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "text": "new text"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    assert store.iter_records("default")[0].text == "new text"
+    assert packet_out.trace["organization"]["updated_record_ids"] == ["rec-1"]
+    assert packet_out.trace["organization"]["effects"][0]["action"] == "update"
+
+
+def test_llm_function_call_organization_deletes_existing_record() -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+
+    store = MemoryStore()
+    _seed_layer(store, "default", ["delete me"])
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="trigger delete", source="notes")),
+        store,
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(
+        prompt="Delete stale memory for {{ unit.text }}",
+        tools=["DELETE"],
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "reason": "stale"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    assert store.iter_records("default") == []
+    assert packet_out.trace["organization"]["deleted_record_ids"] == ["rec-1"]
+    assert packet_out.trace["organization"]["tool_calls"][0]["status"] == "applied"
+
+
+def test_llm_function_call_organization_rejects_unknown_tool_name() -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization
+
+    with pytest.raises(ValueError, match="Unknown built-in write tool"):
+        LLMFunctionCallOrganization(prompt="x", tools=["ADD", "UNKNOWN"])
+
+
+def test_llm_function_call_evolution_updates_selected_records_from_decisions_store() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["old profile"])
+    module = LLMFunctionCallEvolution(
+        prompt="Rewrite {{ selected_records.0.text }}",
+        tools=["UPDATE"],
+        source_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Rewrite old profile"
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "text": "new profile"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(
+        Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}),
+        store,
+    )
+
+    assert store.iter_records("profile")[0].text == "new profile"
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions_store"
+    assert packet_out.trace["memory_evolution"]["selected_record_ids"] == ["rec-1"]
+    assert packet_out.trace["memory_evolution"]["updated_record_ids"] == ["rec-1"]
+
+
+def test_llm_function_call_evolution_deletes_records_from_source_layer_scan() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["delete profile"])
+    module = LLMFunctionCallEvolution(
+        prompt="Delete {{ selected_records.0.text }}",
+        tools=["DELETE"],
+        source_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "reason": "cleanup"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(), store)
+
+    assert store.iter_records("profile") == []
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "source_layer_scan"
+    assert packet_out.trace["memory_evolution"]["deleted_record_ids"] == ["rec-1"]
+
+
+def test_llm_function_call_evolution_rejects_missing_tool_calls_when_required() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["old profile"])
+    module = LLMFunctionCallEvolution(
+        prompt="Maybe do nothing",
+        tools=["UPDATE"],
+        source_layer="profile",
+        allow_no_tool_call=False,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        return "NO_ACTION"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="at least one successful or attempted tool call"):
+        module.run(Packet(), store)
+
+
+def test_llm_function_call_custom_tool_executes_and_appears_in_trace() -> None:
+    from memprimitive import WriteToolCallContext, WriteToolResult, WriteToolSpec
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+
+    def _custom_executor(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
+        record = MemoryRecord(
+            record_id=f"rec-{context.store.next_sequence_id()}",
+            unit_id="custom-unit",
+            layer="profile",
+            text=str(arguments["message"]),
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"custom": True},
+        )
+        context.store.append(record)
+        return WriteToolResult(
+            effects=[{"action": "add", "record_id": record.record_id, "layer": "profile", "status": "applied"}],
+            store=context.store,
+        )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="custom tool", source="notes")),
+        MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="default"), StoreLayerSpec(name="profile")])),
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(
+        prompt="Use custom tool for {{ unit.text }}",
+        tools=[
+            WriteToolSpec(
+                name="CUSTOM_ADD",
+                description="Write one custom profile record.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                },
+                executor=_custom_executor,
+            )
+        ],
+        target_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"message": "custom record"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    assert store.iter_records("profile")[0].text == "custom record"
+    assert packet_out.trace["organization"]["tool_calls"][0]["tool_name"] == "CUSTOM_ADD"
+    assert packet_out.trace["organization"]["effects"][0]["action"] == "add"
+
+
+def test_llm_function_call_custom_tool_strict_schema_validation_raises() -> None:
+    from memprimitive import WriteToolResult, WriteToolSpec
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    module = LLMFunctionCallEvolution(
+        prompt="Use custom tool",
+        tools=[
+            WriteToolSpec(
+                name="CUSTOM",
+                description="Needs a message string.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                },
+                executor=lambda context, arguments: WriteToolResult(effects=[], store=context.store),
+            )
+        ],
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"message": 123})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="must have JSON type string"):
+        module.run(Packet(), MemoryStore())
 
 
 def test_write_trigger_aligns_decisions_with_units() -> None:
