@@ -31,6 +31,13 @@ from ..utils._amem_family import (
     repair_note_payload,
     representation_from_note_payload,
 )
+from ..utils._template import (
+    looks_like_template,
+    metadata_from_resolution_state,
+    project_unit_for_template,
+    render_prompt_template,
+    utc_now_iso,
+)
 from ..utils._trace import copy_trace
 
 _VALID_ELEMENTS: Final[tuple[str, ...]] = (
@@ -584,6 +591,7 @@ class LLMRepresentation(RepresentationModule):
         trace["representation"] = {
             "module": self.spec.name,
             "field": self.field,
+            "prompt_is_template": looks_like_template(self.prompt),
             "unit_ids": [unit.unit_id for unit in represented_units],
             "per_unit": per_unit_trace,
         }
@@ -592,7 +600,7 @@ class LLMRepresentation(RepresentationModule):
     def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
         normalized_text = unit.text.strip()
         normalized_casefold = normalized_text.casefold()
-        payload = self._extract_field(unit, normalized_text)
+        payload, prompt_trace = self._extract_field(unit, normalized_text)
         elements = set(unit.representation_elements)
         elements.add(self.field)
         representation_meta: dict[str, Any] = dict(unit.metadata.get("representation", {}))
@@ -630,7 +638,12 @@ class LLMRepresentation(RepresentationModule):
             trace_value = list(payload)
         elif isinstance(payload, dict):
             trace_value = dict(payload)
-        return updated, {"field": self.field, "kind": self._value_kind(), "value": trace_value}
+        return updated, {
+            "field": self.field,
+            "kind": self._value_kind(),
+            "value": trace_value,
+            **prompt_trace,
+        }
 
     def _value_kind(self) -> str:
         if self.field in self._LIST_FIELDS:
@@ -649,11 +662,12 @@ class LLMRepresentation(RepresentationModule):
             embedding_model=self.embedding_model,
         )
 
-    def _extract_field(self, unit: MemoryUnit, text: str) -> Any:
+    def _extract_field(self, unit: MemoryUnit, text: str) -> tuple[Any, dict[str, Any]]:
+        rendered_prompt, prompt_trace = self._render_prompt(unit)
         user = json.dumps(
             {
                 "field": self.field,
-                "prompt": self.prompt,
+                "prompt": rendered_prompt,
                 "unit": {
                     "text": text,
                     "unit_type": unit.unit_type,
@@ -667,10 +681,34 @@ class LLMRepresentation(RepresentationModule):
             ensure_ascii=False,
         )
         if self.field in self._LIST_FIELDS:
-            return _normalize_string_list(self._llm_json(user=user))
+            return _normalize_string_list(self._llm_json(user=user)), prompt_trace
         if self.field in self._DICT_FIELDS:
-            return _normalize_string_dict(self._llm_json(user=user))
-        return self._llm_text(user=user)
+            return _normalize_string_dict(self._llm_json(user=user)), prompt_trace
+        return self._llm_text(user=user), prompt_trace
+
+    def _render_prompt(self, unit: MemoryUnit) -> tuple[str, dict[str, Any]]:
+        if not looks_like_template(self.prompt):
+            return self.prompt, {
+                "prompt_is_template": False,
+                "rendered_prompt": self.prompt,
+                "rendered_prompt_preview": self.prompt[:200],
+                "missing_variables": [],
+            }
+        context = {
+            "field": self.field,
+            "unit": project_unit_for_template(unit),
+            "runtime": {"now": utc_now_iso()},
+        }
+        rendered_prompt, state = render_prompt_template(self.prompt, context)
+        metadata = metadata_from_resolution_state(state=state)
+        metadata.update(
+            {
+                "prompt_is_template": True,
+                "rendered_prompt": rendered_prompt,
+                "rendered_prompt_preview": rendered_prompt[:200],
+            }
+        )
+        return rendered_prompt, metadata
 
     def _llm_text(self, *, user: str) -> str:
         runtime = self._runtime()
