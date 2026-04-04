@@ -219,6 +219,70 @@ class GraphReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
+class GraphRelationReadout(ReadoutModule):
+    """Render linked graph records as relation sentences derived from triples.
+
+    The module only emits relation sentences for retrieved graph records whose
+    normalized graph metadata has non-empty ``links``. Relation text comes only
+    from the same record's ``triples`` payload and is globally de-duplicated in
+    retrieval order. If no relation sentence can be rendered, the module falls
+    back to joining the original retrieved record texts.
+    """
+
+    spec = ModuleSpec(
+        name="graph_relation_readout",
+        slot="readout",
+        input_requirements=("retrieved.items",),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.retrieved is None:
+            raise ValueError("GraphRelationReadout requires packet.retrieved.")
+
+        source_ids = [record.record_id for record in packet.retrieved.items]
+        relation_sentences: list[str] = []
+        seen_sentences: set[str] = set()
+        linked_item_count = 0
+
+        for record in packet.retrieved.items:
+            graph = graph_metadata_from_record(record)
+            if not graph["links"]:
+                continue
+            linked_item_count += 1
+            for subject, relation, obj in graph["triples"]:
+                sentence = f"{subject} {relation} {obj}".strip()
+                if not sentence or sentence in seen_sentences:
+                    continue
+                seen_sentences.add(sentence)
+                relation_sentences.append(sentence)
+
+        fallback_used = not relation_sentences
+        text = "\n".join(relation_sentences) if relation_sentences else "\n".join(
+            record.text for record in packet.retrieved.items
+        )
+        readout = Readout(
+            text=text,
+            source_ids=source_ids,
+            metadata={
+                "item_count": len(source_ids),
+                "relation_sentence_count": len(relation_sentences),
+                "linked_item_count": linked_item_count,
+                "format": "graph_relation",
+                "fallback_used": fallback_used,
+            },
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "source_ids": source_ids,
+            "relation_sentence_count": len(relation_sentences),
+            "linked_item_count": linked_item_count,
+            "fallback_used": fallback_used,
+        }
+        return replace(packet, readout=readout, trace=trace), store
+
+
 class PromptContextReadout(ReadoutModule):
     """Render retrieved records into next-step prompt context with switchable strategy.
 
@@ -445,6 +509,7 @@ BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     GroupedByLayerReadout,
     JSONReadout,
     GraphReadout,
+    GraphRelationReadout,
     PromptContextReadout,
     NoteRenderReadout,
     TemplateReadout,
