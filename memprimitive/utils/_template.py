@@ -35,10 +35,13 @@ class PromptPlan:
     template: str | dict[str, Any] | list[Any]
     context_builder: ContextBuilder | None = None
     recall_plan: PromptPlan | None = None
+    labeled_recall_plans: dict[str, PromptPlan] | None = None
     recall_query_builder: RecallQueryBuilder | None = None
+    labeled_recall_query_builders: dict[str, RecallQueryBuilder] | None = None
     missing_value: str = ""
     metadata_mode: MetadataMode = "prompt"
     sub_recall_pipeline: Any | None = None
+    labeled_sub_recall_pipelines: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -69,20 +72,26 @@ def text_prompt(
     *,
     context_builder: ContextBuilder | None = None,
     recall_plan: PromptPlan | None = None,
+    labeled_recall_plans: dict[str, PromptPlan] | None = None,
     recall_query_builder: RecallQueryBuilder | None = None,
+    labeled_recall_query_builders: dict[str, RecallQueryBuilder] | None = None,
     missing_value: str = "",
     metadata_mode: MetadataMode = "prompt",
     sub_recall_pipeline: Any | None = None,
+    labeled_sub_recall_pipelines: dict[str, Any] | None = None,
 ) -> PromptPlan:
     return PromptPlan(
         mode="simple",
         template=str(template),
         context_builder=context_builder,
         recall_plan=recall_plan,
+        labeled_recall_plans=labeled_recall_plans,
         recall_query_builder=recall_query_builder,
+        labeled_recall_query_builders=labeled_recall_query_builders,
         missing_value=missing_value,
         metadata_mode=metadata_mode,
         sub_recall_pipeline=sub_recall_pipeline,
+        labeled_sub_recall_pipelines=labeled_sub_recall_pipelines,
     )
 
 
@@ -91,20 +100,26 @@ def structured_prompt(
     *,
     context_builder: ContextBuilder | None = None,
     recall_plan: PromptPlan | None = None,
+    labeled_recall_plans: dict[str, PromptPlan] | None = None,
     recall_query_builder: RecallQueryBuilder | None = None,
+    labeled_recall_query_builders: dict[str, RecallQueryBuilder] | None = None,
     missing_value: str = "",
     metadata_mode: MetadataMode = "readout",
     sub_recall_pipeline: Any | None = None,
+    labeled_sub_recall_pipelines: dict[str, Any] | None = None,
 ) -> PromptPlan:
     return PromptPlan(
         mode="structured",
         template=template,
         context_builder=context_builder,
         recall_plan=recall_plan,
+        labeled_recall_plans=labeled_recall_plans,
         recall_query_builder=recall_query_builder,
+        labeled_recall_query_builders=labeled_recall_query_builders,
         missing_value=missing_value,
         metadata_mode=metadata_mode,
         sub_recall_pipeline=sub_recall_pipeline,
+        labeled_sub_recall_pipelines=labeled_sub_recall_pipelines,
     )
 
 
@@ -248,17 +263,30 @@ def render_prompt_plan(
     if prompt_plan.context_builder is not None:
         context.update(prompt_plan.context_builder(packet, store))
 
-    recalled_prompt, recall_metadata, updated_store = resolve_recalled_prompt(
+    recalled_prompt, recall_metadata, labeled_recalled_prompts, labeled_recall_metadata, updated_store = resolve_recalled_prompts(
         prompt_plan,
         packet=packet,
         store=store,
         context=context,
     )
     context["recalled_prompt"] = recalled_prompt
+    context.update(labeled_recalled_prompts)
 
     if prompt_plan.metadata_mode == "readout":
-        return _render_readout_plan(prompt_plan, context=context, recall_metadata=recall_metadata, store=updated_store)
-    return _render_prompt_mode_plan(prompt_plan, context=context, recall_metadata=recall_metadata, store=updated_store)
+        return _render_readout_plan(
+            prompt_plan,
+            context=context,
+            recall_metadata=recall_metadata,
+            labeled_recall_metadata=labeled_recall_metadata,
+            store=updated_store,
+        )
+    return _render_prompt_mode_plan(
+        prompt_plan,
+        context=context,
+        recall_metadata=recall_metadata,
+        labeled_recall_metadata=labeled_recall_metadata,
+        store=updated_store,
+    )
 
 
 def _render_prompt_mode_plan(
@@ -266,6 +294,7 @@ def _render_prompt_mode_plan(
     *,
     context: dict[str, Any],
     recall_metadata: dict[str, Any],
+    labeled_recall_metadata: dict[str, dict[str, Any]],
     store: MemoryStore,
 ) -> tuple[str, dict[str, Any], MemoryStore]:
     if plan.mode == "structured":
@@ -286,6 +315,13 @@ def _render_prompt_mode_plan(
             "recalled_prompt": context.get("recalled_prompt", ""),
             "recalled_prompt_preview": str(context.get("recalled_prompt", ""))[:200],
             "recall_prompt": recall_metadata,
+            "labeled_recalled_prompts": {
+                label: value for label, value in context.items() if label in labeled_recall_metadata
+            },
+            "labeled_recalled_prompt_previews": {
+                label: str(context.get(label, ""))[:200] for label in labeled_recall_metadata
+            },
+            "labeled_recall_prompts": dict(labeled_recall_metadata),
             "context_summary": sorted(context.keys()),
         }
     )
@@ -297,6 +333,7 @@ def _render_readout_plan(
     *,
     context: dict[str, Any],
     recall_metadata: dict[str, Any],
+    labeled_recall_metadata: dict[str, dict[str, Any]],
     store: MemoryStore,
 ) -> tuple[str, dict[str, Any], MemoryStore]:
     from ._template_readout import ReadoutResolutionState, metadata_from_state, render_structured_template
@@ -321,18 +358,19 @@ def _render_readout_plan(
             "recalled_prompt": context.get("recalled_prompt", ""),
             "recalled_prompt_preview": str(context.get("recalled_prompt", ""))[:200],
             "recall_prompt": recall_metadata,
+            "labeled_recalled_prompts": {
+                label: value for label, value in context.items() if label in labeled_recall_metadata
+            },
+            "labeled_recalled_prompt_previews": {
+                label: str(context.get(label, ""))[:200] for label in labeled_recall_metadata
+            },
+            "labeled_recall_prompts": dict(labeled_recall_metadata),
         }
     )
     return rendered, metadata, store
 
 
-def resolve_recalled_prompt(
-    plan: PromptPlan,
-    *,
-    packet: Packet,
-    store: MemoryStore,
-    context: dict[str, Any],
-) -> tuple[str, dict[str, Any], MemoryStore]:
+def build_empty_recall_metadata(*, disabled_reason: str | None = None) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "enabled": False,
         "rendered_recall_query": "",
@@ -348,12 +386,71 @@ def resolve_recalled_prompt(
         "readout_source_ids": [],
         "readout_metadata": {},
     }
-    if plan.recall_plan is None or plan.recall_query_builder is None or plan.sub_recall_pipeline is None:
+    if disabled_reason is not None:
+        metadata["disabled_reason"] = disabled_reason
+    return metadata
+
+
+def resolve_recalled_prompts(
+    plan: PromptPlan,
+    *,
+    packet: Packet,
+    store: MemoryStore,
+    context: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, str], dict[str, dict[str, Any]], MemoryStore]:
+    recalled_prompt, recall_metadata, updated_store = resolve_single_recalled_prompt(
+        recall_plan=plan.recall_plan,
+        recall_query_builder=plan.recall_query_builder,
+        sub_recall_pipeline=plan.sub_recall_pipeline,
+        packet=packet,
+        store=store,
+        context=context,
+    )
+    labeled_recalled_prompts: dict[str, str] = {}
+    labeled_recall_metadata: dict[str, dict[str, Any]] = {}
+    labeled_plan_map = dict(plan.labeled_recall_plans or {})
+    labeled_pipeline_map = dict(plan.labeled_sub_recall_pipelines or {})
+    labeled_query_builder_map = dict(plan.labeled_recall_query_builders or {})
+
+    seen_labels: set[str] = set()
+    ordered_labels = list(labeled_plan_map.keys()) + [
+        label for label in labeled_pipeline_map.keys() if label not in labeled_plan_map
+    ]
+    for label in ordered_labels:
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        label_recalled_prompt, label_metadata, updated_store = resolve_single_recalled_prompt(
+            recall_plan=labeled_plan_map.get(label),
+            recall_query_builder=labeled_query_builder_map.get(label, plan.recall_query_builder),
+            sub_recall_pipeline=labeled_pipeline_map.get(label),
+            packet=packet,
+            store=updated_store,
+            context=context,
+        )
+        labeled_recalled_prompts[label] = label_recalled_prompt
+        labeled_recall_metadata[label] = label_metadata
+        context[label] = label_recalled_prompt
+
+    return recalled_prompt, recall_metadata, labeled_recalled_prompts, labeled_recall_metadata, updated_store
+
+
+def resolve_single_recalled_prompt(
+    *,
+    recall_plan: PromptPlan | None,
+    recall_query_builder: RecallQueryBuilder | None,
+    sub_recall_pipeline: Any | None,
+    packet: Packet,
+    store: MemoryStore,
+    context: dict[str, Any],
+) -> tuple[str, dict[str, Any], MemoryStore]:
+    metadata = build_empty_recall_metadata()
+    if recall_plan is None or recall_query_builder is None or sub_recall_pipeline is None:
         metadata["disabled_reason"] = "missing_recall_plan_or_query_builder_or_pipeline"
         return "", metadata, store
 
     metadata["enabled"] = True
-    recall_query = render_recall_query(plan.recall_query_builder, packet, store, context)
+    recall_query = render_recall_query(recall_query_builder, packet, store, context)
     metadata["rendered_recall_query"] = recall_query
     metadata["rendered_recall_query_preview"] = recall_query[:200]
     if not recall_query.strip():
@@ -361,10 +458,10 @@ def resolve_recalled_prompt(
         return "", metadata, store
 
     readout, updated_store = run_prompt_plan_sub_recall(
-        plan.recall_plan,
+        recall_plan,
         store=store,
         query_text=recall_query,
-        retrieve_pipeline=plan.sub_recall_pipeline,
+        retrieve_pipeline=sub_recall_pipeline,
     )
     recalled_prompt = readout.text.strip() if readout.text else ""
     metadata["matched"] = bool(recalled_prompt)

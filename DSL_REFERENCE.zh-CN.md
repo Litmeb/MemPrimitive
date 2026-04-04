@@ -465,13 +465,16 @@ prompt = structured_prompt(
 
 ### 模板子召回（sub recall）
 
-`PromptPlan` 还支持在渲染主 prompt 前，先执行一次子 recall，再把结果注入 `{{ recalled_prompt }}`。
+`PromptPlan` 还支持在渲染主 prompt 前，先执行一次或多次子 recall，再把结果注入模板变量。
 
 核心参数：
 
 - `recall_plan`
 - `recall_query_builder`
 - `sub_recall_pipeline`
+- `labeled_recall_plans`
+- `labeled_sub_recall_pipelines`
+- `labeled_recall_query_builders`
 
 示意：
 
@@ -491,6 +494,32 @@ prompt = text_prompt(
 - 子 recall 始终对当前 live store 执行。
 - 没有 recall 结果时，`{{ recalled_prompt }}` 会退化为空字符串。
 - 相关渲染信息会记录进 prompt trace。
+
+多 label 版本示意：
+
+```python
+from memprimitive.utils._template import text_prompt
+
+prompt = text_prompt(
+    "Profile:\n{{ profile }}\n\nHistory:\n{{ history }}\n\nNow process:\n{{ unit.text }}",
+    recall_query_builder=lambda packet, store, context: context["unit"]["text"],
+    labeled_recall_plans={
+        "profile": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+        "history": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+    },
+    labeled_sub_recall_pipelines={
+        "profile": profile_recall_pipeline,
+        "history": history_recall_pipeline,
+    },
+)
+```
+
+补充说明：
+
+- 旧的单路 `{{ recalled_prompt }}`、`recall_plan`、`sub_recall_pipeline` 仍然完全兼容。
+- 多 label 模板变量直接使用 label 名本身，例如 `{{ profile }}`、`{{ history }}`。
+- 多 label 默认复用全局 `recall_query_builder`；若需要单独覆盖，可传 `labeled_recall_query_builders={"history": ...}`。
+- 每个 label 的 recall 结果与 trace 会分别记录在 metadata / prompt trace 的 `labeled_recalled_prompts` 和 `labeled_recall_prompts` 中。
 
 ## 推荐示例文件
 
