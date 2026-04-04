@@ -646,6 +646,15 @@ class MemoryStore:
                 return
         raise KeyError(f"Record {rid!r} not found in layer {layer_name!r}.")
 
+    def delete_record(self, layer: str, record_id: str) -> MemoryRecord:
+        layer_name = _require_non_empty_text(layer, "layer")
+        rid = _require_non_empty_text(record_id, "record_id")
+        records = self.layers[layer_name]
+        for idx, record in enumerate(records):
+            if record.record_id == rid:
+                return records.pop(idx)
+        raise KeyError(f"Record {rid!r} not found in layer {layer_name!r}.")
+
     def upsert_record(self, record: MemoryRecord, *, key_name: str) -> tuple[str, str]:
         key = _require_non_empty_text(key_name, "key_name")
         record_key = str(record.metadata.get(key, "")).strip()

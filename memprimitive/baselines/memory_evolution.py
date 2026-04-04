@@ -38,7 +38,21 @@ from ..utils._hierarchical_family import (
     resolve_source_records,
     validate_hierarchical_config,
 )
-from ..utils._template import PromptPlan, ensure_prompt_plan
+from ..utils._llm_function_tools import (
+    ToolExecutionState,
+    WriteToolCallContext,
+    WriteToolSpec,
+    build_runtime_tools,
+    normalize_write_tool_specs,
+    project_tool_specs_for_prompt,
+)
+from ..utils._runtime import Runtime
+from ..utils._template import (
+    PromptPlan,
+    ensure_prompt_plan,
+    project_record_for_template,
+    render_prompt_plan,
+)
 from ..utils._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
     DEFAULT_REFLECTION_LAYER,
@@ -1252,6 +1266,159 @@ class HierarchicalEvolution(MemoryEvolutionModule):
         return replace(packet, trace=trace), store
 
 
+class LLMFunctionCallEvolution(MemoryEvolutionModule):
+    """Use LLM tool calls to mutate existing store records during evolution."""
+
+    spec = ModuleSpec(
+        name="llm_function_call_evolution",
+        slot="memory_evolution",
+        output_guarantees=("trace.memory_evolution.effects",),
+        side_effects=("modify_store", "append_records", "rewrite_records", "delete_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        prompt: PromptPlan | str,
+        tools: list[str | WriteToolSpec],
+        source_layer: str | None = None,
+        target_layer: str | None = None,
+        max_turns: int = 6,
+        strict_tools: bool = True,
+        allow_no_tool_call: bool = True,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        embedding_model: str | None = None,
+    ) -> None:
+        self.prompt = ensure_prompt_plan(prompt, metadata_mode="prompt")
+        self.tool_specs = normalize_write_tool_specs(tools, module_name=self.spec.name)
+        self.source_layer = None if source_layer is None else str(source_layer).strip() or None
+        self.target_layer = None if target_layer is None else str(target_layer).strip() or None
+        self.max_turns = int(max_turns)
+        if self.max_turns <= 0:
+            raise ValueError("max_turns must be positive.")
+        self.strict_tools = bool(strict_tools)
+        self.allow_no_tool_call = bool(allow_no_tool_call)
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+        self.embedding_model = embedding_model
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        selected_records, decision_source = self._select_records(packet, store)
+        context = WriteToolCallContext(
+            packet=packet,
+            store=store,
+            module_slot="memory_evolution",
+            default_target_layer=self.target_layer,
+            visible_records=list(selected_records),
+        )
+        state = ToolExecutionState()
+        runtime_tools = build_runtime_tools(
+            self.tool_specs,
+            context=context,
+            state=state,
+            strict_tools=self.strict_tools,
+        )
+        rendered_prompt, prompt_trace, store = render_prompt_plan(
+            ensure_prompt_plan(
+                self.prompt,
+                metadata_mode="prompt",
+                context_builder=lambda current_packet, current_store: {
+                    "selected_records": [project_record_for_template(record) for record in selected_records],
+                    "source_layer": self.source_layer or "",
+                    "tools": project_tool_specs_for_prompt(self.tool_specs),
+                    "default_target_layer": self.target_layer,
+                },
+            ),
+            packet=packet,
+            store=store,
+        )
+        context.store = store
+        context.visible_records = list(selected_records)
+        self._run_agent(
+            rendered_prompt=rendered_prompt,
+            tools=runtime_tools,
+            context={
+                "slot": self.spec.slot,
+                "selected_record_ids": [record.record_id for record in selected_records],
+            },
+        )
+        if not state.tool_calls and not self.allow_no_tool_call:
+            raise ValueError("LLMFunctionCallEvolution requires at least one successful or attempted tool call.")
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "tool_names": [spec.name for spec in self.tool_specs],
+            "prompt_is_template": self.prompt.mode == "structured"
+            or (isinstance(self.prompt.template, str) and "{{" in self.prompt.template and "}}" in self.prompt.template),
+            "decision_source": decision_source,
+            "source_layer": self.source_layer,
+            "selected_record_ids": [record.record_id for record in selected_records],
+            "written_record_ids": list(state.written_record_ids),
+            "updated_record_ids": list(state.updated_record_ids),
+            "deleted_record_ids": list(state.deleted_record_ids),
+            "effects": list(state.effects),
+            "tool_calls": list(state.tool_calls),
+            "prompt_trace": prompt_trace,
+        }
+        return replace(packet, trace=trace), context.store
+
+    def _select_records(self, packet: Packet, store: MemoryStore) -> tuple[list[MemoryRecord], str]:
+        if packet.decisions_store is not None:
+            if self.source_layer is not None:
+                return resolve_source_records(packet, store, source_layer=self.source_layer)
+            selected: list[MemoryRecord] = []
+            seen: set[str] = set()
+            for layer_name, entry in packet.decisions_store.items():
+                if not isinstance(entry, dict):
+                    continue
+                record_ids = [str(value).strip() for value in entry.get("record_ids", []) if str(value).strip()]
+                if not record_ids:
+                    continue
+                by_id = {record.record_id: record for record in store.iter_records(layer_name)}
+                for record_id in record_ids:
+                    if record_id in by_id and record_id not in seen:
+                        selected.append(by_id[record_id])
+                        seen.add(record_id)
+            return selected, "decisions_store"
+        if self.source_layer is not None:
+            return store.iter_records(self.source_layer), "source_layer_scan"
+        return store.iter_records(), "store_scan"
+
+    def _run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        runtime = Runtime(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            embedding_model=self.embedding_model,
+        )
+        runtime.require_llm(capability="LLMFunctionCallEvolution")
+        return str(
+            runtime.run_agent(
+                name="MemPrimitiveLLMFunctionCallEvolutionAgent",
+                instructions=(
+                    "You manage memory evolution by calling the provided tools only. "
+                    "Use zero or more tool calls to apply ADD, UPDATE, or DELETE actions. "
+                    "If no change is needed, respond with NO_ACTION."
+                ),
+                input_text=json.dumps(
+                    {
+                        "prompt": rendered_prompt,
+                        "context": context,
+                    },
+                    ensure_ascii=False,
+                ),
+                temperature=0.0,
+                tools=tools,
+                max_turns=self.max_turns,
+            )
+            or ""
+        )
+
+
 BASELINE_SLOT: Final[str] = "memory_evolution"
 BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     AppendOnlyEvolution,
@@ -1265,4 +1432,5 @@ BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     NeighborContextUpdateEvolution,
     ReflectionGenerationEvolution,
     HierarchicalEvolution,
+    LLMFunctionCallEvolution,
 )

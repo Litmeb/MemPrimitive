@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from typing import Any, Final
 
 from ..contracts import (
@@ -26,7 +27,22 @@ from ..utils._hierarchical_family import (
     resolve_source_records,
     validate_hierarchical_config,
 )
-from ..utils._template import PromptPlan, ensure_prompt_plan
+from ..utils._llm_function_tools import (
+    ToolExecutionState,
+    WriteToolCallContext,
+    WriteToolSpec,
+    build_runtime_tools,
+    normalize_write_tool_specs,
+    project_tool_specs_for_prompt,
+)
+from ..utils._runtime import Runtime
+from ..utils._template import (
+    PromptPlan,
+    ensure_prompt_plan,
+    project_record_for_template,
+    project_unit_for_template,
+    render_prompt_plan,
+)
 from ..utils._reflexion_family import DEFAULT_TRIAL_LAYER
 from ..utils._trace import copy_trace
 
@@ -538,6 +554,200 @@ class HierarchicalOrganization(OrganizationModule):
         return replace(packet, placements=placements, trace=trace), store
 
 
+class LLMFunctionCallOrganization(OrganizationModule):
+    """Use LLM tool calls to write/update/delete records during organization."""
+
+    spec = ModuleSpec(
+        name="llm_function_call_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        side_effects=("modify_store", "append_records", "rewrite_records", "delete_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        prompt: PromptPlan | str,
+        tools: list[str | WriteToolSpec],
+        target_layer: str | None = None,
+        max_turns: int = 6,
+        strict_tools: bool = True,
+        allow_no_tool_call: bool = True,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        embedding_model: str | None = None,
+    ) -> None:
+        normalized_prompt = ensure_prompt_plan(prompt, metadata_mode="prompt")
+        self.prompt = normalized_prompt
+        self.tool_specs = normalize_write_tool_specs(tools, module_name=self.spec.name)
+        self.target_layer = None if target_layer is None else str(target_layer).strip() or None
+        self.max_turns = int(max_turns)
+        if self.max_turns <= 0:
+            raise ValueError("max_turns must be positive.")
+        self.strict_tools = bool(strict_tools)
+        self.allow_no_tool_call = bool(allow_no_tool_call)
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+        self.embedding_model = embedding_model
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("LLMFunctionCallOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("LLMFunctionCallOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("LLMFunctionCallOrganization requires decisions aligned with units.")
+
+        placement_layer = self.target_layer or store.topology.layer_names[0]
+        placements = [Placement(unit_id=unit.unit_id, target_layer=placement_layer) for unit in packet.units]
+        per_unit_trace: list[dict[str, Any]] = []
+        aggregate_state = ToolExecutionState()
+
+        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            unit_packet = replace(packet, units=[unit], decisions=[decision], placements=[placement])
+            if not decision:
+                per_unit_trace.append(
+                    {
+                        "unit_id": unit.unit_id,
+                        "decision": False,
+                        "skipped": True,
+                        "tool_calls": [],
+                        "effects": [],
+                    }
+                )
+                continue
+            prompt_text, prompt_trace, call_state, store = self._run_for_unit(unit_packet, store, placement)
+            aggregate_state.tool_calls.extend(call_state.tool_calls)
+            aggregate_state.effects.extend(call_state.effects)
+            for record_id in call_state.written_record_ids:
+                if record_id not in aggregate_state.written_record_ids:
+                    aggregate_state.written_record_ids.append(record_id)
+            for record_id in call_state.updated_record_ids:
+                if record_id not in aggregate_state.updated_record_ids:
+                    aggregate_state.updated_record_ids.append(record_id)
+            for record_id in call_state.deleted_record_ids:
+                if record_id not in aggregate_state.deleted_record_ids:
+                    aggregate_state.deleted_record_ids.append(record_id)
+            placement.target_layer = self._target_layer_for_unit_effects(call_state, fallback=placement.target_layer, store=store)
+            per_unit_trace.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "decision": True,
+                    "rendered_prompt": prompt_text,
+                    **prompt_trace,
+                    "tool_calls": list(call_state.tool_calls),
+                    "effects": list(call_state.effects),
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "tool_names": [spec.name for spec in self.tool_specs],
+            "prompt_is_template": self.prompt.mode == "structured"
+            or (isinstance(self.prompt.template, str) and "{{" in self.prompt.template and "}}" in self.prompt.template),
+            "per_unit": per_unit_trace,
+            "written_record_ids": list(aggregate_state.written_record_ids),
+            "updated_record_ids": list(aggregate_state.updated_record_ids),
+            "deleted_record_ids": list(aggregate_state.deleted_record_ids),
+            "effects": list(aggregate_state.effects),
+            "tool_calls": list(aggregate_state.tool_calls),
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+    def _run_for_unit(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        placement: Placement,
+    ) -> tuple[str, dict[str, Any], ToolExecutionState, MemoryStore]:
+        unit = packet.units[0]
+        context = WriteToolCallContext(
+            packet=packet,
+            store=store,
+            module_slot="organization",
+            default_target_layer=self.target_layer or placement.target_layer,
+            visible_records=list(store.iter_records()),
+        )
+        state = ToolExecutionState()
+        runtime_tools = build_runtime_tools(
+            self.tool_specs,
+            context=context,
+            state=state,
+            strict_tools=self.strict_tools,
+        )
+        rendered_prompt, prompt_trace, store = render_prompt_plan(
+            ensure_prompt_plan(
+                self.prompt,
+                metadata_mode="prompt",
+                context_builder=lambda current_packet, current_store: {
+                    "unit": project_unit_for_template(unit),
+                    "tools": project_tool_specs_for_prompt(self.tool_specs),
+                    "default_target_layer": self.target_layer or placement.target_layer,
+                    "visible_records": [
+                        project_record_for_template(record)
+                        for record in context.visible_records
+                    ],
+                },
+            ),
+            packet=packet,
+            store=store,
+        )
+        context.store = store
+        context.visible_records = list(store.iter_records())
+        self._run_agent(
+            rendered_prompt=rendered_prompt,
+            tools=runtime_tools,
+            context={"unit_id": unit.unit_id, "slot": self.spec.slot},
+        )
+        if not state.tool_calls and not self.allow_no_tool_call:
+            raise ValueError("LLMFunctionCallOrganization requires at least one successful or attempted tool call.")
+        return rendered_prompt, prompt_trace, state, context.store
+
+    def _run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        runtime = Runtime(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            embedding_model=self.embedding_model,
+        )
+        runtime.require_llm(capability="LLMFunctionCallOrganization")
+        return str(
+            runtime.run_agent(
+                name="MemPrimitiveLLMFunctionCallOrganizationAgent",
+                instructions=(
+                    "You manage memory writes by calling the provided tools only. "
+                    "Use zero or more tool calls to apply ADD, UPDATE, or DELETE actions. "
+                    "If no change is needed, respond with NO_ACTION."
+                ),
+                input_text=json.dumps(
+                    {
+                        "prompt": rendered_prompt,
+                        "context": context,
+                    },
+                    ensure_ascii=False,
+                ),
+                temperature=0.0,
+                tools=tools,
+                max_turns=self.max_turns,
+            )
+            or ""
+        )
+
+    @staticmethod
+    def _target_layer_for_unit_effects(state: ToolExecutionState, *, fallback: str, store: MemoryStore) -> str:
+        for effect in state.effects:
+            if str(effect.get("action", "")).casefold() != "add":
+                continue
+            layer = str(effect.get("layer", "")).strip()
+            if layer:
+                return layer
+        return fallback
+
+
 BASELINE_SLOT: Final[str] = "organization"
 BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
@@ -546,4 +756,5 @@ BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     PlacementWithoutAppendOrganization,
     GraphAppendLinkReadyOrganization,
     HierarchicalOrganization,
+    LLMFunctionCallOrganization,
 )
