@@ -89,16 +89,40 @@ def graph_metadata_from_record(record: MemoryRecord) -> dict[str, Any]:
     return normalize_graph_metadata(record.metadata.get("graph"), layer=record.layer)
 
 
+def graph_metadata_for_write(
+    *,
+    layer: str,
+    unit: MemoryUnit | None = None,
+    record: MemoryRecord | None = None,
+    raw_graph: Any = None,
+) -> dict[str, Any]:
+    """Build normalized graph metadata for tool-driven graph writes."""
+
+    if record is not None:
+        base = graph_metadata_from_record(record)
+    elif unit is not None:
+        base = graph_metadata_for_unit(unit, layer=layer)
+    else:
+        base = normalize_graph_metadata({}, layer=layer)
+    overlay = raw_graph if isinstance(raw_graph, dict) else {}
+    return normalize_graph_metadata({**base, **overlay}, layer=layer)
+
+
 def rewrite_graph_record(
     record: MemoryRecord,
     *,
     linked_record_ids: Iterable[str] | None = None,
+    replace_linked_record_ids: Iterable[str] | None = None,
     link_trace_entry: dict[str, Any] | None = None,
     extra_graph_fields: dict[str, Any] | None = None,
 ) -> MemoryRecord:
     """Return a new record with safely merged graph metadata updates."""
 
     graph = graph_metadata_from_record(record)
+    if replace_linked_record_ids is not None:
+        graph["links"] = _dedupe_strings(replace_linked_record_ids)
+        graph["link_count"] = len(graph["links"])
+        graph["last_linked_at"] = _utc_now_iso()
     if linked_record_ids is not None:
         graph["links"] = _dedupe_strings([*graph["links"], *linked_record_ids])
         graph["link_count"] = len(graph["links"])
@@ -120,3 +144,16 @@ def rewrite_graph_record(
             "graph": graph,
         },
     )
+
+
+def remove_graph_links_to_record(record: MemoryRecord, *, target_record_id: str) -> MemoryRecord | None:
+    """Remove one referenced record id from a graph record's links if present."""
+
+    normalized_target = str(target_record_id).strip()
+    if not normalized_target:
+        return None
+    graph = graph_metadata_from_record(record)
+    next_links = [record_id for record_id in graph["links"] if record_id != normalized_target]
+    if len(next_links) == len(graph["links"]):
+        return None
+    return rewrite_graph_record(record, replace_linked_record_ids=next_links)

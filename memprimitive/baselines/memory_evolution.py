@@ -45,6 +45,7 @@ from ..utils._llm_function_tools import (
     build_runtime_tools,
     normalize_write_tool_specs,
     project_tool_specs_for_prompt,
+    write_tool_specs_require_graph_contracts,
 )
 from ..utils._runtime import Runtime
 from ..utils._template import (
@@ -1293,6 +1294,12 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
     ) -> None:
         self.prompt = ensure_prompt_plan(prompt, metadata_mode="prompt")
         self.tool_specs = normalize_write_tool_specs(tools, module_name=self.spec.name)
+        if write_tool_specs_require_graph_contracts(self.tool_specs):
+            self.requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+            self.produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
+        else:
+            self.requires_contracts = frozenset()
+            self.produces_contracts = frozenset()
         self.source_layer = None if source_layer is None else str(source_layer).strip() or None
         self.target_layer = None if target_layer is None else str(target_layer).strip() or None
         self.max_turns = int(max_turns)
@@ -1401,7 +1408,7 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
                 name="MemPrimitiveLLMFunctionCallEvolutionAgent",
                 instructions=(
                     "You manage memory evolution by calling the provided tools only. "
-                    "Use zero or more tool calls to apply ADD, UPDATE, or DELETE actions. "
+                    "Use zero or more tool calls to apply the needed write actions. "
                     "If no change is needed, respond with NO_ACTION."
                 ),
                 input_text=json.dumps(
