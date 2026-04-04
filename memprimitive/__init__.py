@@ -26,7 +26,7 @@ from .dispatch import (
 )
 from .utils.exceptions import IncompatibleCompositionError
 from .utils._llm_function_tools import WriteToolCallContext, WriteToolResult, WriteToolSpec
-from .pipeline import MemoryPipeline, create_baseline_pipeline
+from .pipeline import FreeMemoryPipeline, MemoryPipeline, create_baseline_pipeline
 
 __all__ = [
     "DispatchEvolutionTrigger",
@@ -37,6 +37,7 @@ __all__ = [
     "DispatchRetrieval",
     "DispatchUnitFormation",
     "DispatchWriteTrigger",
+    "FreeMemoryPipeline",
     "IncompatibleCompositionError",
     "MemoryPipeline",
     "MemoryRecord",
