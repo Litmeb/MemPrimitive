@@ -5225,6 +5225,248 @@ def test_template_readout_structured_prompt_can_fill_recalled_prompt_via_lightwe
     assert packet_out.readout.metadata["recall_prompt"]["readout_source_ids"] == ["rec-profile-1"]
 
 
+def test_template_readout_text_prompt_can_fill_multiple_labeled_recalled_prompts() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import ConcatenateReadout, RecencyRetrieval, TemplateReadout
+    from memprimitive.utils._template import text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="profile", indices=("temporal",)),
+                StoreLayerSpec(name="history", indices=("temporal",)),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-profile-1",
+            unit_id="unit-profile-1",
+            layer="profile",
+            text="Alice profile memory",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"user_profile": "Concise, concrete, technical."}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-history-1",
+            unit_id="unit-history-1",
+            layer="history",
+            text="Alice prefers direct replies",
+            timestamp="2026-01-02T00:00:00+00:00",
+        )
+    )
+
+    profile_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=TemplateReadout(
+            prompt=text_prompt("{{ retrieved.items.0.representation.user_profile }}")
+        ),
+        store=MemoryStore(),
+    )
+    history_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="history"),
+        readout=ConcatenateReadout(),
+        store=MemoryStore(),
+    )
+
+    packet_out, _ = TemplateReadout(
+        prompt=text_prompt(
+            "Profile={{ profile }} | History={{ history }}",
+            recall_query_builder=lambda packet, current_store, context: f"memory for {context['query']['text']}",
+            labeled_recall_plans={
+                "profile": text_prompt("{{ retrieved.items.0.representation.user_profile }}", metadata_mode="readout"),
+                "history": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            },
+            labeled_sub_recall_pipelines={
+                "profile": profile_pipeline,
+                "history": history_pipeline,
+            },
+        )
+    ).run(Packet(query=Query(text="Alice"), retrieved=RetrievedSet()), store)
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Profile=Concise, concrete, technical. | History=Alice prefers direct replies"
+    assert packet_out.readout.metadata["recalled_prompt"] == ""
+    assert packet_out.readout.metadata["labeled_recalled_prompts"] == {
+        "profile": "Concise, concrete, technical.",
+        "history": "Alice prefers direct replies",
+    }
+    assert packet_out.readout.metadata["labeled_recall_prompts"]["profile"]["rendered_recall_query"] == "memory for Alice"
+    assert packet_out.readout.metadata["labeled_recall_prompts"]["history"]["rendered_recall_query"] == "memory for Alice"
+    assert packet_out.readout.metadata["labeled_recall_prompts"]["profile"]["readout_source_ids"] == ["rec-profile-1"]
+    assert packet_out.readout.metadata["labeled_recall_prompts"]["history"]["readout_source_ids"] == ["rec-history-1"]
+
+
+def test_template_readout_structured_prompt_can_fill_multiple_labeled_recalled_prompts_with_overrides() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import ConcatenateReadout, RecencyRetrieval, TemplateReadout
+    from memprimitive.utils._template import structured_prompt, text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="profile", indices=("temporal",)),
+                StoreLayerSpec(name="history", indices=("temporal",)),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-profile-1",
+            unit_id="unit-profile-1",
+            layer="profile",
+            text="Alice profile memory",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"user_profile": "Profile text"}},
+        )
+    )
+
+    profile_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=TemplateReadout(
+            prompt=text_prompt("{{ retrieved.items.0.representation.user_profile }}")
+        ),
+        store=MemoryStore(),
+    )
+    history_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="history"),
+        readout=ConcatenateReadout(),
+        store=MemoryStore(),
+    )
+
+    packet_out, _ = TemplateReadout(
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {"id": "profile", "title": "Profile", "template": "{{ profile }}"},
+                    {"id": "history", "title": "History", "template": "{{ history }}"},
+                ]
+            },
+            recall_query_builder=lambda packet, current_store, context: "shared query",
+            labeled_recall_plans={
+                "profile": text_prompt("{{ retrieved.items.0.representation.user_profile }}", metadata_mode="readout"),
+                "history": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            },
+            labeled_recall_query_builders={
+                "history": lambda packet, current_store, context: "",
+            },
+            labeled_sub_recall_pipelines={
+                "profile": profile_pipeline,
+                "history": history_pipeline,
+            },
+        )
+    ).run(Packet(query=Query(text="Alice"), retrieved=RetrievedSet()), store)
+
+    assert packet_out.readout is not None
+    assert "Profile\nProfile text" in packet_out.readout.text
+    assert "History" in packet_out.readout.text
+    assert packet_out.readout.metadata["labeled_recalled_prompts"] == {
+        "profile": "Profile text",
+        "history": "",
+    }
+    assert packet_out.readout.metadata["labeled_recall_prompts"]["profile"]["rendered_recall_query"] == "shared query"
+    assert packet_out.readout.metadata["labeled_recall_prompts"]["history"]["rendered_recall_query"] == ""
+    assert (
+        packet_out.readout.metadata["labeled_recall_prompts"]["history"]["disabled_reason"]
+        == "empty_rendered_recall_query"
+    )
+
+
+def test_template_readout_labeled_recalled_prompt_missing_config_degrades_without_error() -> None:
+    from memprimitive.baselines import TemplateReadout
+    from memprimitive.utils._template import text_prompt
+
+    packet_out, _ = TemplateReadout(
+        prompt=text_prompt(
+            "Profile={{ profile }} History={{ history }}",
+            recall_query_builder=lambda packet, current_store, context: "query",
+            labeled_recall_plans={
+                "profile": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            },
+            labeled_sub_recall_pipelines={
+                "history": object(),
+            },
+        )
+    ).run(Packet(query=Query(text="Alice"), retrieved=RetrievedSet()), MemoryStore())
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Profile= History="
+    assert packet_out.readout.metadata["labeled_recalled_prompts"] == {"profile": "", "history": ""}
+    assert (
+        packet_out.readout.metadata["labeled_recall_prompts"]["profile"]["disabled_reason"]
+        == "missing_recall_plan_or_query_builder_or_pipeline"
+    )
+    assert (
+        packet_out.readout.metadata["labeled_recall_prompts"]["history"]["disabled_reason"]
+        == "missing_recall_plan_or_query_builder_or_pipeline"
+    )
+
+
+def test_llm_representation_prompt_template_supports_multiple_labeled_recalled_prompts() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMRepresentation, PassThroughUnitFormation, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import text_prompt
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice is preparing a reply.", source="notes")),
+        MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile"), StoreLayerSpec(name="history")])),
+    )
+    _seed_layer(store, "profile", ["CURRENT STORE PROFILE"])
+    _seed_layer(store, "history", ["CURRENT STORE HISTORY"])
+
+    profile_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=ConcatenateReadout(),
+        store=MemoryStore(),
+    )
+    history_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="history"),
+        readout=ConcatenateReadout(),
+        store=MemoryStore(),
+    )
+
+    rep = LLMRepresentation(
+        field="summary",
+        prompt=text_prompt(
+            "Use {{ profile }} and {{ history }} while summarizing {{ unit.text }}",
+            recall_query_builder=lambda packet, current_store, context: f"shared for {context['unit']['text']}",
+            labeled_recall_plans={
+                "profile": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+                "history": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            },
+            labeled_sub_recall_pipelines={
+                "profile": profile_pipeline,
+                "history": history_pipeline,
+            },
+        ),
+    )
+
+    def _fake_llm_text(*, user: str) -> str:
+        payload = json.loads(user)
+        assert payload["prompt"] == (
+            "Use CURRENT STORE PROFILE and CURRENT STORE HISTORY while summarizing Alice is preparing a reply."
+        )
+        return "summary with labeled recalled prompts"
+
+    rep._llm_text = _fake_llm_text  # type: ignore[method-assign]
+    packet_out, _ = rep.run(unit_packet, store)
+
+    prompt_trace = packet_out.trace["representation"]["per_unit"][0]
+    assert prompt_trace["recalled_prompt"] == ""
+    assert prompt_trace["labeled_recalled_prompts"] == {
+        "profile": "CURRENT STORE PROFILE",
+        "history": "CURRENT STORE HISTORY",
+    }
+    assert prompt_trace["labeled_recall_prompts"]["profile"]["rendered_recall_query"] == (
+        "shared for Alice is preparing a reply."
+    )
+    assert prompt_trace["labeled_recall_prompts"]["history"]["rendered_recall_query"] == (
+        "shared for Alice is preparing a reply."
+    )
+
+
 def test_llm_representation_rejects_removed_recall_kwargs() -> None:
     from memprimitive.baselines import LLMRepresentation
 

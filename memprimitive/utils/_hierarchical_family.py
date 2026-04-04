@@ -278,6 +278,9 @@ def build_generation_system_prompt(
             "used_group_ids": [],
             "filter_trace": [],
         },
+        "labeled_recalled_prompts": {},
+        "labeled_recalled_prompt_previews": {},
+        "labeled_recall_prompts": {},
     }
 
 
