@@ -3801,3 +3801,211 @@ def test_json_readout_returns_json_string() -> None:
 
     payload = json.loads(packet_out.readout.text)
     assert payload["items"][0]["text"] == "Alice likes tea."
+
+
+def test_template_readout_simple_template_binds_context_filters_and_missing_variables() -> None:
+    from memprimitive.baselines import TemplateReadout
+
+    episodic = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="episodic",
+        text="Alice visited the tea house.",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={
+            "session_id": "sess-1",
+            "note": {
+                "content": "Alice visited the tea house.",
+                "context": "Trip note",
+                "tags": ["travel", "tea"],
+            },
+            "representation": {
+                "keywords": ["alice", "tea"],
+                "entities": ["Alice", "Tea House"],
+            },
+            "graph": {
+                "entities": ["Alice", "Tea House"],
+                "links": ["rec-0"],
+            },
+        },
+    )
+    summary = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="session_summary",
+        text="Alice had a productive tea-focused session.",
+        timestamp="2026-01-02T00:00:00+00:00",
+        metadata={
+            "unit_type": "summary",
+            "session_id": "sess-1",
+            "hierarchical": {
+                "group_key": {"session_id": "sess-1"},
+                "source_record_ids": ["rec-1"],
+                "source_unit_ids": ["unit-1"],
+                "field_payload": {"summary": "Alice had a productive tea-focused session."},
+            },
+            "representation": {"summary": "Alice had a productive tea-focused session."},
+        },
+    )
+    packet = Packet(
+        query=Query(text="Alice tea", metadata={"foo": "bar", "session_id": "sess-1"}),
+        retrieved=RetrievedSet(
+            items=[episodic, summary],
+            scores=[
+                {"record_id": "rec-1", "rank": 2, "score": 0.4, "strategy": "keyword_count"},
+                {"record_id": "rec-2", "rank": 1, "score": 0.9, "strategy": "embedding_similarity"},
+            ],
+            trace={
+                "module": "layer_aware_retrieval",
+                "retrieval_mode": "layer_aware",
+                "candidate_count": 2,
+                "active_layers": ["session_summary", "episodic"],
+            },
+        ),
+        trace={"request_id": "req-1"},
+    )
+
+    packet_out, _ = TemplateReadout(
+        simple_template=(
+            "Q={{ query.text }}\n"
+            "Now={{ runtime.now }}\n"
+            "Foo={{ query.metadata.foo | default('x') }}\n"
+            "Missing={{ runtime.user_name | default('anonymous') }}\n"
+            "Top={{ retrieved.items | sort_by('timestamp', reverse=True) | topk(1) | join_text }}\n"
+            "Episode={{ retrieved.by_layer.episodic | join_text }}\n"
+            "Note={{ retrieved.by_record_id.rec-1.note.context }}\n"
+            "Entities={{ retrieved.by_record_id.rec-1.graph.entities | join(', ') }}\n"
+            "SummaryGroup={{ retrieved.by_record_id.rec-2.hierarchical.group_key.session_id }}\n"
+            "Score={{ scores.by_record_id.rec-2.strategy }}\n"
+            "Layers={{ trace.retrieval.active_layers | join(', ') }}"
+        ),
+        runtime_now_factory=lambda: "2026-04-03T12:00:00+00:00",
+    ).run(packet, MemoryStore())
+
+    assert packet_out.readout is not None
+    assert "Q=Alice tea" in packet_out.readout.text
+    assert "Now=2026-04-03T12:00:00+00:00" in packet_out.readout.text
+    assert "Missing=anonymous" in packet_out.readout.text
+    assert "Top=Alice had a productive tea-focused session." in packet_out.readout.text
+    assert "Episode=Alice visited the tea house." in packet_out.readout.text
+    assert "Note=Trip note" in packet_out.readout.text
+    assert "Entities=Alice, Tea House" in packet_out.readout.text
+    assert "SummaryGroup=sess-1" in packet_out.readout.text
+    assert "Score=embedding_similarity" in packet_out.readout.text
+    assert "Layers=session_summary, episodic" in packet_out.readout.text
+    assert packet_out.readout.source_ids == ["rec-2", "rec-1"]
+    assert "runtime.user_name | default('anonymous')" in packet_out.readout.metadata["missing_variables"]
+    assert packet_out.readout.metadata["used_record_ids"] == ["rec-2", "rec-1"]
+    assert "summary_with_sources" in packet_out.readout.metadata["available_views"]
+
+
+def test_template_readout_structured_template_tracks_blocks_groups_and_relations() -> None:
+    from memprimitive.baselines import TemplateReadout
+
+    episodic = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="episodic",
+        text="Alice debugged retrieval with graph traces.",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={"session_id": "sess-1", "subgoal_id": "sg-1"},
+    )
+    summary = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="session_summary",
+        text="Session summary for retrieval debugging.",
+        timestamp="2026-01-02T00:00:00+00:00",
+        metadata={
+            "unit_type": "summary",
+            "session_id": "sess-1",
+            "hierarchical": {
+                "group_key": {"session_id": "sess-1"},
+                "source_record_ids": ["rec-1"],
+                "source_unit_ids": ["unit-1"],
+                "field_payload": {"summary": "Session summary for retrieval debugging."},
+            },
+            "representation": {"summary": "Session summary for retrieval debugging."},
+        },
+    )
+    packet = Packet(
+        query=Query(text="retrieval summary"),
+        retrieved=RetrievedSet(
+            items=[summary, episodic],
+            scores=[
+                {"record_id": "rec-2", "rank": 1, "strategy": "embedding_similarity"},
+                {"record_id": "rec-1", "rank": 2, "strategy": "embedding_similarity"},
+            ],
+            trace={"retrieval_mode": "layer_aware", "candidate_count": 2},
+        ),
+    )
+
+    packet_out, _ = TemplateReadout(
+        structured_template={
+            "blocks": [
+                {"id": "query", "title": "Query", "template": "{{ query.text }}"},
+                {
+                    "id": "episodes",
+                    "title": "Episodes",
+                    "condition": "retrieved.by_layer.episodic | length",
+                    "repeat_over": "retrieved.by_layer.episodic",
+                    "item_template": "- {{ item.text }}",
+                    "separator": "\n",
+                },
+                {
+                    "id": "summaries",
+                    "title": "Summaries",
+                    "repeat_over": "retrieved.views.summary_with_sources",
+                    "item_template": "* {{ item.summary.text }} ({{ item.group_key.session_id }}) => {{ item.sources | join_text }}",
+                    "separator": "\n",
+                },
+                {
+                    "id": "skip",
+                    "title": "Skip",
+                    "condition": "retrieved.by_layer.profile | length",
+                    "template": "should not appear",
+                },
+            ]
+        }
+    ).run(packet, MemoryStore())
+
+    assert packet_out.readout is not None
+    assert "Query\nretrieval summary" in packet_out.readout.text
+    assert "Episodes\n- Alice debugged retrieval with graph traces." in packet_out.readout.text
+    assert "Summaries\n* Session summary for retrieval debugging. (sess-1) => Alice debugged retrieval with graph traces." in packet_out.readout.text
+    assert "should not appear" not in packet_out.readout.text
+    assert packet_out.readout.metadata["used_group_ids"] == ['group:hierarchical:{"session_id": "sess-1"}']
+    assert packet_out.readout.metadata["used_record_ids"] == ["rec-1", "rec-2"]
+    assert packet_out.readout.metadata["structuring_summary"]["relation_count"] >= 2
+    assert any(entry["block_id"] == "skip" and entry["rendered"] is False for entry in packet_out.readout.metadata["block_trace"])
+
+
+def test_template_readout_missing_value_can_render_placeholder() -> None:
+    from memprimitive.baselines import TemplateReadout
+
+    packet_out, _ = TemplateReadout(
+        simple_template="User={{ runtime.user_id }}",
+        missing_value="<missing>",
+    ).run(Packet(query=Query(text="hello"), retrieved=RetrievedSet()), MemoryStore())
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "User=<missing>"
+    assert packet_out.readout.metadata["missing_variables"] == ["runtime.user_id"]
+
+
+def test_template_readout_works_in_memory_pipeline_recall_flow() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import RecencyRetrieval, TemplateReadout
+
+    pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=2),
+        readout=TemplateReadout(simple_template="{{ retrieved.items | join_text }}"),
+    )
+    pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
+    pipeline.ingest(Observation(text="Bob likes coffee.", source="dialogue"))
+
+    readout = pipeline.recall(Query(text="Alice"))
+
+    assert "Bob likes coffee." in readout.text
+    assert "Alice likes tea." in readout.text
+    assert len(readout.source_ids) == 2
