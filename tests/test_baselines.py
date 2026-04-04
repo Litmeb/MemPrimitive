@@ -1054,58 +1054,6 @@ def test_write_and_evolution_trigger_are_independent_by_default() -> None:
     assert write_packet.trace["write_trigger"]["module"] == "always_write_trigger"
     assert evolution_packet.trace["evolution_trigger"]["module"] == "never_evolution_trigger"
 
-
-def test_threshold_write_trigger_respects_threshold_policy() -> None:
-    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation, ThresholdTrigger
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
-        MemoryStore(),
-    )
-    packet, store = BasicRepresentation().run(packet, store)
-
-    packet_out, _ = ThresholdTrigger(threshold=0.8, constant=0.7).run(packet, store)
-    assert packet_out.decisions == [False]
-    assert packet_out.trace["write_trigger"]["threshold"] == 0.8
-    assert packet_out.trace["write_trigger"]["constant"] == 0.7
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is False
-
-    packet_out, _ = ThresholdTrigger(threshold=0.7, constant=0.7).run(packet, store)
-    assert packet_out.decisions == [True]
-    assert packet_out.trace["write_trigger"]["per_unit"][0]["decision"] is True
-
-
-def test_threshold_evolution_trigger_writes_only_decisions() -> None:
-    from memprimitive.baselines import (
-        AppendOrganization,
-        BasicRepresentation,
-        PassThroughUnitFormation,
-        ThresholdTrigger,
-    )
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
-        MemoryStore(),
-    )
-    packet, store = BasicRepresentation().run(packet, store)
-    packet, store = AppendOrganization().run(
-        Packet(
-            observation=packet.observation,
-            units=packet.units,
-            decisions=[True],
-            trace=packet.trace,
-        ),
-        store,
-    )
-
-    packet_out, _ = ThresholdTrigger(slot="evolution_trigger", threshold=2.0, constant=1.0).run(packet, store)
-
-    assert packet_out.decisions == [False]
-    assert packet_out.trace["evolution_trigger"]["threshold"] == 2.0
-    assert packet_out.trace["evolution_trigger"]["constant"] == 1.0
-    assert packet_out.trace["evolution_trigger"]["per_unit"][0]["decision"] is False
-
-
 def test_boundary_event_trigger_matches_structural_events_for_both_slots() -> None:
     from memprimitive.baselines import AppendOrganization, BoundaryEventTrigger
 
@@ -1462,18 +1410,27 @@ def test_scalar_rule_trigger_memory_pressure_requires_explicit_write_layer() -> 
         ScalarRuleTrigger(signal_key="memory_pressure", threshold=0.8).run(packet, store)
 
 
-def test_model_judge_trigger_supports_injected_per_unit_and_broadcast_modes() -> None:
-    from memprimitive.baselines import AppendOrganization, ModelJudgeTrigger
+def test_llm_judge_trigger_supports_per_unit_and_broadcast_modes() -> None:
+    from memprimitive.baselines import AppendOrganization, LLMJudgeTrigger
 
     packet, store = _represented_packet("Alice likes tea.")
 
-    def per_unit_judge(payload: dict) -> dict:
-        return {"decision": "alice" in payload["unit"]["text"].casefold(), "score": 0.9, "label": "write"}
+    trigger = LLMJudgeTrigger(
+        prompt="Judge whether {{ unit.text }} should be written in {{ slot }}.",
+    )
 
-    packet_out, _ = ModelJudgeTrigger(system_prompt="Judge writes.", judge_callable=per_unit_judge).run(packet, store)
+    def _fake_per_unit_llm_json(*, user: str) -> Any:
+        payload = json.loads(user)
+        assert payload["prompt"] == "Judge whether Alice likes tea. should be written in write_trigger."
+        assert payload["judge_context"]["unit"]["text"] == "Alice likes tea."
+        return {"decision": True, "score": 0.9, "label": "write"}
+
+    trigger._llm_json = _fake_per_unit_llm_json  # type: ignore[method-assign]
+    packet_out, _ = trigger.run(packet, store)
     assert packet_out.decisions == [True]
-    assert packet_out.trace["write_trigger"]["source"] == "model_judge"
+    assert packet_out.trace["write_trigger"]["source"] == "llm_judge"
     assert packet_out.trace["write_trigger"]["per_unit"][0]["score"] == 0.9
+    assert packet_out.trace["write_trigger"]["per_unit"][0]["rendered_prompt"].startswith("Judge whether Alice")
 
     packet, store = AppendOrganization().run(
         Packet(
@@ -1485,20 +1442,66 @@ def test_model_judge_trigger_supports_injected_per_unit_and_broadcast_modes() ->
         store,
     )
 
-    def broadcast_judge(payload: dict) -> dict:
-        assert payload["unit"] is None
-        return {"score": 0.75}
-
-    evolution_packet, _ = ModelJudgeTrigger(
+    trigger = LLMJudgeTrigger(
         slot="evolution_trigger",
-        system_prompt="Judge evolution.",
+        prompt="Judge whether evolution should run for {{ store_summary.record_count }} stored records.",
         decision_mode="score",
         threshold=0.7,
         per_unit=False,
-        judge_callable=broadcast_judge,
-    ).run(packet, store)
+    )
+
+    def _fake_broadcast_llm_json(*, user: str) -> Any:
+        payload = json.loads(user)
+        assert payload["judge_context"]["unit"] is None
+        assert payload["judge_context"]["placement"] is None
+        assert payload["prompt"] == "Judge whether evolution should run for 1 stored records."
+        return {"score": 0.75}
+
+    trigger._llm_json = _fake_broadcast_llm_json  # type: ignore[method-assign]
+    evolution_packet, _ = trigger.run(packet, store)
     assert evolution_packet.decisions == [True]
     assert evolution_packet.trace["evolution_trigger"]["per_unit"][0]["score"] == 0.75
+
+
+def test_llm_judge_trigger_prompt_template_supports_recalled_prompt() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMJudgeTrigger, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import text_prompt
+
+    packet, store = _represented_packet(
+        "Alice likes tea.",
+        observation_metadata={"session_id": "sess-judge"},
+    )
+    _seed_layer(store, "default", ["CURRENT JUDGE PROFILE"])
+
+    retrieve_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="default"),
+        readout=ConcatenateReadout(),
+        store=MemoryStore(),
+    )
+    trigger = LLMJudgeTrigger(
+        prompt=text_prompt(
+            "Decide for {{ unit.text }} with {{ recalled_prompt }} and {{ unit.metadata.session_id }}",
+            recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            recall_query_builder=lambda packet, current_store, context: f"profile for {context['unit']['text']}",
+            sub_recall_pipeline=retrieve_pipeline,
+        ),
+    )
+
+    def _fake_llm_json(*, user: str) -> Any:
+        payload = json.loads(user)
+        assert payload["prompt"] == "Decide for Alice likes tea. with CURRENT JUDGE PROFILE and sess-judge"
+        assert payload["judge_context"]["unit"]["text"] == "Alice likes tea."
+        return {"decision": True, "label": "write"}
+
+    trigger._llm_json = _fake_llm_json  # type: ignore[method-assign]
+    packet_out, _ = trigger.run(packet, store)
+
+    prompt_trace = packet_out.trace["write_trigger"]["per_unit"][0]
+    assert packet_out.decisions == [True]
+    assert prompt_trace["recall_prompt"]["enabled"] is True
+    assert prompt_trace["recall_prompt"]["rendered_recall_query"] == "profile for Alice likes tea."
+    assert prompt_trace["recalled_prompt"] == "CURRENT JUDGE PROFILE"
 
 
 def test_periodic_maintenance_trigger_runs_wrapped_trigger_when_schedule_matches() -> None:
@@ -1754,7 +1757,7 @@ def test_new_trigger_classes_are_registered_in_baseline_exports() -> None:
         "RuntimeEventTrigger",
         "ScalarRuleTrigger",
         "StoreAllTrigger",
-        "ModelJudgeTrigger",
+        "LLMJudgeTrigger",
         "PeriodicMaintenanceTrigger",
         "IdleMaintenanceTrigger",
     }.issubset(exported)
@@ -2622,15 +2625,6 @@ def test_store_capability_queries_reflect_declared_topology() -> None:
     assert store.layer_supports_index("graph", "graph") is True
 
 
-def test_baselines_simple_reexports_match_package_exports() -> None:
-    import memprimitive.baselines as pkg
-    import memprimitive.baselines.simple as legacy
-
-    assert set(pkg.__all__) == set(legacy.__all__)
-    for name in sorted(pkg.__all__):
-        assert getattr(pkg, name) is getattr(legacy, name), name
-
-
 def test_baselines_all_matches_registered_baseline_classes() -> None:
     """``__init__.__all__`` must list exactly the classes registered in per-module ``BASELINE_CLASSES``."""
     import memprimitive.baselines as pkg
@@ -3241,7 +3235,7 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
         GraphSeedAndExpandRetrieval,
         LLMRepresentation,
         PassThroughUnitFormation,
-        ThresholdTrigger,
+        AlwaysTrigger,
         TripleRepresentation,
     )
 
@@ -3281,7 +3275,7 @@ def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution
             SeededTagRepresentation(field="tags", prompt="Extract tags."),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
-        evolution_trigger=ThresholdTrigger(slot="evolution_trigger", threshold=0.5, constant=1.0),
+        evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
         memory_evolution=(
             GraphLinkEvolution(target_layer="knowledge_graph", neighbor_limit=2, rewrite_neighbor_metadata=True),
             GraphNeighborContextTraceEvolution(target_layer="knowledge_graph", rewrite_metadata=True),

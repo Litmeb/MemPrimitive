@@ -20,13 +20,13 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Packet, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
+    AlwaysTrigger,
     BasicRepresentation,
     GraphAppendOrganization,
     GraphNeighborAppendEvolution,
     GraphReadout,
     GraphSeedAndExpandRetrieval,
     LLMRepresentation,
-    ThresholdTrigger,
     TripleRepresentation,
 )
 
@@ -53,7 +53,7 @@ def main() -> None:
             LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
         ),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
-        evolution_trigger=ThresholdTrigger(slot="evolution_trigger", threshold=0.5, constant=1.0),
+        evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
         memory_evolution=GraphNeighborAppendEvolution(target_layer="knowledge_graph", neighbor_limit=2),
         store=store,
     )

@@ -31,9 +31,9 @@ from memprimitive.baselines import (
     GraphSeedAndExpandRetrieval,
     HierarchicalEvolution,
     LayerAwareRetrieval,
+    LLMJudgeTrigger,
     LinkStrengtheningEvolution,
     LLMRepresentation,
-    ModelJudgeTrigger,
     NeverTrigger,
     NeighborContextUpdateEvolution,
     PassThroughUnitFormation,
@@ -670,7 +670,7 @@ def test_pipeline_scalar_memory_pressure_records_decisions_store_summary() -> No
     assert packet.decisions_store["episodic"]["selector"]["source"] == "scalar_rule"
 
 
-def test_pipeline_end_to_end_supports_model_judge_trigger_with_reflection_generation() -> None:
+def test_pipeline_end_to_end_supports_llm_judge_trigger_with_reflection_generation() -> None:
     store = MemoryStore(
         topology=StoreTopology.from_layers(
             [
@@ -680,33 +680,30 @@ def test_pipeline_end_to_end_supports_model_judge_trigger_with_reflection_genera
         )
     )
 
-    def judge_failure(payload: dict[str, object]) -> dict[str, object]:
-        observation = payload.get("observation", {})
-        metadata = observation.get("metadata", {}) if isinstance(observation, dict) else {}
-        reflexion = metadata.get("reflexion", {}) if isinstance(metadata, dict) else {}
-        return {
-            "decision": False,
-            "score": 0.92,
-            "label": "trigger",
-            "reason": reflexion.get("evaluator_feedback", ""),
-        }
-
     def generate_reflection(payload) -> str:
         return (
             "Reflection: verify the boundary condition first, then cross-check the returned index "
             "against the query before finalizing the answer."
         )
 
+    evolution_trigger = LLMJudgeTrigger(
+        slot="evolution_trigger",
+        prompt="Decide whether this failed trial needs reflection for {{ observation.text }}.",
+        decision_mode="score",
+        threshold=0.8,
+        per_unit=False,
+    )
+
+    evolution_trigger._llm_json = lambda *, user: {  # type: ignore[method-assign]
+        "decision": False,
+        "score": 0.92,
+        "label": "trigger",
+        "reason": "You ignored the earliest valid match.",
+    }
+
     pipeline = MemoryPipeline(
         write_trigger=AlwaysTrigger(),
-        evolution_trigger=ModelJudgeTrigger(
-            slot="evolution_trigger",
-            system_prompt="Decide whether this failed trial needs reflection.",
-            decision_mode="score",
-            threshold=0.8,
-            per_unit=False,
-            judge_callable=judge_failure,
-        ),
+        evolution_trigger=evolution_trigger,
         memory_evolution=ReflectionGenerationEvolution(
             target_layer="reflections",
             memory_size=2,
@@ -749,7 +746,7 @@ def test_pipeline_end_to_end_supports_model_judge_trigger_with_reflection_genera
         )
     )
 
-    assert packet.trace["evolution_trigger"]["module"] == "model_judge_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["module"] == "llm_judge_evolution_trigger"
     assert packet.trace["evolution_trigger"]["decisions"] == [True]
     assert packet.trace["evolution_trigger"]["judge_per_unit"] is False
     assert packet.trace["evolution_trigger"]["per_unit"][0]["score"] == 0.92
@@ -772,7 +769,7 @@ def test_pipeline_end_to_end_supports_model_judge_trigger_with_reflection_genera
     assert readout.metadata["reflection_count"] == 1
 
 
-def test_pipeline_model_judge_can_block_reflection_generation_end_to_end() -> None:
+def test_pipeline_llm_judge_can_block_reflection_generation_end_to_end() -> None:
     store = MemoryStore(
         topology=StoreTopology.from_layers(
             [
@@ -782,16 +779,18 @@ def test_pipeline_model_judge_can_block_reflection_generation_end_to_end() -> No
         )
     )
 
+    evolution_trigger = LLMJudgeTrigger(
+        slot="evolution_trigger",
+        prompt="Decide whether reflection is needed for {{ observation.text }}.",
+        decision_mode="score",
+        threshold=0.8,
+        per_unit=False,
+    )
+    evolution_trigger._llm_json = lambda *, user: {"score": 0.2, "label": "skip"}  # type: ignore[method-assign]
+
     pipeline = MemoryPipeline(
         write_trigger=AlwaysTrigger(),
-        evolution_trigger=ModelJudgeTrigger(
-            slot="evolution_trigger",
-            system_prompt="Decide whether reflection is needed.",
-            decision_mode="score",
-            threshold=0.8,
-            per_unit=False,
-            judge_callable=lambda payload: {"score": 0.2, "label": "skip"},
-        ),
+        evolution_trigger=evolution_trigger,
         memory_evolution=ReflectionGenerationEvolution(
             target_layer="reflections",
             reflection_generator=lambda payload: "Reflection: this should not be written.",
@@ -817,7 +816,7 @@ def test_pipeline_model_judge_can_block_reflection_generation_end_to_end() -> No
     )
     readout = pipeline.recall(Query(text="Recover the first valid index."))
 
-    assert packet.trace["evolution_trigger"]["module"] == "model_judge_evolution_trigger"
+    assert packet.trace["evolution_trigger"]["module"] == "llm_judge_evolution_trigger"
     assert packet.trace["evolution_trigger"]["decisions"] == [False]
     assert packet.trace["memory_evolution"]["active_unit_ids"] == []
     assert packet.trace["memory_evolution"]["effects"] == []

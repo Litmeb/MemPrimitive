@@ -52,19 +52,18 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
         AlwaysTrigger,
         BoundaryEventTrigger,
         IdleMaintenanceTrigger,
-        ModelJudgeTrigger,
+        LLMJudgeTrigger,
         NeverTrigger,
         PeriodicMaintenanceTrigger,
         RuntimeEventTrigger,
         ScalarRuleTrigger,
         StoreAllTrigger,
-        ThresholdTrigger,
     )
 
     by_slot: dict[str, list[type[PrimitiveModule]]] = defaultdict(list)
 
     for mi in pkgutil.iter_modules(pkg.__path__):
-        if mi.name.startswith("_") or mi.name in ("simple", "registry"):
+        if mi.name.startswith("_") or mi.name == "registry":
             continue
         m = importlib.import_module(f"memprimitive.baselines.{mi.name}")
         has_classes = hasattr(m, "BASELINE_CLASSES")
@@ -89,8 +88,7 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
         BoundaryEventTrigger,
         RuntimeEventTrigger,
         ScalarRuleTrigger,
-        ModelJudgeTrigger,
-        ThresholdTrigger,
+        LLMJudgeTrigger,
     ]
     by_slot["evolution_trigger"] = [
         NeverTrigger,
@@ -98,10 +96,9 @@ def baseline_classes_by_slot() -> dict[str, tuple[type[PrimitiveModule], ...]]:
         BoundaryEventTrigger,
         RuntimeEventTrigger,
         ScalarRuleTrigger,
-        ModelJudgeTrigger,
+        LLMJudgeTrigger,
         PeriodicMaintenanceTrigger,
         IdleMaintenanceTrigger,
-        ThresholdTrigger,
     ]
 
     missing = [s for s in ALL_PIPELINE_SLOTS if s not in by_slot or not by_slot[s]]

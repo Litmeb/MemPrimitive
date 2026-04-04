@@ -227,8 +227,8 @@
 
 1. `AlwaysTrigger`
   - 作为默认实现存在，但尽量薄，不要继续堆复杂子类
-2. `ThresholdTrigger`
-  - 覆盖 importance / utility / retention / worthiness
+2. `ScalarRuleTrigger`
+  - 覆盖 importance / utility / retention / worthiness 这类显式标量信号
 3. `BooleanSignalTrigger`
   - 覆盖 cue、event boundary、prediction gap、evidence sufficiency 等布尔信号
 4. `FailureTrigger`
@@ -256,7 +256,7 @@
 
 如果还要再砍一刀，只保留**真正必要**的一组，我会去掉 `AlwaysTrigger` 的“类地位”，把它当默认配置值，只保留：
 
-1. `ThresholdTrigger`
+1. `ScalarRuleTrigger`
 2. `BooleanSignalTrigger`
 3. `FailureTrigger`
 4. `CapacityTrigger`

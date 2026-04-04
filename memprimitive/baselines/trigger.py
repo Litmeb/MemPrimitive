@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any
 
 from ..core import MemoryStore, ModuleSpec, Packet
 from ..interfaces import TriggerModule
 from ..utils._runtime import get_runtime
+from ..utils._template import PromptPlan, ensure_prompt_plan, render_prompt_plan
 from ..utils._trace import copy_trace
 
 _VALID_TRIGGER_SLOTS = frozenset({"write_trigger", "evolution_trigger"})
@@ -415,7 +416,7 @@ def _select_all_store_records(store: MemoryStore, *, selector: dict[str, Any]) -
     return out
 
 
-def _normalize_model_judge_output(output: Any, *, decision_mode: str, threshold: float) -> tuple[bool, dict[str, Any]]:
+def _normalize_llm_judge_output(output: Any, *, decision_mode: str, threshold: float) -> tuple[bool, dict[str, Any]]:
     raw = output
     if isinstance(output, dict):
         decision = output.get("decision")
@@ -442,7 +443,7 @@ def _normalize_model_judge_output(output: Any, *, decision_mode: str, threshold:
         if normalized_score is None:
             normalized_score = _coerce_numeric(decision)
         if normalized_score is None:
-            raise ValueError("ModelJudgeTrigger in score mode requires a numeric score output.")
+            raise ValueError("LLMJudgeTrigger in score mode requires a numeric score output.")
         verdict = normalized_score >= threshold
     else:
         if not normalized_label:
@@ -569,34 +570,6 @@ class NeverTrigger(_BaseTrigger):
                 decisions=decisions,
                 trace_payload={"constant": 1.0, "threshold": None, "source": "constant"},
                 per_unit_payload=[{"constant": 1.0} for _ in decisions],
-            ),
-            store,
-        )
-
-
-class ThresholdTrigger(_BaseTrigger):
-    """Constant-threshold baseline for either trigger slot."""
-
-    _DEFAULT_SLOT = "write_trigger"
-    _NAME_PREFIX = "threshold"
-
-    def __init__(self, *, slot: str | None = None, threshold: float = 0.5, constant: float = 1.0) -> None:
-        super().__init__(slot=slot)
-        self.threshold = float(threshold)
-        self.constant = float(constant)
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        units = self._require_units(packet)
-        decision = self.constant >= self.threshold
-        decisions = [decision] * len(units)
-        return (
-            _write_trace(
-                packet,
-                module_name=self.spec.name,
-                trace_key=self._trace_key(),
-                decisions=decisions,
-                trace_payload={"constant": self.constant, "threshold": self.threshold, "source": "constant"},
-                per_unit_payload=[{"constant": self.constant} for _ in decisions],
             ),
             store,
         )
@@ -1128,58 +1101,114 @@ class ScalarRuleTrigger(_BaseTrigger):
         )
 
 
-class ModelJudgeTrigger(_BaseTrigger):
-    """Call a real model or injected judge callable to decide trigger activation."""
+class LLMJudgeTrigger(_BaseTrigger):
+    """Call a real LLM with a PromptPlan-rendered judge prompt to decide trigger activation."""
 
     _DEFAULT_SLOT = "write_trigger"
-    _NAME_PREFIX = "model_judge"
+    _NAME_PREFIX = "llm_judge"
 
     def __init__(
         self,
         *,
         slot: str | None = None,
-        system_prompt: str,
+        prompt: PromptPlan | str,
         decision_mode: str = "bool",
         threshold: float = 0.5,
         per_unit: bool = True,
-        strict_json: bool = True,
-        judge_callable: Callable[[dict[str, Any]], dict[str, Any] | bool | float | str] | None = None,
     ) -> None:
         super().__init__(slot=slot)
-        prompt = str(system_prompt).strip()
-        if not prompt:
-            raise ValueError("system_prompt must be non-empty.")
-        self.system_prompt = prompt
+        if isinstance(prompt, str):
+            normalized_prompt = prompt.strip()
+        else:
+            normalized_prompt = prompt
+        if isinstance(normalized_prompt, str) and not normalized_prompt:
+            raise ValueError("LLMJudgeTrigger requires a non-empty prompt.")
+        self.prompt = normalized_prompt
         self.decision_mode = _require_choice(decision_mode, field_name="decision_mode", allowed=_VALID_DECISION_MODES)
         self.threshold = float(threshold)
         self.per_unit = bool(per_unit)
-        self.strict_json = bool(strict_json)
-        self.judge_callable = judge_callable
 
-    def _judge_once(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        if self.judge_callable is not None:
-            output = self.judge_callable(payload)
-        else:
-            runtime = get_runtime()
-            user = json.dumps(payload, ensure_ascii=False)
-            if self.strict_json:
-                output = runtime.json(system=self.system_prompt, user=user)
-            else:
-                output = runtime.text(system=self.system_prompt, user=user)
-        return _normalize_model_judge_output(output, decision_mode=self.decision_mode, threshold=self.threshold)
+    def _judge_once(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        *,
+        unit_index: int | None,
+    ) -> tuple[bool, dict[str, Any], MemoryStore]:
+        payload = _judge_payload(packet, store, unit_index=unit_index)
+        rendered_prompt, prompt_trace, store = self._render_prompt(packet, store, unit_index=unit_index)
+        output = self._llm_json(
+            user=json.dumps(
+                {
+                    "decision_mode": self.decision_mode,
+                    "threshold": self.threshold,
+                    "slot": self.slot,
+                    "prompt": rendered_prompt,
+                    "judge_context": payload,
+                },
+                ensure_ascii=False,
+            )
+        )
+        decision, details = _normalize_llm_judge_output(
+            output,
+            decision_mode=self.decision_mode,
+            threshold=self.threshold,
+        )
+        return decision, {**details, **prompt_trace}, store
+
+    def _render_prompt(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        *,
+        unit_index: int | None,
+    ) -> tuple[str, dict[str, Any], MemoryStore]:
+        judge_payload = _judge_payload(packet, store, unit_index=unit_index)
+        plan = ensure_prompt_plan(
+            self.prompt,
+            metadata_mode="prompt",
+            context_builder=lambda current_packet, current_store: {
+                "slot": self.slot,
+                "decision_mode": self.decision_mode,
+                "threshold": self.threshold,
+                "observation": judge_payload.get("observation"),
+                "unit": judge_payload.get("unit"),
+                "placement": judge_payload.get("placement"),
+                "store_summary": judge_payload.get("store_summary"),
+                "trigger_context": judge_payload.get("trigger_context"),
+            },
+        )
+        return render_prompt_plan(plan, packet=packet, store=store)
+
+    def _llm_json(self, *, user: str) -> Any:
+        runtime = get_runtime()
+        runtime.require_llm(capability=f"LLMJudgeTrigger slot {self.slot!r}")
+        return runtime.json(
+            system=(
+                "You decide whether a trigger should activate. "
+                "Follow the user-provided prompt exactly and evaluate the supplied judge_context only. "
+                "Return strict JSON only. "
+                "If decision_mode is 'bool', return an object with key 'decision' (boolean). "
+                "If decision_mode is 'score', return an object with key 'score' (number). "
+                "If decision_mode is 'label', return an object with key 'label' (string). "
+                "You may also include optional supporting fields such as reason or confidence."
+            ),
+            user=user,
+        )
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         units = self._require_units(packet)
         per_unit_payload: list[dict[str, Any]] = []
+        prompt_plan = ensure_prompt_plan(self.prompt, metadata_mode="prompt")
 
         if self.per_unit:
             decisions: list[bool] = []
             for index in range(len(units)):
-                decision, details = self._judge_once(_judge_payload(packet, store, unit_index=index))
+                decision, details, store = self._judge_once(packet, store, unit_index=index)
                 decisions.append(decision)
                 per_unit_payload.append(details)
         else:
-            decision, details = self._judge_once(_judge_payload(packet, store, unit_index=None))
+            decision, details, store = self._judge_once(packet, store, unit_index=None)
             decisions = _broadcast_decisions(len(units), decision)
             per_unit_payload = [dict(details) for _ in units]
 
@@ -1190,11 +1219,16 @@ class ModelJudgeTrigger(_BaseTrigger):
                 trace_key=self._trace_key(),
                 decisions=decisions,
                 trace_payload={
-                    "source": "model_judge",
+                    "source": "llm_judge",
                     "decision_mode": self.decision_mode,
                     "threshold": self.threshold,
                     "judge_per_unit": self.per_unit,
-                    "strict_json": self.strict_json,
+                    "prompt_is_template": prompt_plan.mode == "structured"
+                    or (
+                        isinstance(prompt_plan.template, str)
+                        and "{{" in prompt_plan.template
+                        and "}}" in prompt_plan.template
+                    ),
                 },
                 per_unit_payload=per_unit_payload,
             ),
@@ -1342,11 +1376,10 @@ __all__ = [
     "AlwaysTrigger",
     "BoundaryEventTrigger",
     "IdleMaintenanceTrigger",
-    "ModelJudgeTrigger",
+    "LLMJudgeTrigger",
     "NeverTrigger",
     "PeriodicMaintenanceTrigger",
     "RuntimeEventTrigger",
     "ScalarRuleTrigger",
     "StoreAllTrigger",
-    "ThresholdTrigger",
 ]
