@@ -27,6 +27,8 @@ def _default_factory_for_class(cls: type[PrimitiveModule], slot: str, *, top_k: 
     """Instantiate a registered class; slot-specific kwargs live here (not per-class lists)."""
     if slot == "retrieval":
         return lambda c=cls, k=top_k: c(top_k=k)
+    if slot == "readout" and cls.__name__ == "TemplateReadout":
+        return lambda c=cls: c(simple_template="{{ retrieved.items | join_text }}")
     if slot == "write_trigger":
         return lambda c=cls: c(slot="write_trigger")
     if slot == "evolution_trigger":

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-from typing import Final
+from typing import Any, Callable, Final
 
 from ..core import MemoryStore, ModuleSpec, Packet, Readout
 from ..interfaces import ReadoutModule
@@ -18,6 +18,15 @@ from ..utils._reflexion_family import (
     build_prompt_context,
     last_attempt_from_query_metadata,
     strategy_from_query_metadata,
+)
+from ..utils._template_readout import (
+    ResolutionState,
+    build_render_context,
+    collect_template_references,
+    metadata_from_state,
+    render_simple_template,
+    render_structured_template,
+    template_mode,
 )
 from ..utils._trace import copy_trace
 
@@ -365,6 +374,81 @@ class NoteRenderReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
+class TemplateReadout(ReadoutModule):
+    """Render retrieved context through a lightweight templating layer."""
+
+    spec = ModuleSpec(
+        name="template_readout",
+        slot="readout",
+        input_requirements=("retrieved.items",),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(
+        self,
+        *,
+        simple_template: str | None = None,
+        structured_template: dict[str, Any] | list[Any] | None = None,
+        filters: dict[str, Callable[..., Any]] | None = None,
+        missing_value: str = "",
+        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
+        default_category: str = DEFAULT_CATEGORY,
+        runtime_now_factory: Callable[[], str] | None = None,
+    ) -> None:
+        self.simple_template = simple_template
+        self.structured_template = structured_template
+        self.filters = {} if filters is None else dict(filters)
+        self.missing_value = missing_value
+        self.note_namespace = note_namespace
+        self.default_category = default_category
+        self.runtime_now_factory = runtime_now_factory
+        self._template_mode = template_mode(
+            simple_template=self.simple_template,
+            structured_template=self.structured_template,
+        )
+        if self.filters:
+            raise ValueError("TemplateReadout custom filters are not supported yet.")
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        context = build_render_context(
+            packet,
+            note_namespace=self.note_namespace,
+            default_category=self.default_category,
+            runtime_now_factory=self.runtime_now_factory,
+        )
+        state = ResolutionState()
+        if self._template_mode == "simple":
+            template = self.simple_template if isinstance(self.simple_template, str) else ""
+            declared_variables = collect_template_references(template, structured=False)
+            text = render_simple_template(template, context, state, missing_value=self.missing_value)
+        else:
+            template = self.structured_template if self.structured_template is not None else {}
+            declared_variables = collect_template_references(template, structured=True)
+            text = render_structured_template(template, context, state, missing_value=self.missing_value)
+
+        metadata = metadata_from_state(
+            template_mode_name=self._template_mode,
+            declared_variables=declared_variables,
+            context=context,
+            state=state,
+        )
+        readout = Readout(
+            text=text,
+            source_ids=list(metadata["used_record_ids"]),
+            metadata=metadata,
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "template_mode": self._template_mode,
+            "resolved_variable_count": len(state.resolutions),
+            "missing_variable_count": len(metadata["missing_variables"]),
+            "used_record_ids": list(metadata["used_record_ids"]),
+            "used_group_ids": list(metadata["used_group_ids"]),
+        }
+        return replace(packet, readout=readout, trace=trace), store
+
+
 BASELINE_SLOT: Final[str] = "readout"
 BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     ConcatenateReadout,
@@ -374,4 +458,5 @@ BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     GraphReadout,
     PromptContextReadout,
     NoteRenderReadout,
+    TemplateReadout,
 )

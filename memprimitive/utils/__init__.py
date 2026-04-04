@@ -20,6 +20,10 @@ _reflexion_family
     Reflexion-like helpers: control parsing, prompt-context formatting,
     reflection generation payloads, and strategy constants.
 
+_template_readout
+    Template readout helpers: safe render-context projection, lightweight
+    template parsing, filter application, and structured block rendering.
+
 _trace
     Lightweight packet-trace copy utility.
 
