@@ -36,6 +36,14 @@ from ..utils._amem_family import (
 )
 from ..utils._graph_family import graph_metadata_from_record
 from ..utils._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
+from ..utils._template import (
+    looks_like_template,
+    metadata_from_resolution_state,
+    project_packet_runtime_for_template,
+    project_query_for_template,
+    render_prompt_template,
+    render_prompt_template_with_recall,
+)
 from ..utils._trace import copy_trace
 
 
@@ -1253,6 +1261,9 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
         default_category: str = DEFAULT_CATEGORY,
         agentic_search: bool = False,
         query_expand_with_llm: bool = False,
+        system_prompt: str | None = None,
+        retrieve_pipeline=None,
+        recall_query_template: str | None = None,
     ) -> None:
         if top_k <= 0:
             raise ValueError("VectorGraphSeedAndExpandRetrieval requires top_k > 0.")
@@ -1267,6 +1278,9 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
         self.default_category = default_category
         self.agentic_search = agentic_search
         self.query_expand_with_llm = query_expand_with_llm
+        self.system_prompt = None if system_prompt is None else str(system_prompt)
+        self.retrieve_pipeline = retrieve_pipeline
+        self.recall_query_template = None if recall_query_template is None else str(recall_query_template)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
@@ -1278,16 +1292,15 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
             fallback_content=packet.query.text,
             default_category="query",
         )
+        query_expansion_prompt_trace: dict[str, Any] | None = None
         if self.query_expand_with_llm:
             from ..utils._runtime import get_runtime
 
             runtime = get_runtime()
             runtime.require_llm(capability="Vector graph seed-and-expand query expansion")
+            query_expansion_system_prompt, query_expansion_prompt_trace, store = self._query_expansion_system_prompt(packet, store)
             raw = runtime.json(
-                system=(
-                    "Expand the query for enriched graph-memory retrieval. "
-                    "Return JSON with fields query_text, content, context, keywords, tags, category, attributes."
-                ),
+                system=query_expansion_system_prompt,
                 user=json.dumps({"query": packet.query.text}, ensure_ascii=False),
             )
             query_payload = repair_note_payload(raw, fallback_content=packet.query.text, default_category="query")
@@ -1389,11 +1402,92 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
                 "candidate_record_ids": [record.record_id for record in merged_records],
                 "expanded_neighbor_ids": [record.record_id for record in neighbor_records],
                 "note_namespace": self.note_namespace,
+                "query_expand_with_llm": self.query_expand_with_llm,
+                "system_prompt_is_template": bool(query_expansion_prompt_trace and query_expansion_prompt_trace.get("prompt_is_template")),
+                "query_expansion_prompt_trace": query_expansion_prompt_trace,
             },
         )
         trace = copy_trace(packet)
         trace["retrieval"] = retrieved.trace
         return replace(packet, query=query, retrieved=retrieved, trace=trace), store
+
+    def _query_expansion_system_prompt(self, packet: Packet, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
+        default_prompt = (
+            "Expand the query for enriched graph-memory retrieval. "
+            "Return JSON with fields query_text, content, context, keywords, tags, category, attributes."
+        )
+        if self.system_prompt is None:
+            return default_prompt, {
+                "prompt_is_template": False,
+                "rendered_prompt": default_prompt,
+                "rendered_prompt_preview": default_prompt[:200],
+                "missing_variables": [],
+                "recalled_prompt": "",
+                "recalled_prompt_preview": "",
+                "recall_prompt": {
+                    "enabled": False,
+                    "disabled_reason": "default_prompt",
+                    "rendered_recall_query": "",
+                    "rendered_recall_query_preview": "",
+                    "recall_query_template": self.recall_query_template,
+                    "recall_query_template_is_template": bool(
+                        self.recall_query_template and looks_like_template(self.recall_query_template)
+                    ),
+                    "matched": False,
+                    "recalled_prompt": "",
+                    "recalled_prompt_preview": "",
+                    "missing_variables": [],
+                    "resolved_variables": [],
+                    "used_record_ids": [],
+                    "used_group_ids": [],
+                    "filter_trace": [],
+                },
+            }, store
+        if not looks_like_template(self.system_prompt):
+            return self.system_prompt, {
+                "prompt_is_template": False,
+                "rendered_prompt": self.system_prompt,
+                "rendered_prompt_preview": self.system_prompt[:200],
+                "missing_variables": [],
+                "recalled_prompt": "",
+                "recalled_prompt_preview": "",
+                "recall_prompt": {
+                    "enabled": False,
+                    "disabled_reason": "prompt_not_template",
+                    "rendered_recall_query": "",
+                    "rendered_recall_query_preview": "",
+                    "recall_query_template": self.recall_query_template,
+                    "recall_query_template_is_template": bool(
+                        self.recall_query_template and looks_like_template(self.recall_query_template)
+                    ),
+                    "matched": False,
+                    "recalled_prompt": "",
+                    "recalled_prompt_preview": "",
+                    "missing_variables": [],
+                    "resolved_variables": [],
+                    "used_record_ids": [],
+                    "used_group_ids": [],
+                    "filter_trace": [],
+                },
+            }, store
+        context = {
+            "query": project_query_for_template(packet.query),
+            "runtime": project_packet_runtime_for_template(packet),
+            "retrieval": {
+                "layer": self.layer,
+                "candidate_k": self.candidate_k,
+                "neighbor_expansion_k": self.neighbor_expansion_k,
+                "top_k": self.top_k,
+            },
+        }
+        rendered_prompt, metadata, store = render_prompt_template_with_recall(
+            self.system_prompt,
+            context,
+            store=store,
+            retrieve_pipeline=self.retrieve_pipeline,
+            recall_query_template=self.recall_query_template,
+        )
+        return rendered_prompt, metadata, store
 
 
 BASELINE_SLOT: Final[str] = "retrieval"

@@ -20,7 +20,7 @@ from ..utils._reflexion_family import (
     strategy_from_query_metadata,
 )
 from ..utils._template_readout import (
-    ResolutionState,
+    ReadoutResolutionState,
     build_render_context,
     collect_template_references,
     metadata_from_state,
@@ -416,7 +416,7 @@ class TemplateReadout(ReadoutModule):
             default_category=self.default_category,
             runtime_now_factory=self.runtime_now_factory,
         )
-        state = ResolutionState()
+        state = ReadoutResolutionState()
         if self._template_mode == "simple":
             template = self.simple_template if isinstance(self.simple_template, str) else ""
             declared_variables = collect_template_references(template, structured=False)

@@ -6,6 +6,11 @@ from typing import Any
 
 from ..core import MemoryRecord, MemoryStore, Observation, Packet, Placement
 from ..pipeline import MemoryPipeline
+from ._template import (
+    looks_like_template,
+    project_record_for_template,
+    render_prompt_template_with_recall,
+)
 
 _PSEUDO_FIELDS = frozenset({"record_id", "unit_id", "layer", "text", "timestamp"})
 _VALID_EXTRACT_MODES = frozenset({"copy", "generate"})
@@ -181,18 +186,32 @@ def aggregate_copy_payload(records: list[MemoryRecord], *, extract_fields: tuple
 def generate_payload(
     records: list[MemoryRecord],
     *,
+    store: MemoryStore,
     source_layer: str,
     target_layer: str,
     extract_fields: tuple[str, ...],
     group_key: dict[str, Any],
     prompt: str | None,
-) -> dict[str, Any]:
+    retrieve_pipeline=None,
+    recall_query_template: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     from ._runtime import get_runtime
 
     runtime = get_runtime()
     runtime.require_llm(capability="Hierarchical generate-mode abstraction")
+    system_prompt, prompt_trace = build_generation_system_prompt(
+        store=store,
+        source_layer=source_layer,
+        target_layer=target_layer,
+        extract_fields=extract_fields,
+        group_key=group_key,
+        records=records,
+        prompt=prompt,
+        retrieve_pipeline=retrieve_pipeline,
+        recall_query_template=recall_query_template,
+    )
     result = runtime.json(
-        system=_generation_system_prompt(extract_fields, prompt=prompt),
+        system=system_prompt,
         user=json.dumps(
             {
                 "source_layer": source_layer,
@@ -206,18 +225,96 @@ def generate_payload(
     )
     if not isinstance(result, dict):
         raise ValueError("Hierarchical generate-mode must return a JSON object.")
-    return {field: result.get(field) for field in extract_fields}
+    return {
+        field: result.get(field) for field in extract_fields
+    }, prompt_trace
 
 
-def _generation_system_prompt(extract_fields: tuple[str, ...], *, prompt: str | None) -> str:
+def build_generation_system_prompt(
+    *,
+    store: MemoryStore,
+    source_layer: str,
+    target_layer: str,
+    extract_fields: tuple[str, ...],
+    group_key: dict[str, Any],
+    records: list[MemoryRecord],
+    prompt: str | None,
+    retrieve_pipeline=None,
+    recall_query_template: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    if prompt is not None and looks_like_template(prompt):
+        context = {
+            "source_layer": source_layer,
+            "target_layer": target_layer,
+            "extract_fields": list(extract_fields),
+            "group_key": dict(group_key),
+            "records": [project_record_for_template(record) for record in records],
+            "record_count": len(records),
+        }
+        rendered_prompt, metadata, _ = render_prompt_template_with_recall(
+            prompt,
+            context,
+            store=store,
+            retrieve_pipeline=retrieve_pipeline,
+            recall_query_template=recall_query_template,
+        )
+        return rendered_prompt, metadata
     if prompt is not None:
-        return str(prompt)
+        return str(prompt), {
+            "prompt_is_template": False,
+            "rendered_prompt": str(prompt),
+            "rendered_prompt_preview": str(prompt)[:200],
+            "missing_variables": [],
+            "recalled_prompt": "",
+            "recalled_prompt_preview": "",
+            "recall_prompt": {
+                "enabled": False,
+                "disabled_reason": "prompt_not_template",
+                "rendered_recall_query": "",
+                "rendered_recall_query_preview": "",
+                "recall_query_template": recall_query_template,
+                "recall_query_template_is_template": bool(
+                    recall_query_template and looks_like_template(recall_query_template)
+                ),
+                "matched": False,
+                "recalled_prompt": "",
+                "recalled_prompt_preview": "",
+                "missing_variables": [],
+                "resolved_variables": [],
+                "used_record_ids": [],
+                "used_group_ids": [],
+                "filter_trace": [],
+            },
+        }
     fields_text = ", ".join(extract_fields)
     return (
         "You aggregate selected source memory records into a higher-level hierarchical memory record. "
         f"Return strict JSON with exactly these top-level keys: {fields_text}. "
         "Each field should summarize shared or higher-level information across the provided records."
-    )
+    ), {
+        "prompt_is_template": False,
+        "rendered_prompt": "",
+        "rendered_prompt_preview": "",
+        "missing_variables": [],
+        "recalled_prompt": "",
+        "recalled_prompt_preview": "",
+        "recall_prompt": {
+            "enabled": False,
+            "disabled_reason": "default_prompt",
+            "rendered_recall_query": "",
+            "rendered_recall_query_preview": "",
+            "recall_query_template": recall_query_template,
+            "recall_query_template_is_template": bool(recall_query_template and looks_like_template(recall_query_template)),
+            "matched": False,
+            "recalled_prompt": "",
+            "recalled_prompt_preview": "",
+            "missing_variables": [],
+            "resolved_variables": [],
+            "used_record_ids": [],
+            "used_group_ids": [],
+            "filter_trace": [],
+        },
+    }
 
 
 def serialize_source_record(record: MemoryRecord) -> dict[str, Any]:
@@ -333,6 +430,8 @@ def append_hierarchical_records(
     group_by: tuple[str, ...],
     grouped_records: list[dict[str, Any]],
     prompt: str | None,
+    retrieve_pipeline=None,
+    recall_query_template: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     child_pipeline, writer_pipeline_mode = resolve_writer_pipeline(
         target_layer=target_layer,
@@ -345,14 +444,18 @@ def append_hierarchical_records(
         group_key = dict(group["group_key"])
         if extract_mode == "copy":
             field_payload = aggregate_copy_payload(records, extract_fields=extract_fields)
+            prompt_trace = None
         else:
-            field_payload = generate_payload(
+            field_payload, prompt_trace = generate_payload(
                 records,
+                store=store,
                 source_layer=source_layer,
                 target_layer=effective_target_layer,
                 extract_fields=extract_fields,
                 group_key=group_key,
                 prompt=prompt,
+                retrieve_pipeline=retrieve_pipeline,
+                recall_query_template=recall_query_template,
             )
         observation = build_hierarchical_observation(
             source_layer=source_layer,
@@ -375,6 +478,7 @@ def append_hierarchical_records(
                 "group_key": group_key,
                 "source_record_ids": [source.record_id for source in records],
                 "sub_ingest_trace": summarize_sub_ingest_trace(child_packet),
+                "prompt_trace": prompt_trace,
             }
         )
     return effects, writer_pipeline_mode

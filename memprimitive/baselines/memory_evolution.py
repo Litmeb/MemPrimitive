@@ -1175,6 +1175,8 @@ class HierarchicalEvolution(MemoryEvolutionModule):
         extract_fields: tuple[str, ...],
         group_by: tuple[str, ...] = (),
         prompt: str | None = None,
+        retrieve_pipeline=None,
+        recall_query_template: str | None = None,
         target_layer: str | None = None,
         memory_pipeline=None,
     ) -> None:
@@ -1194,6 +1196,8 @@ class HierarchicalEvolution(MemoryEvolutionModule):
         self.extract_fields = config["extract_fields"]
         self.group_by = config["group_by"]
         self.prompt = config["prompt"]
+        self.retrieve_pipeline = retrieve_pipeline
+        self.recall_query_template = None if recall_query_template is None else str(recall_query_template)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         require_aligned_units_decisions(packet, include_placements=True)
@@ -1214,6 +1218,8 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             group_by=self.group_by,
             grouped_records=grouped,
             prompt=self.prompt,
+            retrieve_pipeline=self.retrieve_pipeline,
+            recall_query_template=self.recall_query_template,
         )
         effective_target_layer = inferred_target_layer(
             target_layer=self.target_layer,
@@ -1229,12 +1235,14 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
             "group_by": list(self.group_by),
+            "prompt_is_template": bool(self.prompt and "{{" in self.prompt and "}}" in self.prompt),
             "selected_record_count": len(selected_records),
             "group_count": len(grouped),
             "active_group_keys": [effect["group_key"] for effect in effects],
             "effects": effects,
             "write_mode": "memory_pipeline_ingest",
             "writer_pipeline_mode": writer_pipeline_mode,
+            "prompt_trace": [effect["prompt_trace"] for effect in effects if effect.get("prompt_trace") is not None],
         }
         return replace(packet, trace=trace), store
 
