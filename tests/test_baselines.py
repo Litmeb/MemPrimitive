@@ -4494,6 +4494,194 @@ def test_template_readout_works_in_memory_pipeline_recall_flow() -> None:
     assert len(readout.source_ids) == 2
 
 
+def test_render_prompt_plan_text_prompt_can_read_stored_representation_fields() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+    from memprimitive.utils._template import render_prompt_plan, text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile", indices=("temporal",))])
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-profile-1",
+            unit_id="unit-profile-1",
+            layer="profile",
+            text="Alice prefers concise technical explanations.",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={
+                "representation": {
+                    "user_profile": "Concise, concrete, technical.",
+                    "response_hint": "Use short examples.",
+                }
+            },
+        )
+    )
+
+    packet, _ = RecencyRetrieval(top_k=1, layer="profile").run(Packet(query=Query(text="Alice profile")), store)
+    rendered, metadata, _ = render_prompt_plan(
+        text_prompt(
+            "profile={{ retrieved.items.0.representation.user_profile }}; "
+            "hint={{ retrieved.items.0.representation.response_hint }}"
+        ),
+        packet=packet,
+        store=store,
+        runtime_now_factory=lambda: "2026-04-04T00:00:00+00:00",
+    )
+
+    assert rendered == "profile=Concise, concrete, technical.; hint=Use short examples."
+    assert metadata["template_mode"] == "simple"
+    assert metadata["missing_variables"] == []
+    assert metadata["used_record_ids"] == ["rec-profile-1"]
+
+
+def test_render_prompt_plan_structured_prompt_can_read_stored_representation_fields() -> None:
+    from memprimitive.baselines import RecencyRetrieval
+    from memprimitive.utils._template import render_prompt_plan, structured_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile", indices=("temporal",))])
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-profile-1",
+            unit_id="unit-profile-1",
+            layer="profile",
+            text="Alice prefers concise technical explanations.",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={
+                "representation": {
+                    "user_profile": "Concise, concrete, technical.",
+                    "response_hint": "Use short examples.",
+                }
+            },
+        )
+    )
+
+    packet, _ = RecencyRetrieval(top_k=1, layer="profile").run(Packet(query=Query(text="Alice profile")), store)
+    rendered, metadata, _ = render_prompt_plan(
+        structured_prompt(
+            {
+                "blocks": [
+                    {"id": "profile", "title": "Profile", "template": "{{ retrieved.items.0.representation.user_profile }}"},
+                    {"id": "hint", "title": "Hint", "template": "{{ retrieved.items.0.representation.response_hint }}"},
+                ]
+            }
+        ),
+        packet=packet,
+        store=store,
+        runtime_now_factory=lambda: "2026-04-04T00:00:00+00:00",
+    )
+
+    assert "Profile\nConcise, concrete, technical." in rendered
+    assert "Hint\nUse short examples." in rendered
+    assert metadata["template_mode"] == "structured"
+    assert metadata["missing_variables"] == []
+    assert metadata["used_record_ids"] == ["rec-profile-1"]
+
+
+def test_template_readout_text_prompt_can_fill_recalled_prompt_via_lightweight_retrieve_pipeline() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import RecencyRetrieval, TemplateReadout
+    from memprimitive.utils._template import text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile", indices=("temporal",))])
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-profile-1",
+            unit_id="unit-profile-1",
+            layer="profile",
+            text="Alice profile memory",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"user_profile": "Concise, concrete, technical."}},
+        )
+    )
+
+    retrieve_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=TemplateReadout(
+            prompt=text_prompt("{{ retrieved.items.0.representation.user_profile }}")
+        ),
+        store=store,
+    )
+
+    packet_out, _ = TemplateReadout(
+        prompt=text_prompt(
+            "Injected={{ recalled_prompt }}",
+            recall_plan=text_prompt("{{ retrieved.items.0.representation.user_profile }}", metadata_mode="readout"),
+            recall_query_builder=lambda packet, current_store, context: "recall Alice profile",
+            sub_recall_pipeline=retrieve_pipeline,
+        )
+    ).run(Packet(query=Query(text="How should we reply to Alice?"), retrieved=RetrievedSet()), store)
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Injected=Concise, concrete, technical."
+    assert packet_out.readout.metadata["recalled_prompt"] == "Concise, concrete, technical."
+    assert packet_out.readout.metadata["recall_prompt"]["matched"] is True
+    assert packet_out.readout.metadata["recall_prompt"]["readout_source_ids"] == ["rec-profile-1"]
+
+
+def test_template_readout_structured_prompt_can_fill_recalled_prompt_via_lightweight_retrieve_pipeline() -> None:
+    from memprimitive import MemoryPipeline
+    from memprimitive.baselines import RecencyRetrieval, TemplateReadout
+    from memprimitive.utils._template import structured_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile", indices=("temporal",))])
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-profile-1",
+            unit_id="unit-profile-1",
+            layer="profile",
+            text="Alice profile memory",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"user_profile": "Concise, concrete, technical."}},
+        )
+    )
+
+    retrieve_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=TemplateReadout(
+            prompt=structured_prompt(
+                {
+                    "blocks": [
+                        {"id": "profile", "title": "Profile", "template": "{{ retrieved.items.0.representation.user_profile }}"},
+                    ]
+                }
+            )
+        ),
+        store=store,
+    )
+
+    packet_out, _ = TemplateReadout(
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {"id": "recalled", "title": "Recalled", "template": "{{ recalled_prompt }}"},
+                ]
+            },
+            recall_plan=structured_prompt(
+                {
+                    "blocks": [
+                        {"id": "profile", "title": "Profile", "template": "{{ retrieved.items.0.representation.user_profile }}"},
+                    ]
+                },
+                metadata_mode="readout",
+            ),
+            recall_query_builder=lambda packet, current_store, context: "recall Alice profile",
+            sub_recall_pipeline=retrieve_pipeline,
+        )
+    ).run(Packet(query=Query(text="How should we reply to Alice?"), retrieved=RetrievedSet()), store)
+
+    assert packet_out.readout is not None
+    assert "Recalled\nProfile\nConcise, concrete, technical." in packet_out.readout.text
+    assert packet_out.readout.metadata["recalled_prompt"] == "Profile\nConcise, concrete, technical."
+    assert packet_out.readout.metadata["recall_prompt"]["matched"] is True
+    assert packet_out.readout.metadata["recall_prompt"]["readout_source_ids"] == ["rec-profile-1"]
+
+
 def test_llm_representation_rejects_removed_recall_kwargs() -> None:
     from memprimitive.baselines import LLMRepresentation
 
