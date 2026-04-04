@@ -1229,12 +1229,14 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
             "group_by": list(self.group_by),
+            "prompt_is_template": bool(self.prompt and "{{" in self.prompt and "}}" in self.prompt),
             "selected_record_count": len(selected_records),
             "group_count": len(grouped),
             "active_group_keys": [effect["group_key"] for effect in effects],
             "effects": effects,
             "write_mode": "memory_pipeline_ingest",
             "writer_pipeline_mode": writer_pipeline_mode,
+            "prompt_trace": [effect["prompt_trace"] for effect in effects if effect.get("prompt_trace") is not None],
         }
         return replace(packet, trace=trace), store
 

@@ -1,17 +1,15 @@
 """Explicit slot dispatchers that fan out one packet snapshot to multiple modules."""
-
 from __future__ import annotations
 
+from memprimitive.interfaces import PrimitiveModule
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any
 
 from .contracts import normalize_contracts
 from .core import MemoryStore, ModuleSpec, Packet
 from .interfaces import (
     MemoryEvolutionModule,
     OrganizationModule,
-    PrimitiveModule,
     ReadoutModule,
     RepresentationModule,
     RetrievalModule,
@@ -39,7 +37,7 @@ class _DispatchMixin:
         primary_index: int = 0,
         name: str | None = None,
     ) -> None:
-        materialized = tuple(modules)
+        materialized = tuple[PrimitiveModule, ...](modules)
         if not materialized:
             raise ValueError(f"{type(self).__name__} requires at least one child module.")
         if primary_index < 0 or primary_index >= len(materialized):

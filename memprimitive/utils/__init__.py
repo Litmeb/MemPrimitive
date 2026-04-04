@@ -24,6 +24,10 @@ _template_readout
     Template readout helpers: safe render-context projection, lightweight
     template parsing, filter application, and structured block rendering.
 
+_template
+    Shared simple-template helpers for prompt rendering and stable lightweight
+    projections of packet/query/unit/record data.
+
 _trace
     Lightweight packet-trace copy utility.
 
