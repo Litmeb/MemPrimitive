@@ -6,12 +6,6 @@ from typing import Any
 
 from ..core import MemoryRecord, MemoryStore, Observation, Packet, Placement
 from ..pipeline import MemoryPipeline
-from ._template import (
-    looks_like_template,
-    metadata_from_resolution_state,
-    project_record_for_template,
-    render_prompt_template,
-)
 
 _PSEUDO_FIELDS = frozenset({"record_id", "unit_id", "layer", "text", "timestamp"})
 _VALID_EXTRACT_MODES = frozenset({"copy", "generate"})
@@ -192,21 +186,13 @@ def generate_payload(
     extract_fields: tuple[str, ...],
     group_key: dict[str, Any],
     prompt: str | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> dict[str, Any]:
     from ._runtime import get_runtime
 
     runtime = get_runtime()
     runtime.require_llm(capability="Hierarchical generate-mode abstraction")
-    system_prompt, prompt_trace = build_generation_system_prompt(
-        source_layer=source_layer,
-        target_layer=target_layer,
-        extract_fields=extract_fields,
-        group_key=group_key,
-        records=records,
-        prompt=prompt,
-    )
     result = runtime.json(
-        system=system_prompt,
+        system=_generation_system_prompt(extract_fields, prompt=prompt),
         user=json.dumps(
             {
                 "source_layer": source_layer,
@@ -220,57 +206,18 @@ def generate_payload(
     )
     if not isinstance(result, dict):
         raise ValueError("Hierarchical generate-mode must return a JSON object.")
-    return {
-        field: result.get(field) for field in extract_fields
-    }, prompt_trace
+    return {field: result.get(field) for field in extract_fields}
 
 
-def build_generation_system_prompt(
-    *,
-    source_layer: str,
-    target_layer: str,
-    extract_fields: tuple[str, ...],
-    group_key: dict[str, Any],
-    records: list[MemoryRecord],
-    prompt: str | None,
-) -> tuple[str, dict[str, Any]]:
-    if prompt is not None and looks_like_template(prompt):
-        context = {
-            "source_layer": source_layer,
-            "target_layer": target_layer,
-            "extract_fields": list(extract_fields),
-            "group_key": dict(group_key),
-            "records": [project_record_for_template(record) for record in records],
-            "record_count": len(records),
-        }
-        rendered_prompt, state = render_prompt_template(prompt, context)
-        metadata = metadata_from_resolution_state(state=state)
-        metadata.update(
-            {
-                "prompt_is_template": True,
-                "rendered_prompt": rendered_prompt,
-                "rendered_prompt_preview": rendered_prompt[:200],
-            }
-        )
-        return rendered_prompt, metadata
+def _generation_system_prompt(extract_fields: tuple[str, ...], *, prompt: str | None) -> str:
     if prompt is not None:
-        return str(prompt), {
-            "prompt_is_template": False,
-            "rendered_prompt": str(prompt),
-            "rendered_prompt_preview": str(prompt)[:200],
-            "missing_variables": [],
-        }
+        return str(prompt)
     fields_text = ", ".join(extract_fields)
     return (
         "You aggregate selected source memory records into a higher-level hierarchical memory record. "
         f"Return strict JSON with exactly these top-level keys: {fields_text}. "
         "Each field should summarize shared or higher-level information across the provided records."
-    ), {
-        "prompt_is_template": False,
-        "rendered_prompt": "",
-        "rendered_prompt_preview": "",
-        "missing_variables": [],
-    }
+    )
 
 
 def serialize_source_record(record: MemoryRecord) -> dict[str, Any]:
@@ -398,9 +345,8 @@ def append_hierarchical_records(
         group_key = dict(group["group_key"])
         if extract_mode == "copy":
             field_payload = aggregate_copy_payload(records, extract_fields=extract_fields)
-            prompt_trace = None
         else:
-            field_payload, prompt_trace = generate_payload(
+            field_payload = generate_payload(
                 records,
                 source_layer=source_layer,
                 target_layer=effective_target_layer,
@@ -429,7 +375,6 @@ def append_hierarchical_records(
                 "group_key": group_key,
                 "source_record_ids": [source.record_id for source in records],
                 "sub_ingest_trace": summarize_sub_ingest_trace(child_packet),
-                "prompt_trace": prompt_trace,
             }
         )
     return effects, writer_pipeline_mode
