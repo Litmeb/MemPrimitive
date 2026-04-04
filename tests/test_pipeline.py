@@ -50,9 +50,42 @@ from memprimitive.baselines import (
 from memprimitive.baselines.registry import (
     instantiate_default_baseline_modules,
 )
-from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet, StoreLayerSpec, StoreTopology
-from memprimitive.interfaces import RetrievalModule
-from memprimitive.pipeline import MemoryPipeline
+from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Packet, Readout, RetrievedSet, StoreLayerSpec, StoreTopology
+from memprimitive.interfaces import PrimitiveModule, RetrievalModule
+from memprimitive.pipeline import FreeMemoryPipeline, MemoryPipeline
+
+
+class _FreePipelineProbeModule(PrimitiveModule):
+    def __init__(
+        self,
+        *,
+        name: str,
+        slot: str,
+        record_text: str | None = None,
+        produce_retrieved: bool = False,
+        produce_readout: bool = False,
+    ) -> None:
+        self.spec = ModuleSpec(name=name, slot=slot)
+        self.record_text = record_text
+        self.produce_retrieved = produce_retrieved
+        self.produce_readout = produce_readout
+
+    def run(self, packet: Packet, store: MemoryStore):
+        store.metadata.setdefault("free_pipeline_log", []).append(self.spec.name)
+        if self.record_text is not None:
+            unit = MemoryUnit(text=self.record_text, metadata={"module": self.spec.name})
+            record = MemoryRecord.from_unit(unit, layer="default", sequence_id=store.next_sequence_id())
+            store.append(record)
+        if self.produce_retrieved:
+            packet.retrieved = packet.retrieved or RetrievedSet()
+            packet.retrieved.items = store.iter_records()
+        if self.produce_readout:
+            packet.readout = Readout(
+                text=" | ".join(record.text for record in packet.retrieved.items),
+                source_ids=[record.record_id for record in packet.retrieved.items],
+                metadata={"free_pipeline_log": list(store.metadata.get("free_pipeline_log", []))},
+            )
+        return packet, store
 
 
 def test_ingesting_observations_then_recalling_query_produces_non_empty_readout() -> None:
@@ -103,6 +136,120 @@ def test_round_trip_demo_scenario_works_with_baseline_pipeline() -> None:
     assert "Alice" in readout.text
     assert readout.metadata["item_count"] >= 1
     assert "ingest_trace" in readout.metadata
+
+
+def test_free_memory_pipeline_ingest_runs_only_modules_before_first_retrieval() -> None:
+    pipeline = FreeMemoryPipeline(
+        modules=(
+            _FreePipelineProbeModule(name="write-a", slot="representation", record_text="alpha"),
+            _FreePipelineProbeModule(name="write-b", slot="organization", record_text="beta"),
+            _FreePipelineProbeModule(name="retrieve-1", slot="retrieval", produce_retrieved=True),
+            _FreePipelineProbeModule(name="readout-1", slot="readout", produce_readout=True),
+        )
+    )
+
+    packet = pipeline.ingest(Observation(text="ignored input", source="notes"))
+
+    assert packet.observation is not None
+    assert packet.query is None
+    assert pipeline.store.count() == 2
+    assert pipeline.store.metadata["free_pipeline_log"] == ["write-a", "write-b"]
+
+
+def test_free_memory_pipeline_recall_starts_at_first_retrieval_and_runs_remaining_modules_in_order() -> None:
+    pipeline = FreeMemoryPipeline(
+        modules=(
+            _FreePipelineProbeModule(name="write-a", slot="representation", record_text="alpha"),
+            _FreePipelineProbeModule(name="write-b", slot="organization", record_text="beta"),
+            _FreePipelineProbeModule(name="retrieve-1", slot="retrieval", produce_retrieved=True),
+            _FreePipelineProbeModule(name="retrieve-2", slot="retrieval", produce_retrieved=True),
+            _FreePipelineProbeModule(name="readout-1", slot="readout", produce_readout=True),
+        )
+    )
+
+    pipeline.ingest(Observation(text="ignored input", source="notes"))
+    readout = pipeline.recall(Query(text="find stored notes"))
+
+    assert readout.text == "alpha | beta"
+    assert readout.metadata["free_pipeline_log"] == [
+        "write-a",
+        "write-b",
+        "retrieve-1",
+        "retrieve-2",
+        "readout-1",
+    ]
+    assert readout.source_ids == ["rec-1", "rec-2"]
+
+
+def test_free_memory_pipeline_recall_does_not_run_modules_before_first_retrieval() -> None:
+    pipeline = FreeMemoryPipeline(
+        modules=(
+            _FreePipelineProbeModule(name="write-a", slot="representation", record_text="alpha"),
+            _FreePipelineProbeModule(name="write-b", slot="organization", record_text="beta"),
+            _FreePipelineProbeModule(name="retrieve-1", slot="retrieval", produce_retrieved=True),
+            _FreePipelineProbeModule(name="readout-1", slot="readout", produce_readout=True),
+        )
+    )
+
+    readout = pipeline.recall(Query(text="find stored notes"))
+
+    assert readout.text == ""
+    assert pipeline.store.count() == 0
+    assert pipeline.store.metadata["free_pipeline_log"] == ["retrieve-1", "readout-1"]
+
+
+def test_free_memory_pipeline_run_round_preserves_ingest_trace_metadata() -> None:
+    pipeline = FreeMemoryPipeline(
+        modules=(
+            _FreePipelineProbeModule(name="write-a", slot="representation", record_text="alpha"),
+            _FreePipelineProbeModule(name="retrieve-1", slot="retrieval", produce_retrieved=True),
+            _FreePipelineProbeModule(name="readout-1", slot="readout", produce_readout=True),
+        )
+    )
+
+    readout = pipeline.run_round(
+        Observation(text="ignored input", source="notes"),
+        Query(text="find stored notes"),
+    )
+
+    assert readout.text == "alpha"
+    assert readout.metadata["ingest_trace"]["ingest_started"] is True
+
+
+def test_free_memory_pipeline_skips_store_contract_registration_and_validate_store_hooks() -> None:
+    class ValidateStoreProbe(_FreePipelineProbeModule):
+        def validate_store(self, store: MemoryStore) -> None:
+            store.metadata["validate_store_called"] = True
+
+    store = MemoryStore()
+    pipeline = FreeMemoryPipeline(
+        modules=(
+            ValidateStoreProbe(name="write-a", slot="representation", record_text="alpha"),
+            _FreePipelineProbeModule(name="retrieve-1", slot="retrieval", produce_retrieved=True),
+            _FreePipelineProbeModule(name="readout-1", slot="readout", produce_readout=True),
+        ),
+        store=store,
+    )
+
+    pipeline.ingest(Observation(text="ignored input", source="notes"))
+
+    assert store.metadata.get("validate_store_called") is None
+    assert store.registered_compositions == ()
+
+
+def test_free_memory_pipeline_rejects_empty_module_iterable() -> None:
+    with pytest.raises(ValueError, match="must contain at least one module"):
+        FreeMemoryPipeline(modules=())
+
+
+def test_free_memory_pipeline_requires_a_retrieval_boundary() -> None:
+    with pytest.raises(ValueError, match="spec.slot='retrieval'"):
+        FreeMemoryPipeline(
+            modules=(
+                _FreePipelineProbeModule(name="write-a", slot="representation", record_text="alpha"),
+                _FreePipelineProbeModule(name="write-b", slot="organization", record_text="beta"),
+            )
+        )
 
 
 def test_memory_pipeline_rejects_wrong_abstract_type_at_slot() -> None:

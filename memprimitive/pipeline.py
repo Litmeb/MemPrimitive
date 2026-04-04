@@ -74,6 +74,17 @@ def _iter_leaf_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
     return tuple(leaves)
 
 
+def _module_slot(module: object) -> str | None:
+    return getattr(getattr(module, "spec", None), "slot", None)
+
+
+def _first_retrieval_index(modules: tuple[object, ...]) -> int:
+    for index, module in enumerate(modules):
+        if _module_slot(module) == "retrieval":
+            return index
+    raise ValueError("FreeMemoryPipeline requires at least one module with spec.slot='retrieval'.")
+
+
 class MemoryPipeline:
     """Coordinates the baseline memory pipeline using Packet-based IO.
 
@@ -176,6 +187,54 @@ class MemoryPipeline:
         for module in _iter_slot_modules(self.retrieval):
             packet, self.store = module.run(packet, self.store)
         for module in _iter_slot_modules(self.readout):
+            packet, self.store = module.run(packet, self.store)
+        if packet.readout is None:
+            raise RuntimeError("Readout module returned no readout.")
+        return packet.readout
+
+    def run_round(self, observation: Observation, query: Query) -> Readout:
+        ingest_packet = self.ingest(observation)
+        readout = self.recall(query)
+        return replace(
+            readout,
+            metadata={
+                **readout.metadata,
+                "ingest_trace": ingest_packet.trace,
+            },
+        )
+
+
+class FreeMemoryPipeline:
+    """Unchecked ordered pipeline split by the first retrieval module.
+
+    Unlike :class:`MemoryPipeline`, this runner does not validate abstract
+    types, slot ordering, store contracts, or nested child modules. It simply
+    runs an ordered module list as-is, treating the first module whose
+    ``spec.slot`` is ``"retrieval"`` as the start of the recall half.
+    """
+
+    def __init__(
+        self,
+        *,
+        modules: Iterable[PrimitiveModule],
+        store: MemoryStore | None = None,
+    ) -> None:
+        materialized = tuple(modules)
+        if not materialized:
+            raise ValueError("FreeMemoryPipeline.modules must contain at least one module.")
+        self.modules = materialized
+        self._retrieve_start_index = _first_retrieval_index(self.modules)
+        self.store = store if store is not None else MemoryStore()
+
+    def ingest(self, observation: Observation) -> Packet:
+        packet = Packet(observation=observation, trace={"ingest_started": True})
+        for module in self.modules[: self._retrieve_start_index]:
+            packet, self.store = module.run(packet, self.store)
+        return packet
+
+    def recall(self, query: Query) -> Readout:
+        packet = Packet(query=query, trace={"recall_started": True})
+        for module in self.modules[self._retrieve_start_index :]:
             packet, self.store = module.run(packet, self.store)
         if packet.readout is None:
             raise RuntimeError("Readout module returned no readout.")

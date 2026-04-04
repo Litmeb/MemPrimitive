@@ -270,6 +270,7 @@ memory primitive 之间并非完全自由组合。
 当前实现处于一次约束机制重构过渡期：
 
 - `MemoryPipeline` 仍然会在构造期检查 slot 抽象类型与 `ModuleSpec.slot` 是否对齐
+- 除此之外，runtime 侧现在也额外提供 `FreeMemoryPipeline`：它接受一个有序 module iterable，不做抽象类型、slot 顺序、store contract 或 `validate_store()` 检查，只把第一个 `spec.slot == "retrieval"` 的 module 当作 recall 起点
 - 旧的 baseline 侧 store/topology eager compatibility check 已移除
 - baseline/runtime 侧现已改为以 `MemoryStore.check()` 为中心的组合合法性检验：`MemoryPipeline` 负责把模块声明的 `requires_contracts` / `produces_contracts` 注册到共享 store，随后由调用方在需要时显式执行 `store.check()`
 
