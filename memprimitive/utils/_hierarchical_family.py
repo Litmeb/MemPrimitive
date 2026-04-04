@@ -7,9 +7,10 @@ from typing import Any
 from ..core import MemoryRecord, MemoryStore, Observation, Packet, Placement
 from ..pipeline import MemoryPipeline
 from ._template import (
-    looks_like_template,
+    PromptPlan,
+    ensure_prompt_plan,
     project_record_for_template,
-    render_prompt_template_with_recall,
+    render_prompt_plan,
 )
 
 _PSEUDO_FIELDS = frozenset({"record_id", "unit_id", "layer", "text", "timestamp"})
@@ -24,7 +25,7 @@ def validate_hierarchical_config(
     extract_mode: str,
     extract_fields: tuple[str, ...],
     group_by: tuple[str, ...],
-    prompt: str | None,
+    prompt: PromptPlan | str | None,
 ) -> dict[str, Any]:
     normalized_source = str(source_layer).strip()
     normalized_target = None if target_layer is None else str(target_layer).strip()
@@ -191,9 +192,7 @@ def generate_payload(
     target_layer: str,
     extract_fields: tuple[str, ...],
     group_key: dict[str, Any],
-    prompt: str | None,
-    retrieve_pipeline=None,
-    recall_query_template: str | None = None,
+    prompt: PromptPlan | str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from ._runtime import get_runtime
 
@@ -207,8 +206,6 @@ def generate_payload(
         group_key=group_key,
         records=records,
         prompt=prompt,
-        retrieve_pipeline=retrieve_pipeline,
-        recall_query_template=recall_query_template,
     )
     result = runtime.json(
         system=system_prompt,
@@ -238,61 +235,30 @@ def build_generation_system_prompt(
     extract_fields: tuple[str, ...],
     group_key: dict[str, Any],
     records: list[MemoryRecord],
-    prompt: str | None,
-    retrieve_pipeline=None,
-    recall_query_template: str | None = None,
+    prompt: PromptPlan | str | None,
 ) -> tuple[str, dict[str, Any]]:
-    if prompt is not None and looks_like_template(prompt):
-        context = {
-            "source_layer": source_layer,
-            "target_layer": target_layer,
-            "extract_fields": list(extract_fields),
-            "group_key": dict(group_key),
-            "records": [project_record_for_template(record) for record in records],
-            "record_count": len(records),
-        }
-        rendered_prompt, metadata, _ = render_prompt_template_with_recall(
-            prompt,
-            context,
-            store=store,
-            retrieve_pipeline=retrieve_pipeline,
-            recall_query_template=recall_query_template,
-        )
-        return rendered_prompt, metadata
     if prompt is not None:
-        return str(prompt), {
-            "prompt_is_template": False,
-            "rendered_prompt": str(prompt),
-            "rendered_prompt_preview": str(prompt)[:200],
-            "missing_variables": [],
-            "recalled_prompt": "",
-            "recalled_prompt_preview": "",
-            "recall_prompt": {
-                "enabled": False,
-                "disabled_reason": "prompt_not_template",
-                "rendered_recall_query": "",
-                "rendered_recall_query_preview": "",
-                "recall_query_template": recall_query_template,
-                "recall_query_template_is_template": bool(
-                    recall_query_template and looks_like_template(recall_query_template)
-                ),
-                "matched": False,
-                "recalled_prompt": "",
-                "recalled_prompt_preview": "",
-                "missing_variables": [],
-                "resolved_variables": [],
-                "used_record_ids": [],
-                "used_group_ids": [],
-                "filter_trace": [],
+        plan = ensure_prompt_plan(
+            prompt,
+            metadata_mode="prompt",
+            context_builder=lambda packet, current_store: {
+                "source_layer": source_layer,
+                "target_layer": target_layer,
+                "extract_fields": list(extract_fields),
+                "group_key": dict(group_key),
+                "records": [project_record_for_template(record) for record in records],
+                "record_count": len(records),
             },
-        }
+        )
+        return render_prompt_plan(plan, packet=Packet(trace={}), store=store)[:2]
     fields_text = ", ".join(extract_fields)
     return (
         "You aggregate selected source memory records into a higher-level hierarchical memory record. "
         f"Return strict JSON with exactly these top-level keys: {fields_text}. "
         "Each field should summarize shared or higher-level information across the provided records."
     ), {
-        "prompt_is_template": False,
+        "template_mode": "simple",
+        "prompt_is_template": True,
         "rendered_prompt": "",
         "rendered_prompt_preview": "",
         "missing_variables": [],
@@ -303,8 +269,6 @@ def build_generation_system_prompt(
             "disabled_reason": "default_prompt",
             "rendered_recall_query": "",
             "rendered_recall_query_preview": "",
-            "recall_query_template": recall_query_template,
-            "recall_query_template_is_template": bool(recall_query_template and looks_like_template(recall_query_template)),
             "matched": False,
             "recalled_prompt": "",
             "recalled_prompt_preview": "",
@@ -429,9 +393,7 @@ def append_hierarchical_records(
     extract_fields: tuple[str, ...],
     group_by: tuple[str, ...],
     grouped_records: list[dict[str, Any]],
-    prompt: str | None,
-    retrieve_pipeline=None,
-    recall_query_template: str | None = None,
+    prompt: PromptPlan | str | None,
 ) -> tuple[list[dict[str, Any]], str]:
     child_pipeline, writer_pipeline_mode = resolve_writer_pipeline(
         target_layer=target_layer,
@@ -454,8 +416,6 @@ def append_hierarchical_records(
                 extract_fields=extract_fields,
                 group_key=group_key,
                 prompt=prompt,
-                retrieve_pipeline=retrieve_pipeline,
-                recall_query_template=recall_query_template,
             )
         observation = build_hierarchical_observation(
             source_layer=source_layer,

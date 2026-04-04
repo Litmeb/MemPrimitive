@@ -30,6 +30,7 @@ from memprimitive.baselines import (
 )
 from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, Observation, Query
 from memprimitive.pipeline import MemoryPipeline
+from memprimitive.utils._template import build_simple_prompt_plan
 
 
 def _seed_profile_memory(store: MemoryStore, text: str) -> None:
@@ -51,13 +52,16 @@ def build_pipeline() -> MemoryPipeline:
         unit_formation=PassThroughUnitFormation(),
         representation=LLMRepresentation(
             field="summary",
-            prompt=(
-                "Summarize the incoming memory for later retrieval.\n"
-                "Previously recalled context:\n{{ recalled_prompt }}\n\n"
-                "Current memory:\n{{ unit.text }}"
+            prompt=build_simple_prompt_plan(
+                (
+                    "Summarize the incoming memory for later retrieval.\n"
+                    "Previously recalled context:\n{{ recalled_prompt }}\n\n"
+                    "Current memory:\n{{ unit.text }}"
+                ),
+                recall_plan=build_simple_prompt_plan("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+                recall_query_builder=lambda packet, current_store, context: f"profile context for {context['unit']['text']}",
+                sub_recall_pipeline=retrieve_pipeline,
             ),
-            retrieve_pipeline=retrieve_pipeline,
-            recall_query_template="profile context for {{ unit.text }}",
         ),
         organization=AppendOrganization(target_layer="default"),
         store=MemoryStore(),
