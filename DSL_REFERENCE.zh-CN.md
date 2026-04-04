@@ -28,6 +28,12 @@ unit_formation
 - 本文档中的“构造参数”只列常用公开参数；更细节的内部 helper 不在这里展开。
 - 同一个 trigger 类通过 `slot="write_trigger"` 或 `slot="evolution_trigger"` 绑定到不同 slot。
 - 模板相关模块统一接受 `PromptPlan | str`；`str` 会被当作简单文本模板处理。
+- retrieval 的 query 输入当前有两个公开入口：
+  - `packet.query: Query | None`
+  - `packet.queries: list[Query] | None`
+- retrieval 的 query 解析优先级是：
+  - 若 `packet.queries` 非空，则使用 `packet.queries`
+  - 否则回退到 `packet.query`
 - tool-call 写路径当前公开入口是：
   - `LLMFunctionCallOrganization`
   - `LLMFunctionCallEvolution`
@@ -137,6 +143,22 @@ unit_formation
 
 从 store 取回和 query 相关的记录。
 
+说明：
+
+- 对“以 query 驱动”的 retrieval module，如果 `packet.queries` 非空，则默认按 query 顺序逐个执行检索，再合并回一个扁平的 `packet.retrieved`。
+- `QueryRewriteRetrieval` 是一个 retrieval wrapper：它先把 `packet.query` 改写成一个或多个 query，再把改写后的 `packet.query` / `packet.queries` 交给内部 retriever。
+- 默认合并策略是 `query_order_dedupe`：
+  - 先保留每个 query 自己的原始排序语义
+  - 合并时按 query 顺序拼接
+  - 以 `record_id` 去重；同一 record 被多个 query 命中时保留第一次出现的那一份
+- 合并后的 `packet.retrieved.trace` 会额外包含：
+  - `query_count`
+  - `query_ids`
+  - `merge_strategy`
+  - `per_query`
+  - `final_returned_count`
+- `DispatchRetrieval` 仍然只表示“多 retrieval module 分发”；它不会额外改变上述多 query 默认语义。
+
 | Module | 构造参数 | 效果 |
 | --- | --- | --- |
 | `RecencyRetrieval` (`recency_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按时间新近性检索。 |
@@ -151,6 +173,7 @@ unit_formation
 | `VectorGraphSeedAndExpandRetrieval` (`vector_graph_seed_and_expand_retrieval`) | `top_k=3`, `layer="knowledge_graph"`, `candidate_k=5`, `neighbor_expansion_k=3`, `note_namespace="note"`, `default_category="Uncategorized"`, `agentic_search=False`, `query_expand_with_llm=False`, `prompt=None` | 先做向量 seed，再结合图邻居扩展；可选 LLM query expansion。 |
 | `LayerAwareRetrieval` (`layer_aware_retrieval`) | `default_retriever=None`, `retriever_by_layer=None`, `active_layers=None`, `top_k=3`, `top_k_by_layer=None`, `merge_weight_by_layer=None`, `merge_strategy="global_rank"` | 分层调用不同 retriever，再合并结果。 |
 | `BufferRetrieval` (`buffer_retrieval`) | `top_k=3`, `layer="reflections"`, `chronological=True` | 读取某个 layer 的有界 recency window。 |
+| `QueryRewriteRetrieval` (`query_rewrite_retrieval`) | `retriever`, `strategy="llm"`, `prompt=None`, `allow_multi_query=False`, `regex_rules=None`, `include_original=False`, `max_queries=None`, `strip_queries=True`, `drop_empty_queries=True` | 先做 query rewrite，再委托内部 retriever 执行。`strategy="llm"` 时要求 `prompt`，返回严格 JSON 的单 query 或多 query；`strategy="regex"` 时按顺序应用 `regex_rules`，当前只产出单 query。 |
 
 ## `readout`
 

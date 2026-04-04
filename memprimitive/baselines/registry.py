@@ -26,6 +26,14 @@ BaselineFactory = Callable[[], PrimitiveModule]
 def _default_factory_for_class(cls: type[PrimitiveModule], slot: str, *, top_k: int) -> BaselineFactory:
     """Instantiate a registered class; slot-specific kwargs live here (not per-class lists)."""
     if slot == "retrieval":
+        if cls.__name__ == "QueryRewriteRetrieval":
+            from .retrieval import RecencyRetrieval
+
+            return lambda c=cls, k=top_k: c(
+                retriever=RecencyRetrieval(top_k=k),
+                strategy="regex",
+                regex_rules=[{"pattern": "(?s)^", "repl": ""}],
+            )
         return lambda c=cls, k=top_k: c(top_k=k)
     if slot == "readout" and cls.__name__ == "TemplateReadout":
         return lambda c=cls: c(prompt="{{ retrieved.items | join_text }}")
