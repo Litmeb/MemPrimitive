@@ -513,7 +513,6 @@ class HierarchicalOrganization(OrganizationModule):
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
             "group_by": list(self.group_by),
-            "prompt_is_template": bool(self.prompt and "{{" in self.prompt and "}}" in self.prompt),
             "selection_source": selection_source,
             "selected_record_count": len(selected_records),
             "group_count": len(grouped),
@@ -522,7 +521,6 @@ class HierarchicalOrganization(OrganizationModule):
             "write_mode": "memory_pipeline_ingest",
             "writer_pipeline_mode": writer_pipeline_mode,
             "sub_ingest_trace": [effect["sub_ingest_trace"] for effect in effects],
-            "prompt_trace": [effect["prompt_trace"] for effect in effects if effect.get("prompt_trace") is not None],
         }
         return replace(packet, placements=placements, trace=trace), store
 

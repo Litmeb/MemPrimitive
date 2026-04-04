@@ -62,8 +62,7 @@ def main() -> None:
             LLMRepresentation(
                 field="user_profile",
                 prompt=(
-                    "Extract a compact {{ field }} note from this {{ unit.unit_type | default('memory') }} unit. "
-                    "Source text: {{ unit.text }}\n"
+                    "Extract a compact user-profile note from this memory unit. "
                     "Focus on stable preferences, working style, and enduring interests. "
                     "Return one short paragraph."
                 ),

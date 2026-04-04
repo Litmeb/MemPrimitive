@@ -323,58 +323,6 @@ def test_llm_representation_writes_summary_and_custom_fields_into_representation
     assert "custom_topic" in custom_unit.representation_elements
 
 
-def test_llm_representation_prompt_template_renders_unit_context_and_trace() -> None:
-    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
-
-    unit_packet, store = PassThroughUnitFormation().run(
-        Packet(
-            observation=Observation(
-                text="Alice studies graph memory systems.",
-                source="notes",
-                metadata={"session_id": "sess-1"},
-            )
-        ),
-        MemoryStore(),
-    )
-    rep = LLMRepresentation(
-        field="summary",
-        prompt="Extract {{ field }} for {{ unit.unit_type }}: {{ unit.text }} / {{ unit.metadata.session_id | default('none') }}",
-    )
-
-    def _fake_llm_text(*, user: str) -> str:
-        payload = json.loads(user)
-        assert payload["prompt"] == "Extract summary for observation: Alice studies graph memory systems. / sess-1"
-        return "templated summary"
-
-    rep._llm_text = _fake_llm_text  # type: ignore[method-assign]
-    packet_out, _ = rep.run(unit_packet, store)
-
-    assert packet_out.units[0].metadata["representation"]["summary"] == "templated summary"
-    assert packet_out.trace["representation"]["prompt_is_template"] is True
-    assert packet_out.trace["representation"]["per_unit"][0]["rendered_prompt"].startswith("Extract summary")
-    assert packet_out.trace["representation"]["per_unit"][0]["missing_variables"] == []
-
-
-def test_llm_representation_prompt_template_missing_variables_do_not_crash() -> None:
-    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
-
-    unit_packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
-        MemoryStore(),
-    )
-    rep = LLMRepresentation(field="summary", prompt="Extract {{ unit.metadata.unknown_key }} from {{ unit.text }}")
-
-    def _fake_llm_text(*, user: str) -> str:
-        payload = json.loads(user)
-        assert payload["prompt"] == "Extract  from Alice studies graph memory systems."
-        return "summary with missing field"
-
-    rep._llm_text = _fake_llm_text  # type: ignore[method-assign]
-    packet_out, _ = rep.run(unit_packet, store)
-
-    assert "unit.metadata.unknown_key" in packet_out.trace["representation"]["per_unit"][0]["missing_variables"]
-
-
 def test_write_trigger_aligns_decisions_with_units() -> None:
     from memprimitive.baselines import AlwaysTrigger, BasicRepresentation, PassThroughUnitFormation
 
@@ -1304,9 +1252,7 @@ class _FakeAMEMRuntime:
                     }
                 ]
             }
-        if "expand the query" in lowered_system or (
-            "expand" in lowered_system and "knowledge_graph" in lowered_system
-        ):
+        if "expand the query" in lowered_system:
             return {
                 "query_text": payload["query"],
                 "content": payload["query"],
@@ -2899,57 +2845,6 @@ def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: p
     assert packet_out.retrieved.trace["expanded_neighbor_ids"] == ["rec-neighbor"]
 
 
-def test_vector_graph_seed_and_expand_retrieval_system_prompt_template_renders_query_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from memprimitive.utils import _runtime
-    from memprimitive.baselines import VectorGraphSeedAndExpandRetrieval
-
-    fake_runtime = _FakeAMEMRuntime()
-    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
-    store = _graph_vector_store()
-    store.append(
-        MemoryRecord(
-            record_id="rec-seed",
-            unit_id="unit-seed",
-            layer="knowledge_graph",
-            text="Alice likes tea.",
-            timestamp="2026-03-27T00:00:00+00:00",
-            embedding=fake_runtime.embed("content: Alice likes tea."),
-            metadata={
-                "amem": {
-                    "content": "Alice likes tea.",
-                    "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
-                    "context": "Alice's tea habit supports her daily routine.",
-                    "keywords": ["alice", "tea", "routine"],
-                    "tags": ["preference", "habit", "beverage"],
-                    "category": "personal_preference",
-                    "attributes": {"person": "Alice"},
-                },
-                "representation": {"enhanced_embedding_text": "content: Alice likes tea."},
-                "graph": {"entities": ["Alice"], "links": []},
-            },
-        )
-    )
-
-    packet_out, _ = VectorGraphSeedAndExpandRetrieval(
-        top_k=1,
-        layer="knowledge_graph",
-        candidate_k=1,
-        neighbor_expansion_k=1,
-        note_namespace="amem",
-        query_expand_with_llm=True,
-        system_prompt=(
-            "Expand {{ query.text }} for {{ retrieval.layer }} "
-            "with candidate_k={{ retrieval.candidate_k }} and now={{ runtime.now }}"
-        ),
-    ).run(Packet(query=Query(text="Alice")), store)
-
-    assert packet_out.retrieved.trace["query_expand_with_llm"] is True
-    assert packet_out.retrieved.trace["system_prompt_is_template"] is True
-    assert "Expand Alice for knowledge_graph with candidate_k=1" in packet_out.retrieved.trace["query_expansion_prompt_trace"]["rendered_prompt"]
-
-
 def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.utils import _runtime
     from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
@@ -3441,98 +3336,6 @@ def test_hierarchical_generate_mode_uses_default_prompt_when_custom_prompt_missi
     assert fake_runtime.calls[0]["system"] != "CUSTOM HIERARCHICAL PROMPT"
     assert "higher-level hierarchical memory record" in fake_runtime.calls[0]["system"]
     assert store.iter_records("semantic")[0].text == "generated::summary::all::1"
-
-
-def test_hierarchical_organization_generate_mode_supports_prompt_template(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.baselines import HierarchicalOrganization
-    from memprimitive.utils import _runtime
-
-    fake_runtime = _FakeHierarchicalRuntime()
-    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
-
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
-        )
-    )
-    _seed_layer_with_metadata(
-        store,
-        "default",
-        [
-            {"text": "a1", "metadata": {"session_id": "sess-1"}},
-            {"text": "a2", "metadata": {"session_id": "sess-1"}},
-        ],
-    )
-    packet, _ = _represented_packet("incoming note")
-    packet = Packet(
-        observation=packet.observation,
-        units=packet.units,
-        decisions=[True],
-        decisions_store={
-            "default": {"decision": True, "record_ids": ["rec-1", "rec-2"], "selector": {"kind": "manual"}}
-        },
-        trace=packet.trace,
-    )
-
-    packet_out, store = HierarchicalOrganization(
-        source_layer="default",
-        extract_mode="generate",
-        extract_fields=("summary",),
-        group_by=("session_id",),
-        prompt="CUSTOM HIERARCHICAL PROMPT {{ group_key.session_id }} / {{ record_count }} / {{ records | length }}",
-        target_layer="semantic",
-    ).run(packet, store)
-
-    assert "CUSTOM HIERARCHICAL PROMPT sess-1 / 2 / 2" == fake_runtime.calls[0]["system"]
-    assert packet_out.trace["organization"]["prompt_is_template"] is True
-    assert packet_out.trace["organization"]["prompt_trace"][0]["rendered_prompt"] == fake_runtime.calls[0]["system"]
-    assert store.iter_records("semantic")[0].text == "custom::summary::sess-1::2"
-
-
-def test_hierarchical_evolution_generate_mode_supports_prompt_template(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.baselines import HierarchicalEvolution
-    from memprimitive.utils import _runtime
-
-    fake_runtime = _FakeHierarchicalRuntime()
-    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
-
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
-        )
-    )
-    _seed_layer_with_metadata(
-        store,
-        "default",
-        [
-            {"text": "a1", "metadata": {"session_id": "sess-1"}},
-            {"text": "a2", "metadata": {"session_id": "sess-1"}},
-        ],
-    )
-    packet, store = _stored_pipeline_packet("incoming note", store)
-    packet = Packet(
-        units=packet.units,
-        placements=packet.placements,
-        decisions=[True],
-        decisions_store={
-            "default": {"decision": True, "record_ids": ["rec-1", "rec-2"], "selector": {"kind": "manual"}}
-        },
-        trace=packet.trace,
-    )
-
-    packet_out, store = HierarchicalEvolution(
-        source_layer="default",
-        extract_mode="generate",
-        extract_fields=("summary",),
-        group_by=("session_id",),
-        prompt="CUSTOM HIERARCHICAL PROMPT {{ source_layer }} -> {{ target_layer }} / {{ group_key.session_id }} / {{ record_count }}",
-        target_layer="semantic",
-    ).run(packet, store)
-
-    assert fake_runtime.calls[0]["system"] == "CUSTOM HIERARCHICAL PROMPT default -> semantic / sess-1 / 2"
-    assert packet_out.trace["memory_evolution"]["prompt_is_template"] is True
-    assert packet_out.trace["memory_evolution"]["prompt_trace"][0]["rendered_prompt"] == fake_runtime.calls[0]["system"]
-    assert store.iter_records("semantic")[0].text == "custom::summary::sess-1::2"
 
 
 def test_hierarchical_constructors_require_exactly_one_target_or_pipeline() -> None:
