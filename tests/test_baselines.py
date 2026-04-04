@@ -1772,6 +1772,10 @@ def test_hierarchical_classes_are_registered_in_baseline_exports() -> None:
     }.issubset(exported)
 
 
+def test_query_rewrite_retrieval_is_registered_in_baseline_exports() -> None:
+    assert "QueryRewriteRetrieval" in registered_baseline_class_names()
+
+
 class _FakeAMEMRuntime:
     def require_llm(self, *, capability: str) -> None:
         return None
@@ -2120,6 +2124,175 @@ def test_multi_query_retrieval_prefers_queries_field_over_primary_query() -> Non
     assert packet_out.query.text == "carol"
     assert [record.text for record in packet_out.retrieved.items] == ["alice memory"]
     assert packet_out.retrieved.trace["query_ids"] == [packet_out.queries[0].query_id]
+
+
+def test_query_rewrite_retrieval_llm_single_query_rewrites_before_delegate() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval, QueryRewriteRetrieval
+
+    store = MemoryStore()
+    for text in ("alice memory", "bob memory"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    module = QueryRewriteRetrieval(
+        retriever=KeywordCountRetrieval(top_k=1),
+        strategy="llm",
+        prompt="Rewrite the query for retrieval.",
+    )
+    module._llm_json = lambda *, user: {"query": "alice"}  # type: ignore[method-assign]
+
+    packet_out, _ = module.run(Packet(query=Query(text="who is relevant?")), store)
+
+    assert packet_out.query is not None
+    assert packet_out.query.text == "alice"
+    assert packet_out.query.metadata["rewrite"]["source"] == "llm"
+    assert [record.text for record in packet_out.retrieved.items] == ["alice memory"]
+    assert packet_out.trace["retrieval"]["wrapped_retriever"] == "keyword_count_retrieval"
+    assert packet_out.trace["retrieval"]["query_rewrite"]["returned_query_count"] == 1
+
+
+def test_query_rewrite_retrieval_llm_multi_query_reuses_delegate_merge() -> None:
+    from memprimitive.baselines import KeywordCountRetrieval, QueryRewriteRetrieval
+
+    store = MemoryStore()
+    for text in ("alice memory", "bob memory", "carol memory"):
+        _, store = _stored_pipeline_packet(text, store)
+
+    module = QueryRewriteRetrieval(
+        retriever=KeywordCountRetrieval(top_k=1),
+        strategy="llm",
+        prompt="Produce retrieval sub-queries.",
+        allow_multi_query=True,
+        max_queries=4,
+    )
+    module._llm_json = lambda *, user: {"queries": ["alice", "bob"]}  # type: ignore[method-assign]
+
+    packet_out, _ = module.run(Packet(query=Query(text="find relevant people")), store)
+
+    assert packet_out.query is not None
+    assert packet_out.query.text == "alice"
+    assert packet_out.queries is not None
+    assert [query.text for query in packet_out.queries] == ["alice", "bob"]
+    assert [record.text for record in packet_out.retrieved.items] == ["alice memory", "bob memory"]
+    assert packet_out.trace["retrieval"]["query_count"] == 2
+    assert packet_out.trace["retrieval"]["merge_strategy"] == "query_order_dedupe"
+    assert packet_out.trace["retrieval"]["query_rewrite"]["rewritten_query_texts"] == ["alice", "bob"]
+
+
+def test_query_rewrite_retrieval_llm_normalizes_multi_query_results() -> None:
+    from memprimitive.baselines import RecencyRetrieval, QueryRewriteRetrieval
+
+    module = QueryRewriteRetrieval(
+        retriever=RecencyRetrieval(top_k=1),
+        strategy="llm",
+        prompt="Produce retrieval sub-queries.",
+        allow_multi_query=True,
+        max_queries=2,
+    )
+    module._llm_json = lambda *, user: {"queries": [" alice ", "", "alice", "bob", "carol"]}  # type: ignore[method-assign]
+
+    packet_out, _ = module.run(Packet(query=Query(text="seed")), MemoryStore())
+
+    assert packet_out.queries is not None
+    assert [query.text for query in packet_out.queries] == ["alice", "bob"]
+    rewrite_trace = packet_out.trace["retrieval"]["query_rewrite"]
+    assert rewrite_trace["dropped_empty_count"] == 1
+    assert rewrite_trace["duplicate_count"] == 1
+    assert rewrite_trace["over_limit_count"] == 1
+
+
+def test_query_rewrite_retrieval_llm_single_query_mode_takes_first_multi_query_result() -> None:
+    from memprimitive.baselines import RecencyRetrieval, QueryRewriteRetrieval
+
+    module = QueryRewriteRetrieval(
+        retriever=RecencyRetrieval(top_k=1),
+        strategy="llm",
+        prompt="Rewrite the query.",
+        allow_multi_query=False,
+    )
+    module._llm_json = lambda *, user: {"queries": ["alice", "bob"]}  # type: ignore[method-assign]
+
+    packet_out, _ = module.run(Packet(query=Query(text="seed")), MemoryStore())
+
+    assert packet_out.query is not None
+    assert packet_out.query.text == "alice"
+    assert packet_out.queries is None
+    assert packet_out.trace["retrieval"]["query_rewrite"]["returned_query_count"] == 1
+
+
+def test_query_rewrite_retrieval_regex_applies_rules_in_order() -> None:
+    from memprimitive.baselines import QueryRewriteRetrieval, RecencyRetrieval
+
+    module = QueryRewriteRetrieval(
+        retriever=RecencyRetrieval(top_k=1),
+        strategy="regex",
+        regex_rules=[
+            {"pattern": "teh", "repl": "the"},
+            {"pattern": "\\s+", "repl": " "},
+        ],
+    )
+
+    packet_out, _ = module.run(Packet(query=Query(text="  teh   graph  ")), MemoryStore())
+
+    assert packet_out.query is not None
+    assert packet_out.query.text == "the graph"
+    rewrite_trace = packet_out.trace["retrieval"]["query_rewrite"]
+    assert rewrite_trace["rule_count"] == 2
+    assert rewrite_trace["rewritten_query_text"] == "the graph"
+    assert [rule["changed"] for rule in rewrite_trace["rules"]] == [True, True]
+
+
+def test_query_rewrite_retrieval_regex_supports_flags_and_count() -> None:
+    from memprimitive.baselines import QueryRewriteRetrieval, RecencyRetrieval
+
+    module = QueryRewriteRetrieval(
+        retriever=RecencyRetrieval(top_k=1),
+        strategy="regex",
+        regex_rules=[
+            {"pattern": "ALICE", "repl": "bob", "flags": "IGNORECASE", "count": 1},
+        ],
+    )
+
+    packet_out, _ = module.run(Packet(query=Query(text="ALICE alice ALICE")), MemoryStore())
+
+    assert packet_out.query is not None
+    assert packet_out.query.text == "bob alice ALICE"
+    rule_trace = packet_out.trace["retrieval"]["query_rewrite"]["rules"][0]
+    assert rule_trace["flags"] == ["IGNORECASE"]
+    assert rule_trace["replacement_count"] == 1
+
+
+def test_query_rewrite_retrieval_regex_rejects_empty_result_when_drop_empty_enabled() -> None:
+    from memprimitive.baselines import QueryRewriteRetrieval, RecencyRetrieval
+
+    module = QueryRewriteRetrieval(
+        retriever=RecencyRetrieval(top_k=1),
+        strategy="regex",
+        regex_rules=[{"pattern": ".+", "repl": ""}],
+    )
+
+    with pytest.raises(ValueError, match="no usable rewritten queries"):
+        module.run(Packet(query=Query(text="alice")), MemoryStore())
+
+
+def test_query_rewrite_retrieval_prompt_template_trace_is_preserved() -> None:
+    from memprimitive.baselines import QueryRewriteRetrieval, RecencyRetrieval
+
+    module = QueryRewriteRetrieval(
+        retriever=RecencyRetrieval(top_k=1),
+        strategy="llm",
+        prompt="Rewrite {{ query.text }} with {{ query.metadata.topic | default('none') }}",
+    )
+    module._llm_json = lambda *, user: {"query": "alice"}  # type: ignore[method-assign]
+
+    packet_out, _ = module.run(
+        Packet(query=Query(text="who", metadata={"topic": "graphs"})),
+        MemoryStore(),
+    )
+
+    rewrite_trace = packet_out.trace["retrieval"]["query_rewrite"]
+    assert rewrite_trace["prompt_is_template"] is True
+    assert rewrite_trace["missing_variables"] == []
+    assert rewrite_trace["rendered_prompt"] == "Rewrite who with graphs"
 
 
 def test_retrieval_does_not_mutate_store() -> None:

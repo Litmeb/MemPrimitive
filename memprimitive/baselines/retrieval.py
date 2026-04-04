@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from math import sqrt
+import re
 from typing import Any, ClassVar, Final
 
 from rank_bm25 import BM25Okapi
@@ -21,7 +22,7 @@ from ..contracts import (
     UNIT_TAGS_CONTRACT,
     normalize_contracts,
 )
-from ..core import MemoryStore, ModuleSpec, Packet, RetrievedSet
+from ..core import MemoryStore, ModuleSpec, Packet, Query, RetrievedSet
 from ..interfaces import RetrievalModule
 
 from ..utils._amem_family import (
@@ -112,6 +113,12 @@ def _score_graph_seed(query_text: str, record) -> float:
 
 
 _RETRIEVAL_SOURCES: Final[frozenset[str]] = frozenset({"store", "retrieved"})
+_QUERY_REWRITE_STRATEGIES: Final[frozenset[str]] = frozenset({"llm", "regex"})
+_QUERY_REWRITE_REGEX_FLAGS: Final[dict[str, int]] = {
+    "IGNORECASE": re.IGNORECASE,
+    "MULTILINE": re.MULTILINE,
+    "DOTALL": re.DOTALL,
+}
 
 
 def _normalize_retrieval_source(source: str) -> str:
@@ -119,6 +126,87 @@ def _normalize_retrieval_source(source: str) -> str:
     if normalized not in _RETRIEVAL_SOURCES:
         raise ValueError("retrieval source must be one of: retrieved, store.")
     return normalized
+
+
+def _normalize_query_rewrite_strategy(strategy: str) -> str:
+    normalized = str(strategy).strip().casefold()
+    if normalized not in _QUERY_REWRITE_STRATEGIES:
+        raise ValueError("query rewrite strategy must be one of: llm, regex.")
+    return normalized
+
+
+def _prompt_is_template(plan: PromptPlan) -> bool:
+    return plan.mode == "structured" or (
+        isinstance(plan.template, str)
+        and "{{" in plan.template
+        and "}}" in plan.template
+    )
+
+
+def _summarize_raw_llm_output(output: Any) -> dict[str, Any]:
+    if isinstance(output, dict):
+        summary: dict[str, Any] = {
+            "type": "object",
+            "keys": sorted(str(key) for key in output.keys()),
+        }
+        if "query" in output:
+            summary["query"] = output.get("query")
+        if "queries" in output and isinstance(output.get("queries"), list):
+            summary["queries"] = list(output["queries"])
+        return summary
+    if isinstance(output, list):
+        return {"type": "list", "length": len(output)}
+    return {"type": type(output).__name__, "value": output}
+
+
+def _rewrite_metadata(query: Query, *, source: str, index: int) -> dict[str, Any]:
+    return {
+        **dict(query.metadata),
+        "rewrite": {
+            "source": source,
+            "from_query_id": query.query_id,
+            "index": index,
+        },
+    }
+
+
+def _normalize_rewritten_query_texts(
+    raw_texts: list[Any],
+    *,
+    strip_queries: bool,
+    drop_empty_queries: bool,
+    max_queries: int,
+) -> tuple[list[str], dict[str, Any]]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    dropped_empty_count = 0
+    duplicate_count = 0
+    over_limit_count = 0
+    for raw in raw_texts:
+        text = str(raw)
+        if strip_queries:
+            text = text.strip()
+        if not text:
+            dropped_empty_count += 1
+            if drop_empty_queries:
+                continue
+        if text in seen:
+            duplicate_count += 1
+            continue
+        if len(normalized) >= max_queries:
+            over_limit_count += 1
+            continue
+        seen.add(text)
+        normalized.append(text)
+
+    if not normalized:
+        raise ValueError("QueryRewriteRetrieval produced no usable rewritten queries.")
+
+    return normalized, {
+        "dropped_empty_count": dropped_empty_count,
+        "duplicate_count": duplicate_count,
+        "over_limit_count": over_limit_count,
+    }
 
 
 def _dedupe_records_by_id(records: list[Any]) -> list[Any]:
@@ -233,6 +321,260 @@ class _MultiQueryRetrievalMixin:
             branch_packet, store = self._run_single_query(branch_packet, store)
             branch_packets.append(branch_packet)
         return _merge_retrieval_packets(packet, branch_packets, module_name=self.spec.name), store
+
+
+class QueryRewriteRetrieval(RetrievalModule):
+    """Rewrite the query first, then delegate retrieval to another retriever."""
+
+    spec = ModuleSpec(
+        name="query_rewrite_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        retriever: RetrievalModule,
+        *,
+        strategy: str = "llm",
+        prompt: PromptPlan | str | None = None,
+        allow_multi_query: bool = False,
+        regex_rules: list[dict[str, Any]] | None = None,
+        include_original: bool = False,
+        max_queries: int | None = None,
+        strip_queries: bool = True,
+        drop_empty_queries: bool = True,
+    ) -> None:
+        if not isinstance(retriever, RetrievalModule):
+            raise TypeError("QueryRewriteRetrieval.retriever must be a RetrievalModule instance.")
+        self.retriever = retriever
+        self.strategy = _normalize_query_rewrite_strategy(strategy)
+        self.prompt = prompt
+        self.allow_multi_query = bool(allow_multi_query)
+        self.regex_rules = [dict(rule) for rule in (regex_rules or [])]
+        self.include_original = bool(include_original)
+        resolved_max_queries = max_queries if max_queries is not None else (4 if self.allow_multi_query else 1)
+        if int(resolved_max_queries) <= 0:
+            raise ValueError("QueryRewriteRetrieval max_queries must be positive.")
+        self.max_queries = int(resolved_max_queries)
+        self.strip_queries = bool(strip_queries)
+        self.drop_empty_queries = bool(drop_empty_queries)
+
+        if self.strategy == "llm":
+            if prompt is None or (isinstance(prompt, str) and not prompt.strip()):
+                raise ValueError("QueryRewriteRetrieval strategy='llm' requires a non-empty prompt.")
+        elif not self.regex_rules:
+            raise ValueError("QueryRewriteRetrieval strategy='regex' requires regex_rules.")
+
+    def get_requires_contracts(self) -> frozenset[str]:
+        return self.retriever.get_requires_contracts()
+
+    def get_produces_contracts(self) -> frozenset[str]:
+        return self.retriever.get_produces_contracts()
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("QueryRewriteRetrieval requires packet.query.")
+
+        rewritten_packet, rewrite_trace, store = self._rewrite_packet(packet, store)
+        delegated_packet, store = self.retriever.run(rewritten_packet, store)
+        retrieval_trace = dict(delegated_packet.trace.get("retrieval", {}))
+        merged_trace = {
+            **retrieval_trace,
+            "module": self.spec.name,
+            "wrapped_retriever": self.retriever.spec.name,
+            "query_rewrite": rewrite_trace,
+        }
+        trace = copy_trace(delegated_packet)
+        trace["retrieval"] = merged_trace
+        retrieved = delegated_packet.retrieved
+        if retrieved is not None:
+            retrieved = replace(retrieved, trace=merged_trace)
+        return replace(delegated_packet, retrieved=retrieved, trace=trace), store
+
+    def _rewrite_packet(self, packet: Packet, store: MemoryStore) -> tuple[Packet, dict[str, Any], MemoryStore]:
+        if self.strategy == "llm":
+            return self._rewrite_packet_with_llm(packet, store)
+        return self._rewrite_packet_with_regex(packet, store)
+
+    def _rewrite_packet_with_llm(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+    ) -> tuple[Packet, dict[str, Any], MemoryStore]:
+        rewritten_prompt, prompt_trace, store = self._render_prompt(packet, store)
+        raw_output = self._llm_json(
+            user=json.dumps(
+                {
+                    "query": packet.query.text,
+                    "allow_multi_query": self.allow_multi_query,
+                    "max_queries": self.max_queries,
+                    "prompt": rewritten_prompt,
+                },
+                ensure_ascii=False,
+            )
+        )
+        raw_queries = self._extract_llm_query_texts(raw_output)
+        query_texts, normalization_trace = _normalize_rewritten_query_texts(
+            raw_queries,
+            strip_queries=self.strip_queries,
+            drop_empty_queries=self.drop_empty_queries,
+            max_queries=self.max_queries,
+        )
+        rewritten_packet = self._packet_with_rewritten_queries(packet, query_texts, source="llm")
+        rewrite_trace = {
+            "rewrite_strategy": "llm",
+            "allow_multi_query": self.allow_multi_query,
+            "include_original": self.include_original,
+            "used_original_query": False,
+            "max_queries": self.max_queries,
+            "returned_query_count": len(query_texts),
+            "rewritten_query_texts": list(query_texts),
+            "original_query_text": packet.query.text,
+            "prompt_is_template": _prompt_is_template(ensure_prompt_plan(self.prompt, metadata_mode="prompt")),
+            "raw_output_summary": _summarize_raw_llm_output(raw_output),
+            **prompt_trace,
+            **normalization_trace,
+        }
+        return rewritten_packet, rewrite_trace, store
+
+    def _rewrite_packet_with_regex(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+    ) -> tuple[Packet, dict[str, Any], MemoryStore]:
+        current_text = packet.query.text
+        rule_summaries: list[dict[str, Any]] = []
+        for rule in self.regex_rules:
+            pattern = str(rule.get("pattern", "")).strip()
+            if not pattern:
+                raise ValueError("QueryRewriteRetrieval regex rules require non-empty pattern.")
+            repl = str(rule.get("repl", ""))
+            count = int(rule.get("count", 0))
+            flags_value, normalized_flags = self._regex_flags(rule.get("flags"))
+            current_text, changed_count = re.subn(pattern, repl, current_text, count=count, flags=flags_value)
+            rule_summaries.append(
+                {
+                    "pattern": pattern,
+                    "repl": repl,
+                    "count": count,
+                    "flags": normalized_flags,
+                    "changed": changed_count > 0,
+                    "replacement_count": changed_count,
+                }
+            )
+
+        query_texts, normalization_trace = _normalize_rewritten_query_texts(
+            [current_text],
+            strip_queries=self.strip_queries,
+            drop_empty_queries=self.drop_empty_queries,
+            max_queries=1,
+        )
+        rewritten_packet = self._packet_with_rewritten_queries(packet, query_texts, source="regex")
+        rewrite_trace = {
+            "rewrite_strategy": "regex",
+            "allow_multi_query": False,
+            "include_original": self.include_original,
+            "used_original_query": False,
+            "rule_count": len(self.regex_rules),
+            "original_query_text": packet.query.text,
+            "rewritten_query_text": query_texts[0],
+            "rewritten_query_texts": list(query_texts),
+            "returned_query_count": 1,
+            "rules": rule_summaries,
+            **normalization_trace,
+        }
+        return rewritten_packet, rewrite_trace, store
+
+    def _packet_with_rewritten_queries(self, packet: Packet, query_texts: list[str], *, source: str) -> Packet:
+        rewritten_queries = [
+            Query(
+                text=text,
+                metadata=_rewrite_metadata(packet.query, source=source, index=index),
+            )
+            for index, text in enumerate(query_texts)
+        ]
+        if self.include_original:
+            original_query = replace(
+                packet.query,
+                metadata={
+                    **dict(packet.query.metadata),
+                    "rewrite_original_preserved": True,
+                },
+            )
+            rewritten_queries.append(original_query)
+        primary_query = rewritten_queries[0]
+        if len(rewritten_queries) == 1:
+            return replace(packet, query=primary_query, queries=None)
+        return replace(packet, query=primary_query, queries=rewritten_queries)
+
+    def _render_prompt(self, packet: Packet, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
+        plan = ensure_prompt_plan(
+            self.prompt,
+            metadata_mode="prompt",
+            context_builder=lambda current_packet, current_store: {
+                "query": project_query_for_template(current_packet.query),
+                "runtime": project_packet_runtime_for_template(current_packet),
+                "retrieval": {
+                    "wrapped_retriever": self.retriever.spec.name,
+                    "allow_multi_query": self.allow_multi_query,
+                    "max_queries": self.max_queries,
+                },
+            },
+        )
+        rendered_prompt, prompt_trace, store = render_prompt_plan(plan, packet=packet, store=store)
+        return rendered_prompt, prompt_trace, store
+
+    def _llm_json(self, *, user: str) -> Any:
+        from ..utils._runtime import get_runtime
+
+        runtime = get_runtime()
+        runtime.require_llm(capability="QueryRewriteRetrieval")
+        return runtime.json(
+            system=(
+                "You rewrite retrieval queries. Return strict JSON only with either "
+                "{\"query\": \"...\"} or {\"queries\": [\"...\", \"...\"]}. "
+                "Do not include any text outside the JSON object."
+            ),
+            user=user,
+        )
+
+    def _extract_llm_query_texts(self, output: Any) -> list[Any]:
+        if isinstance(output, dict):
+            if self.allow_multi_query and isinstance(output.get("queries"), list):
+                return list(output["queries"])
+            if isinstance(output.get("query"), str):
+                return [output["query"]]
+            if isinstance(output.get("queries"), list):
+                queries = list(output["queries"])
+                return queries[:1] if not self.allow_multi_query else queries
+        raise ValueError("QueryRewriteRetrieval LLM rewrite requires JSON object with 'query' or 'queries'.")
+
+    def _regex_flags(self, raw_flags: Any) -> tuple[int, list[str]]:
+        if raw_flags is None:
+            return 0, []
+        if isinstance(raw_flags, str):
+            flag_names = [raw_flags]
+        elif isinstance(raw_flags, (list, tuple)):
+            flag_names = list(raw_flags)
+        else:
+            raise ValueError("QueryRewriteRetrieval regex rule flags must be a string or list of strings.")
+
+        resolved = 0
+        normalized: list[str] = []
+        for raw_name in flag_names:
+            name = str(raw_name).strip().upper()
+            if not name:
+                continue
+            try:
+                resolved |= _QUERY_REWRITE_REGEX_FLAGS[name]
+            except KeyError as exc:
+                options = ", ".join(sorted(_QUERY_REWRITE_REGEX_FLAGS))
+                raise ValueError(f"Unsupported regex flag {name!r}; expected one of: {options}.") from exc
+            if name not in normalized:
+                normalized.append(name)
+        return resolved, normalized
 
 
 def _empty_retrieved(
@@ -1526,4 +1868,5 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
     BufferRetrieval,
+    QueryRewriteRetrieval,
 )
