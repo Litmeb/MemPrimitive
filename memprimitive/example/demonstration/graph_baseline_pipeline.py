@@ -24,7 +24,7 @@ from memprimitive.baselines import (
     BasicRepresentation,
     GraphAppendOrganization,
     GraphNeighborAppendEvolution,
-    GraphReadout,
+    GraphRelationReadout,
     GraphSeedAndExpandRetrieval,
     LLMRepresentation,
     TripleRepresentation,
@@ -64,7 +64,7 @@ def main() -> None:
 
     recall_pipeline = MemoryPipeline(
         retrieval=GraphSeedAndExpandRetrieval(top_k=4, layer="knowledge_graph", seed_top_k=1),
-        readout=GraphReadout(),
+        readout=GraphRelationReadout(),
         store=store,
     )
     query = Query(text="Alice graph")
@@ -108,7 +108,7 @@ def main() -> None:
     pprint(retrieval_packet.trace["retrieval"])
     print()
 
-    print("graph readout:")
+    print("graph relation readout:")
     print(readout.text)
     print("source record ids:", readout.source_ids)
 

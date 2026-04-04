@@ -3224,6 +3224,110 @@ def test_graph_readout_renders_graph_metadata() -> None:
     assert packet_out.readout.metadata["graph_item_count"] == 1
 
 
+def test_graph_relation_readout_renders_relation_sentences_in_retrieval_order() -> None:
+    from memprimitive.baselines import GraphRelationReadout
+
+    records = [
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes sushi.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            metadata={"graph": {"links": ["rec-2"], "triples": [("Alice", "likes", "sushi")]}},
+        ),
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="knowledge_graph",
+            text="Bob builds tools.",
+            timestamp="2026-03-27T00:01:00+00:00",
+            metadata={"graph": {"links": ["rec-1"], "triples": [("Bob", "builds", "tools")]}},
+        ),
+    ]
+
+    packet_out, _ = GraphRelationReadout().run(Packet(retrieved=RetrievedSet(items=records, scores=[])), _graph_store())
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Alice likes sushi\nBob builds tools"
+    assert packet_out.readout.source_ids == ["rec-1", "rec-2"]
+    assert packet_out.readout.metadata["relation_sentence_count"] == 2
+    assert packet_out.readout.metadata["linked_item_count"] == 2
+    assert packet_out.readout.metadata["fallback_used"] is False
+
+
+def test_graph_relation_readout_dedupes_repeated_triples_and_ignores_unlinked_records() -> None:
+    from memprimitive.baselines import GraphRelationReadout
+
+    records = [
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes sushi.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            metadata={"graph": {"links": ["rec-2"], "triples": [("Alice", "likes", "sushi")]}},
+        ),
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="knowledge_graph",
+            text="Duplicate relation.",
+            timestamp="2026-03-27T00:01:00+00:00",
+            metadata={"graph": {"links": ["rec-1"], "triples": [("Alice", "likes", "sushi")]}},
+        ),
+        MemoryRecord(
+            record_id="rec-3",
+            unit_id="unit-3",
+            layer="knowledge_graph",
+            text="Carol mentors Dana.",
+            timestamp="2026-03-27T00:02:00+00:00",
+            metadata={"graph": {"links": [], "triples": [("Carol", "mentors", "Dana")]}},
+        ),
+    ]
+
+    packet_out, _ = GraphRelationReadout().run(Packet(retrieved=RetrievedSet(items=records, scores=[])), _graph_store())
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Alice likes sushi"
+    assert packet_out.readout.source_ids == ["rec-1", "rec-2", "rec-3"]
+    assert packet_out.readout.metadata["relation_sentence_count"] == 1
+    assert packet_out.readout.metadata["linked_item_count"] == 2
+
+
+def test_graph_relation_readout_falls_back_to_original_text_when_no_relation_sentence_exists() -> None:
+    from memprimitive.baselines import GraphRelationReadout
+
+    records = [
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes sushi.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            metadata={"graph": {"links": ["rec-2"], "triples": []}},
+        ),
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="knowledge_graph",
+            text="Carol mentors Dana.",
+            timestamp="2026-03-27T00:01:00+00:00",
+            metadata={"graph": {"links": [], "triples": [("Carol", "mentors", "Dana")]}},
+        ),
+    ]
+
+    packet_out, _ = GraphRelationReadout().run(Packet(retrieved=RetrievedSet(items=records, scores=[])), _graph_store())
+
+    assert packet_out.readout is not None
+    assert packet_out.readout.text == "Alice likes sushi.\nCarol mentors Dana."
+    assert packet_out.readout.source_ids == ["rec-1", "rec-2"]
+    assert packet_out.readout.metadata["relation_sentence_count"] == 0
+    assert packet_out.readout.metadata["linked_item_count"] == 1
+    assert packet_out.readout.metadata["fallback_used"] is True
+    assert packet_out.trace["readout"]["fallback_used"] is True
+
+
 def test_graph_baseline_pipeline_end_to_end_supports_threshold_trigger_evolution_retrieval_and_readout() -> None:
     from memprimitive import MemoryPipeline
     from memprimitive.baselines import (
