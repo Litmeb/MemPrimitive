@@ -455,6 +455,8 @@ class HierarchicalOrganization(OrganizationModule):
         extract_fields: tuple[str, ...],
         group_by: tuple[str, ...] = (),
         prompt: str | None = None,
+        retrieve_pipeline=None,
+        recall_query_template: str | None = None,
         target_layer: str | None = None,
         memory_pipeline=None,
     ) -> None:
@@ -474,6 +476,8 @@ class HierarchicalOrganization(OrganizationModule):
         self.extract_fields = config["extract_fields"]
         self.group_by = config["group_by"]
         self.prompt = config["prompt"]
+        self.retrieve_pipeline = retrieve_pipeline
+        self.recall_query_template = None if recall_query_template is None else str(recall_query_template)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         require_aligned_units_decisions(packet, include_placements=False)
@@ -499,6 +503,8 @@ class HierarchicalOrganization(OrganizationModule):
             group_by=self.group_by,
             grouped_records=grouped,
             prompt=self.prompt,
+            retrieve_pipeline=self.retrieve_pipeline,
+            recall_query_template=self.recall_query_template,
         )
         effective_target_layer = inferred_target_layer(
             target_layer=self.target_layer,
@@ -513,6 +519,7 @@ class HierarchicalOrganization(OrganizationModule):
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
             "group_by": list(self.group_by),
+            "prompt_is_template": bool(self.prompt and "{{" in self.prompt and "}}" in self.prompt),
             "selection_source": selection_source,
             "selected_record_count": len(selected_records),
             "group_count": len(grouped),
@@ -521,6 +528,7 @@ class HierarchicalOrganization(OrganizationModule):
             "write_mode": "memory_pipeline_ingest",
             "writer_pipeline_mode": writer_pipeline_mode,
             "sub_ingest_trace": [effect["sub_ingest_trace"] for effect in effects],
+            "prompt_trace": [effect["prompt_trace"] for effect in effects if effect.get("prompt_trace") is not None],
         }
         return replace(packet, placements=placements, trace=trace), store
 
