@@ -4,7 +4,7 @@ This example keeps the setup intentionally small and readable:
 
 - manually seeds one ``episodic`` layer and one ``session_summary`` layer
 - uses ``LayerAwareRetrieval`` to recall across both layers
-- renders the result with ``TemplateReadout(structured_template=...)``
+- renders the result with ``TemplateReadout(prompt=build_structured_prompt_plan(...))``
 
 The template demonstrates:
 
@@ -34,6 +34,7 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, MemoryRecord, MemoryStore, Packet, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import LayerAwareRetrieval, RecencyRetrieval, TemplateReadout
+from memprimitive.utils._template import build_structured_prompt_plan
 
 
 if __name__ == "__main__":
@@ -133,7 +134,7 @@ if __name__ == "__main__":
             top_k_by_layer={"session_summary": 2, "episodic": 3},
         ),
         readout=TemplateReadout(
-            structured_template={
+            prompt=build_structured_prompt_plan({
                 "blocks": [
                     {
                         "id": "header",
@@ -171,7 +172,7 @@ if __name__ == "__main__":
                         ),
                     },
                 ]
-            }
+            })
         ),
         store=store,
     )

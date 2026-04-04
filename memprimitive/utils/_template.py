@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 import ast
 import json
 import re
-from typing import Any
+from typing import Any, Callable, Literal
 
-from ..core import MemoryRecord, MemoryStore, MemoryUnit, Packet, Query
+from ..core import MemoryRecord, MemoryStore, MemoryUnit, Packet, Query, Readout
 
 _EXPR_PATTERN = re.compile(r"{{\s*(.+?)\s*}}")
 _MISSING = object()
 
 PromptTemplate = str
+TemplateMode = Literal["simple", "structured"]
+MetadataMode = Literal["prompt", "readout"]
+ContextBuilder = Callable[[Packet, MemoryStore], dict[str, Any]]
+RecallQueryBuilder = Callable[[Packet, MemoryStore, dict[str, Any]], str]
 
 
 def looks_like_template(text: str) -> bool:
@@ -23,6 +27,18 @@ def looks_like_template(text: str) -> bool:
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+@dataclass(slots=True, frozen=True)
+class PromptPlan:
+    mode: TemplateMode
+    template: str | dict[str, Any] | list[Any]
+    context_builder: ContextBuilder | None = None
+    recall_plan: PromptPlan | None = None
+    recall_query_builder: RecallQueryBuilder | None = None
+    missing_value: str = ""
+    metadata_mode: MetadataMode = "prompt"
+    sub_recall_pipeline: Any | None = None
 
 
 @dataclass(slots=True)
@@ -46,6 +62,85 @@ class ResolvedVariable:
 class ResolutionState:
     resolutions: list[ResolvedVariable] = field(default_factory=list)
     filter_trace: list[dict[str, Any]] = field(default_factory=list)
+
+
+def build_simple_prompt_plan(
+    template: str,
+    *,
+    context_builder: ContextBuilder | None = None,
+    recall_plan: PromptPlan | None = None,
+    recall_query_builder: RecallQueryBuilder | None = None,
+    missing_value: str = "",
+    metadata_mode: MetadataMode = "prompt",
+    sub_recall_pipeline: Any | None = None,
+) -> PromptPlan:
+    return PromptPlan(
+        mode="simple",
+        template=str(template),
+        context_builder=context_builder,
+        recall_plan=recall_plan,
+        recall_query_builder=recall_query_builder,
+        missing_value=missing_value,
+        metadata_mode=metadata_mode,
+        sub_recall_pipeline=sub_recall_pipeline,
+    )
+
+
+def build_structured_prompt_plan(
+    template: dict[str, Any] | list[Any],
+    *,
+    context_builder: ContextBuilder | None = None,
+    recall_plan: PromptPlan | None = None,
+    recall_query_builder: RecallQueryBuilder | None = None,
+    missing_value: str = "",
+    metadata_mode: MetadataMode = "readout",
+    sub_recall_pipeline: Any | None = None,
+) -> PromptPlan:
+    return PromptPlan(
+        mode="structured",
+        template=template,
+        context_builder=context_builder,
+        recall_plan=recall_plan,
+        recall_query_builder=recall_query_builder,
+        missing_value=missing_value,
+        metadata_mode=metadata_mode,
+        sub_recall_pipeline=sub_recall_pipeline,
+    )
+
+
+def ensure_prompt_plan(
+    prompt: PromptPlan | str,
+    *,
+    metadata_mode: MetadataMode | None = None,
+    context_builder: ContextBuilder | None = None,
+) -> PromptPlan:
+    if isinstance(prompt, PromptPlan):
+        plan = prompt
+    else:
+        plan = build_simple_prompt_plan(str(prompt), metadata_mode=metadata_mode or "prompt")
+    if metadata_mode is not None and plan.metadata_mode != metadata_mode:
+        plan = replace(plan, metadata_mode=metadata_mode)
+    if context_builder is not None:
+        merged_builder = compose_context_builders(plan.context_builder, context_builder)
+        plan = replace(plan, context_builder=merged_builder)
+    return plan
+
+
+def compose_context_builders(
+    left: ContextBuilder | None,
+    right: ContextBuilder | None,
+) -> ContextBuilder | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+
+    def _merged(packet: Packet, store: MemoryStore) -> dict[str, Any]:
+        context = dict(left(packet, store))
+        context.update(right(packet, store))
+        return context
+
+    return _merged
 
 
 def collect_template_references(template: str | dict[str, Any] | list[Any], *, structured: bool) -> list[str]:
@@ -104,53 +199,144 @@ def render_prompt_template(
     return render_simple_template(template, context, state, missing_value=missing_value), state
 
 
-def render_prompt_template_with_recall(
-    template: str,
-    context: dict[str, Any],
-    *,
+def build_base_template_context(
+    packet: Packet,
     store: MemoryStore,
-    retrieve_pipeline=None,
-    recall_query_template: str | None = None,
-    missing_value: str = "",
-) -> tuple[str, dict[str, Any], MemoryStore]:
-    enriched_context = dict(context)
-    recalled_prompt, recall_metadata, updated_store = resolve_recalled_prompt(
-        context=context,
-        store=store,
-        retrieve_pipeline=retrieve_pipeline,
-        recall_query_template=recall_query_template,
-        missing_value=missing_value,
+    *,
+    now: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "query": project_query_for_template(packet.query),
+        "runtime": project_packet_runtime_for_template(packet, now=now),
+        "trace": {
+            "packet": dict(packet.trace),
+            "retrieval": dict(packet.retrieved.trace) if packet.retrieved is not None else {},
+        },
+    }
+
+
+def build_retrieval_template_context(
+    packet: Packet,
+    store: MemoryStore,
+    *,
+    note_namespace: str = "note",
+    default_category: str = "memory",
+    runtime_now_factory: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    from ._template_readout import build_render_context
+
+    return build_render_context(
+        packet,
+        note_namespace=note_namespace,
+        default_category=default_category,
+        runtime_now_factory=runtime_now_factory,
     )
-    enriched_context["recalled_prompt"] = recalled_prompt
-    rendered_prompt, state = render_prompt_template(template, enriched_context, missing_value=missing_value)
+
+
+def render_prompt_plan(
+    plan: PromptPlan | str,
+    *,
+    packet: Packet,
+    store: MemoryStore,
+    runtime_now_factory: Callable[[], str] | None = None,
+) -> tuple[str, dict[str, Any], MemoryStore]:
+    prompt_plan = ensure_prompt_plan(plan)
+    now = runtime_now_factory() if runtime_now_factory is not None else utc_now_iso()
+    context = build_base_template_context(packet, store, now=now)
+    if prompt_plan.metadata_mode == "readout" or packet.retrieved is not None:
+        context.update(build_retrieval_template_context(packet, store, runtime_now_factory=lambda: now))
+    if prompt_plan.context_builder is not None:
+        context.update(prompt_plan.context_builder(packet, store))
+
+    recalled_prompt, recall_metadata, updated_store = resolve_recalled_prompt(
+        prompt_plan,
+        packet=packet,
+        store=store,
+        context=context,
+    )
+    context["recalled_prompt"] = recalled_prompt
+
+    if prompt_plan.metadata_mode == "readout":
+        return _render_readout_plan(prompt_plan, context=context, recall_metadata=recall_metadata, store=updated_store)
+    return _render_prompt_mode_plan(prompt_plan, context=context, recall_metadata=recall_metadata, store=updated_store)
+
+
+def _render_prompt_mode_plan(
+    plan: PromptPlan,
+    *,
+    context: dict[str, Any],
+    recall_metadata: dict[str, Any],
+    store: MemoryStore,
+) -> tuple[str, dict[str, Any], MemoryStore]:
+    if plan.mode == "structured":
+        from ._template_readout import ReadoutResolutionState, render_structured_template
+
+        state = ReadoutResolutionState()
+        rendered = render_structured_template(plan.template, context, state, missing_value=plan.missing_value)
+    else:
+        state = ResolutionState()
+        rendered = render_simple_template(str(plan.template), context, state, missing_value=plan.missing_value)
     metadata = metadata_from_resolution_state(state=state)
     metadata.update(
         {
-            "rendered_prompt": rendered_prompt,
-            "rendered_prompt_preview": rendered_prompt[:200],
-            "prompt_is_template": True,
-            "recalled_prompt": recalled_prompt,
-            "recalled_prompt_preview": recalled_prompt[:200],
+            "template_mode": plan.mode,
+            "prompt_is_template": plan.mode == "structured" or looks_like_template(str(plan.template)),
+            "rendered_prompt": rendered,
+            "rendered_prompt_preview": rendered[:200],
+            "recalled_prompt": context.get("recalled_prompt", ""),
+            "recalled_prompt_preview": str(context.get("recalled_prompt", ""))[:200],
+            "recall_prompt": recall_metadata,
+            "context_summary": sorted(context.keys()),
+        }
+    )
+    return rendered, metadata, store
+
+
+def _render_readout_plan(
+    plan: PromptPlan,
+    *,
+    context: dict[str, Any],
+    recall_metadata: dict[str, Any],
+    store: MemoryStore,
+) -> tuple[str, dict[str, Any], MemoryStore]:
+    from ._template_readout import ReadoutResolutionState, metadata_from_state, render_structured_template
+
+    state = ReadoutResolutionState()
+    if plan.mode == "structured":
+        declared_variables = collect_template_references(plan.template, structured=True)
+        rendered = render_structured_template(plan.template, context, state, missing_value=plan.missing_value)
+    else:
+        declared_variables = collect_template_references(str(plan.template), structured=False)
+        rendered = render_simple_template(str(plan.template), context, state, missing_value=plan.missing_value)
+    metadata = metadata_from_state(
+        template_mode_name=plan.mode,
+        declared_variables=declared_variables,
+        context=context,
+        state=state,
+    )
+    metadata.update(
+        {
+            "rendered_prompt": rendered,
+            "rendered_prompt_preview": rendered[:200],
+            "recalled_prompt": context.get("recalled_prompt", ""),
+            "recalled_prompt_preview": str(context.get("recalled_prompt", ""))[:200],
             "recall_prompt": recall_metadata,
         }
     )
-    return rendered_prompt, metadata, updated_store
+    return rendered, metadata, store
 
 
 def resolve_recalled_prompt(
+    plan: PromptPlan,
     *,
-    context: dict[str, Any],
+    packet: Packet,
     store: MemoryStore,
-    retrieve_pipeline=None,
-    recall_query_template: str | None = None,
-    missing_value: str = "",
+    context: dict[str, Any],
 ) -> tuple[str, dict[str, Any], MemoryStore]:
     metadata: dict[str, Any] = {
         "enabled": False,
         "rendered_recall_query": "",
         "rendered_recall_query_preview": "",
-        "recall_query_template": None,
-        "recall_query_template_is_template": False,
         "missing_variables": [],
         "resolved_variables": [],
         "used_record_ids": [],
@@ -159,33 +345,26 @@ def resolve_recalled_prompt(
         "matched": False,
         "recalled_prompt": "",
         "recalled_prompt_preview": "",
+        "readout_source_ids": [],
+        "readout_metadata": {},
     }
-    if retrieve_pipeline is None or recall_query_template is None:
-        metadata["disabled_reason"] = "missing_retrieve_pipeline_or_recall_query_template"
+    if plan.recall_plan is None or plan.recall_query_builder is None or plan.sub_recall_pipeline is None:
+        metadata["disabled_reason"] = "missing_recall_plan_or_query_builder_or_pipeline"
         return "", metadata, store
 
-    recall_query_text = str(recall_query_template)
     metadata["enabled"] = True
-    metadata["recall_query_template"] = recall_query_text
-    metadata["recall_query_template_is_template"] = looks_like_template(recall_query_text)
-    if looks_like_template(recall_query_text):
-        rendered_query, query_state = render_prompt_template(recall_query_text, context, missing_value=missing_value)
-        query_metadata = metadata_from_resolution_state(state=query_state)
-        metadata.update(query_metadata)
-        metadata["rendered_recall_query"] = rendered_query
-        metadata["rendered_recall_query_preview"] = rendered_query[:200]
-    else:
-        metadata["rendered_recall_query"] = recall_query_text
-        metadata["rendered_recall_query_preview"] = recall_query_text[:200]
-
-    if not metadata["rendered_recall_query"].strip():
+    recall_query = render_recall_query(plan.recall_query_builder, packet, store, context)
+    metadata["rendered_recall_query"] = recall_query
+    metadata["rendered_recall_query_preview"] = recall_query[:200]
+    if not recall_query.strip():
         metadata["disabled_reason"] = "empty_rendered_recall_query"
         return "", metadata, store
 
-    readout, updated_store = run_sub_recall(
-        retrieve_pipeline=retrieve_pipeline,
+    readout, updated_store = run_prompt_plan_sub_recall(
+        plan.recall_plan,
         store=store,
-        query=Query(text=metadata["rendered_recall_query"]),
+        query_text=recall_query,
+        retrieve_pipeline=plan.sub_recall_pipeline,
     )
     recalled_prompt = readout.text.strip() if readout.text else ""
     metadata["matched"] = bool(recalled_prompt)
@@ -196,19 +375,63 @@ def resolve_recalled_prompt(
     return recalled_prompt, metadata, updated_store
 
 
-def run_sub_recall(*, retrieve_pipeline, store: MemoryStore, query: Query):
-    from ..core import Packet
+def render_recall_query(
+    recall_query_builder: RecallQueryBuilder,
+    packet: Packet,
+    store: MemoryStore,
+    context: dict[str, Any],
+) -> str:
+    return str(recall_query_builder(packet, store, context) or "")
+
+
+def run_prompt_plan_sub_recall(
+    plan: PromptPlan,
+    *,
+    store: MemoryStore,
+    query_text: str,
+    retrieve_pipeline,
+) -> tuple[Readout, MemoryStore]:
     from ..pipeline import _iter_slot_modules
 
-    packet = Packet(query=query, trace={"sub_recall_started": True})
+    packet = Packet(query=Query(text=query_text), trace={"sub_recall_started": True})
     current_store = store
     for module in _iter_slot_modules(retrieve_pipeline.retrieval):
         packet, current_store = module.run(packet, current_store)
-    for module in _iter_slot_modules(retrieve_pipeline.readout):
-        packet, current_store = module.run(packet, current_store)
+
+    readout_module = retrieve_pipeline.readout
+    if readout_module is not None:
+        for module in _iter_slot_modules(readout_module):
+            packet, current_store = module.run(packet, current_store)
+    else:
+        rendered_text, metadata, current_store = render_prompt_plan(
+            ensure_prompt_plan(plan, metadata_mode="readout"),
+            packet=packet,
+            store=current_store,
+        )
+        packet = replace(packet, readout=Readout(text=rendered_text, source_ids=list(metadata.get("used_record_ids", [])), metadata=metadata))
+
     if packet.readout is None:
         raise RuntimeError("Sub recall pipeline returned no readout.")
     return packet.readout, current_store
+
+
+def metadata_from_resolution_state(*, state: ResolutionState) -> dict[str, Any]:
+    missing_variables = _stable_unique(
+        resolved.expression for resolved in state.resolutions if resolved.status == "missing"
+    )
+    used_record_ids = _stable_unique(
+        record_id for resolved in state.resolutions for record_id in resolved.used_record_ids
+    )
+    used_group_ids = _stable_unique(
+        group_id for resolved in state.resolutions for group_id in resolved.used_group_ids
+    )
+    return {
+        "resolved_variables": [asdict(item) for item in state.resolutions],
+        "missing_variables": missing_variables,
+        "used_group_ids": used_group_ids,
+        "used_record_ids": used_record_ids,
+        "filter_trace": list(state.filter_trace),
+    }
 
 
 def project_unit_for_template(unit: MemoryUnit) -> dict[str, Any]:
@@ -287,25 +510,6 @@ def project_packet_runtime_for_template(packet: Packet, *, now: str | None = Non
         if value is not _MISSING and value is not None:
             runtime[key] = value
     return runtime
-
-
-def metadata_from_resolution_state(*, state: ResolutionState) -> dict[str, Any]:
-    missing_variables = _stable_unique(
-        resolved.expression for resolved in state.resolutions if resolved.status == "missing"
-    )
-    used_record_ids = _stable_unique(
-        record_id for resolved in state.resolutions for record_id in resolved.used_record_ids
-    )
-    used_group_ids = _stable_unique(
-        group_id for resolved in state.resolutions for group_id in resolved.used_group_ids
-    )
-    return {
-        "resolved_variables": [asdict(item) for item in state.resolutions],
-        "missing_variables": missing_variables,
-        "used_group_ids": used_group_ids,
-        "used_record_ids": used_record_ids,
-        "filter_trace": list(state.filter_trace),
-    }
 
 
 def parse_expression(raw: str) -> TemplateExpression:
