@@ -152,6 +152,89 @@ def _with_retrieved(packet: Packet, retrieved: RetrievedSet, *, query=None) -> P
     return replace(packet, query=query, retrieved=retrieved, trace=trace)
 
 
+def _resolve_retrieval_queries(packet: Packet, *, module_name: str) -> tuple[list[Any], bool]:
+    if packet.queries:
+        return list(packet.queries), True
+    if packet.query is not None:
+        return [packet.query], False
+    raise ValueError(f"{module_name} requires packet.query.")
+
+
+def _single_query_packet(packet: Packet, *, query) -> Packet:
+    return replace(packet, query=query)
+
+
+def _merge_retrieval_packets(
+    packet: Packet,
+    branch_packets: list[Packet],
+    *,
+    module_name: str,
+) -> Packet:
+    merged_items: list[Any] = []
+    merged_scores: list[dict[str, Any]] = []
+    seen_record_ids: set[str] = set()
+    per_query: list[dict[str, Any]] = []
+    merged_queries: list[Any] = []
+
+    for index, branch_packet in enumerate(branch_packets):
+        branch_query = branch_packet.query
+        if branch_query is not None:
+            merged_queries.append(branch_query)
+        retrieved = branch_packet.retrieved if branch_packet.retrieved is not None else RetrievedSet()
+        per_query.append(
+            {
+                "index": index,
+                "query_id": getattr(branch_query, "query_id", None),
+                "query_text": getattr(branch_query, "text", None),
+                "returned_count": len(retrieved.items),
+                "trace": dict(retrieved.trace),
+            }
+        )
+        for item_index, record in enumerate(retrieved.items):
+            record_id = getattr(record, "record_id", None)
+            if not isinstance(record_id, str) or record_id in seen_record_ids:
+                continue
+            seen_record_ids.add(record_id)
+            merged_items.append(record)
+            merged_scores.append(dict(retrieved.scores[item_index] if item_index < len(retrieved.scores) else {}))
+
+    merged_trace = {
+        "module": module_name,
+        "query_count": len(branch_packets),
+        "query_ids": [entry["query_id"] for entry in per_query],
+        "merge_strategy": "query_order_dedupe",
+        "per_query": per_query,
+        "final_returned_count": len(merged_items),
+    }
+    merged_retrieved = RetrievedSet(
+        items=merged_items,
+        scores=merged_scores,
+        trace=merged_trace,
+    )
+    trace = copy_trace(packet)
+    trace["retrieval"] = merged_trace
+    return replace(
+        packet,
+        queries=merged_queries,
+        retrieved=merged_retrieved,
+        trace=trace,
+    )
+
+
+class _MultiQueryRetrievalMixin:
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        queries, used_multi_query = _resolve_retrieval_queries(packet, module_name=self.spec.name)
+        if not used_multi_query and len(queries) == 1:
+            return self._run_single_query(packet, store)
+
+        branch_packets: list[Packet] = []
+        for query in queries:
+            branch_packet = _single_query_packet(packet, query=query)
+            branch_packet, store = self._run_single_query(branch_packet, store)
+            branch_packets.append(branch_packet)
+        return _merge_retrieval_packets(packet, branch_packets, module_name=self.spec.name), store
+
+
 def _empty_retrieved(
     packet: Packet,
     *,
@@ -174,7 +257,7 @@ def _empty_retrieved(
     return _with_retrieved(packet, retrieved, query=query)
 
 
-class RecencyRetrieval(RetrievalModule):
+class RecencyRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Retrieve up to ``top_k`` latest records by recency only.
 
     Constructor: ``top_k`` must be a positive integer. ``layer`` selects
@@ -202,7 +285,7 @@ class RecencyRetrieval(RetrievalModule):
         self.layer = layer
         self.source = _normalize_retrieval_source(source)
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("RecencyRetrieval requires packet.query.")
 
@@ -230,7 +313,7 @@ class RecencyRetrieval(RetrievalModule):
         return _with_retrieved(packet, retrieved), store
 
 
-class KeywordCountRetrieval(RetrievalModule):
+class KeywordCountRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Rank records by query-token hit count, then break ties by recency."""
 
     spec = ModuleSpec(
@@ -247,7 +330,7 @@ class KeywordCountRetrieval(RetrievalModule):
         self.layer = layer
         self.source = _normalize_retrieval_source(source)
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("KeywordCountRetrieval requires packet.query.")
 
@@ -286,7 +369,7 @@ class KeywordCountRetrieval(RetrievalModule):
         return _with_retrieved(packet, retrieved), store
 
 
-class EmbeddingSimilarityRetrieval(RetrievalModule):
+class EmbeddingSimilarityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Retrieve the ``top_k`` records with highest embedding cosine similarity.
 
     Constructor: ``top_k`` must be a positive integer. ``layer`` selects
@@ -325,7 +408,7 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         self.embedding_model = embedding_model
         self.source = _normalize_retrieval_source(source)
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("EmbeddingSimilarityRetrieval requires packet.query.")
 
@@ -406,7 +489,7 @@ class EmbeddingSimilarityRetrieval(RetrievalModule):
         return numerator / (left_norm * right_norm)
 
 
-class TagRetrieval(RetrievalModule):
+class TagRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Rank records by overlap between query tokens and representation tags."""
 
     spec = ModuleSpec(
@@ -423,7 +506,7 @@ class TagRetrieval(RetrievalModule):
         self.top_k = top_k
         self.layer = layer
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("TagRetrieval requires packet.query.")
 
@@ -463,7 +546,7 @@ class TagRetrieval(RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
-class EntityRetrieval(RetrievalModule):
+class EntityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Rank records by overlap between query entities/tokens and record entities."""
 
     spec = ModuleSpec(
@@ -480,7 +563,7 @@ class EntityRetrieval(RetrievalModule):
         self.top_k = top_k
         self.layer = layer
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("EntityRetrieval requires packet.query.")
 
@@ -529,7 +612,7 @@ class EntityRetrieval(RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
-class BM25Retrieval(RetrievalModule):
+class BM25Retrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Rank records with BM25 over text plus representation keywords, then recency."""
 
     spec = ModuleSpec(
@@ -546,7 +629,7 @@ class BM25Retrieval(RetrievalModule):
         self.layer = layer
         self.source = _normalize_retrieval_source(source)
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("BM25Retrieval requires packet.query.")
 
@@ -610,7 +693,7 @@ class BM25Retrieval(RetrievalModule):
         return _with_retrieved(packet, retrieved), store
 
 
-class GraphNeighborRetrieval(RetrievalModule):
+class GraphNeighborRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Expand explicit graph seed record ids into their linked neighbors.
 
     Constructor: ``top_k`` must be positive. ``layer`` must refer to a graph
@@ -642,7 +725,7 @@ class GraphNeighborRetrieval(RetrievalModule):
         self.target_layer = layer
         self.include_seed_records = include_seed_records
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("GraphNeighborRetrieval requires packet.query.")
 
@@ -706,7 +789,7 @@ class GraphNeighborRetrieval(RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
-class GraphSeedAndExpandRetrieval(RetrievalModule):
+class GraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Select graph seed records from query text, then expand through links.
 
     Constructor: ``top_k`` and ``seed_top_k`` must be positive. ``layer`` must
@@ -747,7 +830,7 @@ class GraphSeedAndExpandRetrieval(RetrievalModule):
         self.seed_top_k = seed_top_k
         self.include_seed_records = include_seed_records
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("GraphSeedAndExpandRetrieval requires packet.query.")
 
@@ -970,7 +1053,7 @@ class _LayerScopedStore:
         return getattr(self._base, name)
 
 
-class LayerAwareRetrieval(RetrievalModule):
+class LayerAwareRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Dispatch retrieval per layer, then merge multi-layer results globally.
 
     Constructor: ``top_k`` must be positive. ``default_retriever`` is used for
@@ -1046,7 +1129,7 @@ class LayerAwareRetrieval(RetrievalModule):
             for contract in module.get_produces_contracts()
         )
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("LayerAwareRetrieval requires packet.query.")
 
@@ -1163,7 +1246,7 @@ class LayerAwareRetrieval(RetrievalModule):
         return (1, normalized_rank, candidate["layer_index"], candidate["item_index"])
 
 
-class BufferRetrieval(RetrievalModule):
+class BufferRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Read a bounded recency window from one layer instead of doing query search.
 
     Constructor: ``top_k`` must be positive. ``layer`` selects the temporal
@@ -1194,7 +1277,7 @@ class BufferRetrieval(RetrievalModule):
         self.layer = layer
         self.chronological = chronological
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("BufferRetrieval requires packet.query.")
 
@@ -1225,7 +1308,7 @@ class BufferRetrieval(RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
-class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
+class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Use vector seeds plus graph-neighbor expansion for enriched note records.
 
     Constructor: ``top_k`` and ``candidate_k`` must be positive. ``layer`` must
@@ -1278,7 +1361,7 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
         self.query_expand_with_llm = query_expand_with_llm
         self.prompt = prompt
 
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
             raise ValueError("VectorGraphSeedAndExpandRetrieval requires packet.query.")
 
