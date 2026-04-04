@@ -38,11 +38,11 @@ from ..utils._graph_family import graph_metadata_from_record
 from ..utils._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
 from ..utils._template import (
     PromptPlan,
-    build_simple_prompt_plan,
     ensure_prompt_plan,
     project_packet_runtime_for_template,
     project_query_for_template,
     render_prompt_plan,
+    text_prompt,
 )
 from ..utils._trace import copy_trace
 
@@ -1413,7 +1413,7 @@ class VectorGraphSeedAndExpandRetrieval(RetrievalModule):
             "Return JSON with fields query_text, content, context, keywords, tags, category, attributes."
         )
         plan = ensure_prompt_plan(
-            self.prompt or build_simple_prompt_plan(default_template),
+            self.prompt or text_prompt(default_template),
             metadata_mode="prompt",
             context_builder=lambda current_packet, current_store: {
                 "query": project_query_for_template(current_packet.query),
