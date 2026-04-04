@@ -378,7 +378,7 @@ def test_llm_representation_prompt_template_missing_variables_do_not_crash() -> 
 def test_llm_representation_prompt_template_supports_recalled_prompt_from_current_store() -> None:
     from memprimitive.baselines import ConcatenateReadout, LLMRepresentation, PassThroughUnitFormation, RecencyRetrieval
     from memprimitive.pipeline import MemoryPipeline
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     unit_packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice is preparing a reply.", source="notes")),
@@ -396,9 +396,9 @@ def test_llm_representation_prompt_template_supports_recalled_prompt_from_curren
 
     rep = LLMRepresentation(
         field="summary",
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "Use {{ recalled_prompt }} while summarizing {{ unit.text }}",
-            recall_plan=build_simple_prompt_plan("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
             recall_query_builder=lambda packet, current_store, context: f"profile for {context['unit']['text']}",
             sub_recall_pipeline=retrieve_pipeline,
         ),
@@ -421,7 +421,7 @@ def test_llm_representation_prompt_template_supports_recalled_prompt_from_curren
 def test_llm_representation_prompt_template_empty_recalled_prompt_falls_back_to_empty_string() -> None:
     from memprimitive.baselines import ConcatenateReadout, LLMRepresentation, PassThroughUnitFormation, RecencyRetrieval
     from memprimitive.pipeline import MemoryPipeline
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     unit_packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice is preparing a reply.", source="notes")),
@@ -434,9 +434,9 @@ def test_llm_representation_prompt_template_empty_recalled_prompt_falls_back_to_
     )
     rep = LLMRepresentation(
         field="summary",
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "prefix {{ recalled_prompt }} suffix",
-            recall_plan=build_simple_prompt_plan("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
             recall_query_builder=lambda packet, current_store, context: f"profile for {context['unit']['text']}",
             sub_recall_pipeline=retrieve_pipeline,
         ),
@@ -2985,7 +2985,7 @@ def test_vector_graph_seed_and_expand_retrieval_system_prompt_template_renders_q
 ) -> None:
     from memprimitive.utils import _runtime
     from memprimitive.baselines import VectorGraphSeedAndExpandRetrieval
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     fake_runtime = _FakeAMEMRuntime()
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
@@ -3021,7 +3021,7 @@ def test_vector_graph_seed_and_expand_retrieval_system_prompt_template_renders_q
         neighbor_expansion_k=1,
         note_namespace="amem",
         query_expand_with_llm=True,
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "Expand {{ query.text }} for {{ retrieval.layer }} "
             "with candidate_k={{ retrieval.candidate_k }} and now={{ runtime.now }}"
         ),
@@ -3038,7 +3038,7 @@ def test_vector_graph_seed_and_expand_retrieval_system_prompt_template_supports_
     from memprimitive.utils import _runtime
     from memprimitive.baselines import ConcatenateReadout, RecencyRetrieval, VectorGraphSeedAndExpandRetrieval
     from memprimitive.pipeline import MemoryPipeline
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     fake_runtime = _FakeAMEMRuntime()
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
@@ -3084,9 +3084,9 @@ def test_vector_graph_seed_and_expand_retrieval_system_prompt_template_supports_
         neighbor_expansion_k=1,
         note_namespace="amem",
         query_expand_with_llm=True,
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "Expand {{ query.text }} for {{ retrieval.layer }} with {{ recalled_prompt }}",
-            recall_plan=build_simple_prompt_plan("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
             recall_query_builder=lambda packet, current_store, context: f"context for {context['query']['text']}",
             sub_recall_pipeline=retrieve_pipeline,
         ),
@@ -3643,7 +3643,7 @@ def test_hierarchical_organization_generate_mode_supports_recalled_prompt_from_c
     from memprimitive.baselines import ConcatenateReadout, HierarchicalOrganization, RecencyRetrieval
     from memprimitive.pipeline import MemoryPipeline
     from memprimitive.utils import _runtime
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     fake_runtime = _FakeHierarchicalRuntime()
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
@@ -3690,9 +3690,9 @@ def test_hierarchical_organization_generate_mode_supports_recalled_prompt_from_c
         extract_mode="generate",
         extract_fields=("summary",),
         group_by=("session_id",),
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "CUSTOM HIERARCHICAL PROMPT {{ recalled_prompt }} / {{ group_key.session_id }}",
-            recall_plan=build_simple_prompt_plan("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
             recall_query_builder=lambda packet, current_store, context: f"memory for {context['group_key']['session_id']}",
             sub_recall_pipeline=retrieve_pipeline,
         ),
@@ -3756,7 +3756,7 @@ def test_hierarchical_evolution_generate_mode_supports_recalled_prompt_from_curr
     from memprimitive.baselines import ConcatenateReadout, HierarchicalEvolution, RecencyRetrieval
     from memprimitive.pipeline import MemoryPipeline
     from memprimitive.utils import _runtime
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     fake_runtime = _FakeHierarchicalRuntime()
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
@@ -3803,9 +3803,9 @@ def test_hierarchical_evolution_generate_mode_supports_recalled_prompt_from_curr
         extract_mode="generate",
         extract_fields=("summary",),
         group_by=("session_id",),
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "CUSTOM HIERARCHICAL PROMPT {{ recalled_prompt }} / {{ source_layer }} -> {{ target_layer }}",
-            recall_plan=build_simple_prompt_plan("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+            recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
             recall_query_builder=lambda packet, current_store, context: f"memory for {context['group_key']['session_id']}",
             sub_recall_pipeline=retrieve_pipeline,
         ),
@@ -4284,7 +4284,7 @@ def test_json_readout_returns_json_string() -> None:
 
 def test_template_readout_simple_template_binds_context_filters_and_missing_variables() -> None:
     from memprimitive.baselines import TemplateReadout
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     episodic = MemoryRecord(
         record_id="rec-1",
@@ -4346,7 +4346,7 @@ def test_template_readout_simple_template_binds_context_filters_and_missing_vari
     )
 
     packet_out, _ = TemplateReadout(
-        prompt=build_simple_prompt_plan(
+        prompt=text_prompt(
             "Q={{ query.text }}\n"
             "Now={{ runtime.now }}\n"
             "Foo={{ query.metadata.foo | default('x') }}\n"
@@ -4381,7 +4381,7 @@ def test_template_readout_simple_template_binds_context_filters_and_missing_vari
 
 def test_template_readout_structured_template_tracks_blocks_groups_and_relations() -> None:
     from memprimitive.baselines import TemplateReadout
-    from memprimitive.utils._template import build_structured_prompt_plan
+    from memprimitive.utils._template import structured_prompt
 
     episodic = MemoryRecord(
         record_id="rec-1",
@@ -4422,7 +4422,7 @@ def test_template_readout_structured_template_tracks_blocks_groups_and_relations
     )
 
     packet_out, _ = TemplateReadout(
-        prompt=build_structured_prompt_plan({
+        prompt=structured_prompt({
             "blocks": [
                 {"id": "query", "title": "Query", "template": "{{ query.text }}"},
                 {
@@ -4463,10 +4463,10 @@ def test_template_readout_structured_template_tracks_blocks_groups_and_relations
 
 def test_template_readout_missing_value_can_render_placeholder() -> None:
     from memprimitive.baselines import TemplateReadout
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     packet_out, _ = TemplateReadout(
-        prompt=build_simple_prompt_plan("User={{ runtime.user_id }}"),
+        prompt=text_prompt("User={{ runtime.user_id }}"),
         missing_value="<missing>",
     ).run(Packet(query=Query(text="hello"), retrieved=RetrievedSet()), MemoryStore())
 
@@ -4478,11 +4478,11 @@ def test_template_readout_missing_value_can_render_placeholder() -> None:
 def test_template_readout_works_in_memory_pipeline_recall_flow() -> None:
     from memprimitive import MemoryPipeline
     from memprimitive.baselines import RecencyRetrieval, TemplateReadout
-    from memprimitive.utils._template import build_simple_prompt_plan
+    from memprimitive.utils._template import text_prompt
 
     pipeline = MemoryPipeline(
         retrieval=RecencyRetrieval(top_k=2),
-        readout=TemplateReadout(prompt=build_simple_prompt_plan("{{ retrieved.items | join_text }}")),
+        readout=TemplateReadout(prompt=text_prompt("{{ retrieved.items | join_text }}")),
     )
     pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
     pipeline.ingest(Observation(text="Bob likes coffee.", source="dialogue"))
