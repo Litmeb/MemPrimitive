@@ -18,6 +18,7 @@ Coverage map (one pass per public module that calls into LLM or embedding):
 - **memory_evolution**: ``LinkStrengtheningEvolution``,
   ``NeighborContextUpdateEvolution``, ``LLMFunctionCallEvolution``,
   ``HierarchicalEvolution`` (generate), ``HierarchicalOrganization`` (generate)
+- **readout**: ``MidDecodingMemoryReadout``
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from dataclasses import replace
 
 import pytest
 
+from memprimitive import MemoryPipeline
 from memprimitive.core import (
     MemoryRecord,
     MemoryStore,
@@ -34,6 +36,7 @@ from memprimitive.core import (
     Packet,
     Placement,
     Query,
+    RetrievedSet,
     StoreLayerSpec,
     StoreTopology,
 )
@@ -583,3 +586,67 @@ def test_smoke_hierarchical_organization_generate(require_real_runtime: None) ->
     ).run(packet, store)
     assert out.trace["organization"]["module"] == "hierarchical_organization"
     assert store.iter_records("semantic")
+
+
+@pytest.mark.integration
+def test_smoke_mid_decoding_memory_readout(require_real_runtime: None) -> None:
+    from memprimitive.baselines import ConcatenateReadout, KeywordCountRetrieval, MidDecodingMemoryReadout
+    from memprimitive.utils._template import text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile"), StoreLayerSpec(name="default")])
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-md-1",
+            unit_id="u-md-1",
+            layer="profile",
+            text="Alice prefers concise technical answers.",
+            timestamp="2026-04-05T00:00:01+00:00",
+            metadata={"representation": {"keywords": ["alice", "concise", "technical"]}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-md-2",
+            unit_id="u-md-2",
+            layer="profile",
+            text="Alice wants source provenance preserved when possible.",
+            timestamp="2026-04-05T00:00:02+00:00",
+            metadata={"representation": {"keywords": ["alice", "source", "provenance"]}},
+        )
+    )
+
+    retrieve_pipeline = MemoryPipeline(
+        retrieval=KeywordCountRetrieval(top_k=2, layer="profile"),
+        readout=ConcatenateReadout(),
+        store=MemoryStore(),
+    )
+    module = MidDecodingMemoryReadout(
+        prompt=text_prompt(
+            (
+                "You must call MEM_READ exactly once before answering.\n"
+                "Use the literal query string: alice concise provenance\n"
+                "After the tool returns, answer in one short English sentence."
+            )
+        ),
+        retrieve_pipeline=retrieve_pipeline,
+        max_turns=4,
+        allow_no_tool_call=False,
+    )
+
+    out, _ = module.run(
+        Packet(
+            query=Query(text="What should I remember about Alice?"),
+            retrieved=RetrievedSet(),
+        ),
+        store,
+    )
+
+    assert out.readout is not None
+    assert isinstance(out.readout.text, str) and out.readout.text.strip()
+    assert out.readout.metadata["memory_read_count"] >= 1
+    assert out.readout.source_ids
+    assert "rec-md-1" in out.readout.source_ids or "rec-md-2" in out.readout.source_ids
+    assert out.trace["readout"]["module"] == "mid_decoding_memory_readout"
+    assert any(call["tool_name"] == "MEM_READ" and call["status"] == "applied" for call in out.trace["readout"]["tool_calls"])

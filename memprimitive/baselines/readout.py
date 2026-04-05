@@ -24,6 +24,15 @@ from ..utils._template import (
     ensure_prompt_plan,
     render_prompt_plan,
 )
+from ..utils._mid_decoding_tools import (
+    ReadoutToolCallContext,
+    ReadoutToolSpec,
+    ToolExecutionState,
+    build_runtime_tools,
+    normalize_readout_tool_specs,
+    project_tool_specs_for_prompt,
+)
+from ..utils._runtime import Runtime
 from ..utils._trace import copy_trace
 
 
@@ -434,6 +443,153 @@ class NoteRenderReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
+class MidDecodingMemoryReadout(ReadoutModule):
+    """Run a multi-turn tool-calling answer pass during readout."""
+
+    spec = ModuleSpec(
+        name="mid_decoding_memory_readout",
+        slot="readout",
+        input_requirements=("query.text", "retrieved.items"),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(
+        self,
+        *,
+        prompt: PromptPlan | str,
+        retrieve_pipeline,
+        tools: list[str | ReadoutToolSpec] | None = None,
+        max_turns: int = 6,
+        strict_tools: bool = True,
+        allow_no_tool_call: bool = True,
+        runtime_now_factory: Callable[[], str] | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        embedding_model: str | None = None,
+    ) -> None:
+        self.prompt = ensure_prompt_plan(prompt, metadata_mode="prompt")
+        self.retrieve_pipeline = retrieve_pipeline
+        self.tool_specs = normalize_readout_tool_specs(
+            ["MEM_READ"] if tools is None else tools,
+            module_name=self.spec.name,
+            retrieve_pipeline=retrieve_pipeline,
+        )
+        self.max_turns = int(max_turns)
+        if self.max_turns <= 0:
+            raise ValueError("max_turns must be positive.")
+        self.strict_tools = bool(strict_tools)
+        self.allow_no_tool_call = bool(allow_no_tool_call)
+        self.runtime_now_factory = runtime_now_factory
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+        self.embedding_model = embedding_model
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("MidDecodingMemoryReadout requires packet.query.")
+        if packet.retrieved is None:
+            raise ValueError("MidDecodingMemoryReadout requires packet.retrieved.")
+
+        state = ToolExecutionState()
+        tool_context = ReadoutToolCallContext(
+            packet=packet,
+            store=store,
+            retrieve_pipeline=self.retrieve_pipeline,
+        )
+        runtime_tools = build_runtime_tools(
+            self.tool_specs,
+            context=tool_context,
+            state=state,
+            strict_tools=self.strict_tools,
+        )
+        rendered_prompt, prompt_trace, updated_store = render_prompt_plan(
+            ensure_prompt_plan(
+                self.prompt,
+                metadata_mode="prompt",
+                context_builder=lambda current_packet, current_store: {
+                    "tools": project_tool_specs_for_prompt(self.tool_specs),
+                },
+            ),
+            packet=packet,
+            store=store,
+            runtime_now_factory=self.runtime_now_factory,
+        )
+        tool_context.store = updated_store
+        final_text = self._run_agent(
+            rendered_prompt=rendered_prompt,
+            tools=runtime_tools,
+            context={
+                "slot": self.spec.slot,
+                "query_text": packet.query.text,
+            },
+        ).strip()
+        if not state.tool_calls and not self.allow_no_tool_call:
+            raise ValueError("MidDecodingMemoryReadout requires at least one successful or attempted tool call.")
+
+        source_ids = list(state.memory_read_record_ids)
+        readout = Readout(
+            text=final_text,
+            source_ids=source_ids,
+            metadata={
+                "tool_calls": list(state.tool_calls),
+                "memory_read_count": state.memory_read_count,
+                "memory_read_record_ids": source_ids,
+                "prompt_trace": self._prompt_trace_summary(prompt_trace),
+            },
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "tool_names": [spec.name for spec in self.tool_specs],
+            "tool_calls": list(state.tool_calls),
+            "memory_read_count": state.memory_read_count,
+            "source_ids": source_ids,
+            "prompt_is_template": self.prompt.mode == "structured"
+            or (isinstance(self.prompt.template, str) and "{{" in self.prompt.template and "}}" in self.prompt.template),
+        }
+        return replace(packet, readout=readout, trace=trace), tool_context.store
+
+    def _run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        runtime = Runtime(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            embedding_model=self.embedding_model,
+        )
+        runtime.require_llm(capability="MidDecodingMemoryReadout")
+        return str(
+            runtime.run_agent(
+                name="MemPrimitiveMidDecodingMemoryReadoutAgent",
+                instructions=(
+                    "You answer the user query and may call the provided tools mid-generation "
+                    "when memory lookup is needed. Use zero or more tool calls, then continue "
+                    "and finish with the final plain-text answer."
+                ),
+                input_text=json.dumps(
+                    {
+                        "prompt": rendered_prompt,
+                        "context": context,
+                    },
+                    ensure_ascii=False,
+                ),
+                temperature=0.0,
+                tools=tools,
+                max_turns=self.max_turns,
+            )
+            or ""
+        )
+
+    @staticmethod
+    def _prompt_trace_summary(prompt_trace: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "template_mode": prompt_trace.get("template_mode"),
+            "missing_variables": list(prompt_trace.get("missing_variables", [])),
+            "resolved_variable_count": len(prompt_trace.get("resolved_variables", [])),
+        }
+
+
 class TemplateReadout(ReadoutModule):
     """Render retrieved context through a lightweight templating layer."""
 
@@ -512,5 +668,6 @@ BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     GraphRelationReadout,
     PromptContextReadout,
     NoteRenderReadout,
+    MidDecodingMemoryReadout,
     TemplateReadout,
 )
