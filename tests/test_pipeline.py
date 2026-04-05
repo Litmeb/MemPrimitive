@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import pytest
 
@@ -24,6 +25,7 @@ from memprimitive.baselines import (
     EmbeddingSimilarityRetrieval,
     EntityRetrieval,
     GraphAppendOrganization,
+    GraphDeduplicationAppendOrganization,
     GraphAppendLinkReadyOrganization,
     GraphLinkEvolution,
     GraphNeighborContextTraceEvolution,
@@ -996,6 +998,56 @@ def test_memory_pipeline_accepts_graph_organization_with_compatible_store_topolo
 
     assert packet.trace["organization"]["target_layer"] == "knowledge_graph"
     assert pipeline.store.count("knowledge_graph") == 1
+
+
+def test_memory_pipeline_accepts_graph_deduplication_organization_with_merge_behavior() -> None:
+    class SeededTripleRepresentation(TripleRepresentation):
+        _BY_TEXT = {
+            "Alice likes tea.": {
+                "triples": [("Alice", "likes", "tea")],
+                "entities": ["Alice", "tea"],
+                "embedding": [1.0, 0.0],
+            },
+            "Alice likes jasmine tea.": {
+                "triples": [("Alice", "likes", "jasmine tea")],
+                "entities": ["Alice", "jasmine tea"],
+                "embedding": [0.99, 0.01],
+            },
+        }
+
+        def _represent_unit(self, unit):
+            payload = self._BY_TEXT[unit.text.strip()]
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=list(payload["entities"]),
+                triples=list(payload["triples"]),
+                embedding=list(payload["embedding"]),
+                representation_elements=("text", "embedding", "triples"),
+            )
+            return represented, {"source": "test_seed"}
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    pipeline = MemoryPipeline(
+        representation=SeededTripleRepresentation(method="direct"),
+        store=store,
+        organization=GraphDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.8),
+    )
+
+    pipeline.ingest(Observation(text="Alice likes tea.", source="notes"))
+    packet = pipeline.ingest(Observation(text="Alice likes jasmine tea.", source="notes"))
+
+    assert pipeline.store.count("knowledge_graph") == 1
+    assert packet.trace["organization"]["module"] == "graph_deduplication_append_organization"
+    assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
+    assert pipeline.store.iter_records("knowledge_graph")[0].text == "Alice likes jasmine tea."
 
 
 def test_memory_pipeline_accepts_graph_organization_separate_mode() -> None:

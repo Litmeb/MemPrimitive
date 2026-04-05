@@ -1955,6 +1955,10 @@ def test_query_rewrite_retrieval_is_registered_in_baseline_exports() -> None:
     assert "QueryRewriteRetrieval" in registered_baseline_class_names()
 
 
+def test_graph_deduplication_append_organization_is_registered_in_baseline_exports() -> None:
+    assert "GraphDeduplicationAppendOrganization" in registered_baseline_class_names()
+
+
 class _FakeAMEMRuntime:
     def require_llm(self, *, capability: str) -> None:
         return None
@@ -3369,6 +3373,228 @@ def test_graph_append_organization_separate_mode_requires_separate_layer() -> No
 
     with pytest.raises(ValueError, match="requires separate_layer"):
         GraphAppendOrganization(target_layer="knowledge_graph", separate=True).run(packet, store)
+
+
+def test_graph_deduplication_append_organization_merges_top1_match_and_dedupes_relation_destination_pairs() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        _BY_TEXT = {
+            "Alice likes tea.": {
+                "triples": [("Alice", "likes", "tea"), ("Alice", "visits", "park")],
+                "entities": ["Alice", "tea", "park"],
+                "embedding": [1.0, 0.0, 0.0],
+            },
+            "Alice loves tea and visits library.": {
+                "triples": [("Alicia", "likes", "tea"), ("Alicia", "likes", "library"), ("Alicia", "knows", "tea")],
+                "entities": ["Alicia", "tea", "library"],
+                "embedding": [0.95, 0.05, 0.0],
+            },
+        }
+
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            payload = self._BY_TEXT[unit.text.strip()]
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=list(payload["entities"]),
+                triples=list(payload["triples"]),
+                embedding=list(payload["embedding"]),
+                representation_elements=("text", "embedding", "triples"),
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text="Alice likes tea.", source="notes")), store)
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.8).run(packet, store)
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice loves tea and visits library.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.8).run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert len(records) == 1
+    record = records[0]
+    assert record.text == "Alice loves tea and visits library."
+    assert record.embedding == [0.95, 0.05, 0.0]
+    assert record.metadata["graph"]["entities"] == ["Alicia", "tea", "library"]
+    assert record.metadata["graph"]["triples"] == [
+        ("Alicia", "likes", "tea"),
+        ("Alice", "visits", "park"),
+        ("Alicia", "likes", "library"),
+        ("Alicia", "knows", "tea"),
+    ]
+    effect = packet.trace["organization"]["effects"][0]
+    assert effect["effect_type"] == "merge"
+    assert effect["matched_record_id"] == record.record_id
+    assert effect["top1_similarity"] > 0.8
+    assert packet.trace["organization"]["written_record_ids"] == [record.record_id]
+
+
+def test_graph_deduplication_append_organization_appends_when_threshold_not_met() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        _BY_TEXT = {
+            "Alice likes tea.": {
+                "triples": [("Alice", "likes", "tea")],
+                "entities": ["Alice", "tea"],
+                "embedding": [1.0, 0.0],
+            },
+            "Bob builds tools.": {
+                "triples": [("Bob", "builds", "tools")],
+                "entities": ["Bob", "tools"],
+                "embedding": [0.0, 1.0],
+            },
+        }
+
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            payload = self._BY_TEXT[unit.text.strip()]
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=list(payload["entities"]),
+                triples=list(payload["triples"]),
+                embedding=list(payload["embedding"]),
+                representation_elements=("text", "embedding", "triples"),
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    for text in ("Alice likes tea.", "Bob builds tools."):
+        packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
+        packet, store = SeededTripleRepresentation().run(packet, store)
+        packet, store = AlwaysTrigger().run(packet, store)
+        packet, store = GraphDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.95).run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert len(records) == 2
+    effect = packet.trace["organization"]["effects"][0]
+    assert effect["effect_type"] == "append"
+    assert effect["record_id"] in {record.record_id for record in records}
+    assert effect["top1_similarity"] == 0.0
+
+
+def test_graph_deduplication_append_organization_uses_runtime_embedding_and_skips_invalid_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphDeduplicationAppendOrganization, PassThroughUnitFormation
+    from memprimitive.utils import _runtime
+
+    fake_runtime = _FakeAMEMRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-missing",
+            unit_id="seed-missing",
+            layer="knowledge_graph",
+            text="Missing embedding",
+            timestamp="t0",
+            embedding=None,
+            metadata={"graph": {"entities": ["none"], "triples": [("None", "is", "missing")], "links": []}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-mismatch",
+            unit_id="seed-mismatch",
+            layer="knowledge_graph",
+            text="Wrong dim",
+            timestamp="t1",
+            embedding=[1.0, 2.0],
+            metadata={"graph": {"entities": ["wrong"], "triples": [("Wrong", "dim", "node")], "links": []}},
+        )
+    )
+    target_embedding = fake_runtime.embed("Alice likes tea.")
+    store.append(
+        MemoryRecord(
+            record_id="rec-target",
+            unit_id="seed-target",
+            layer="knowledge_graph",
+            text="Old Alice record",
+            timestamp="t2",
+            embedding=list(target_embedding),
+            metadata={
+                "representation": {"text": "Old Alice record", "normalized_text": "old alice record"},
+                "graph": {"entities": ["Alice"], "triples": [("Alice", "likes", "tea")], "links": []},
+            },
+        )
+    )
+
+    packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text="Alice likes tea.", source="notes")), store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.99).run(packet, store)
+
+    record = [item for item in store.iter_records("knowledge_graph") if item.record_id == "rec-target"][0]
+    assert record.text == "Alice likes tea."
+    assert record.embedding == target_embedding
+    assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
+    assert store.count("knowledge_graph") == 3
+
+
+def test_graph_deduplication_append_organization_separate_mode_still_writes_source_record_on_merge() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        _BY_TEXT = {
+            "Alice likes tea.": {
+                "triples": [("Alice", "likes", "tea")],
+                "entities": ["Alice", "tea"],
+                "embedding": [1.0, 0.0],
+            },
+            "Alice likes jasmine tea.": {
+                "triples": [("Alice", "likes", "jasmine tea")],
+                "entities": ["Alice", "jasmine tea"],
+                "embedding": [0.98, 0.02],
+            },
+        }
+
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            payload = self._BY_TEXT[unit.text.strip()]
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=list(payload["entities"]),
+                triples=list(payload["triples"]),
+                embedding=list(payload["embedding"]),
+                representation_elements=("text", "embedding", "triples"),
+            )
+            return represented, {"source": "test_seed"}
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="source_notes"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+
+    for text in ("Alice likes tea.", "Alice likes jasmine tea."):
+        packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
+        packet, store = SeededTripleRepresentation().run(packet, store)
+        packet, store = AlwaysTrigger().run(packet, store)
+        packet, store = GraphDeduplicationAppendOrganization(
+            target_layer="knowledge_graph",
+            threshold=0.8,
+            separate=True,
+            separate_layer="source_notes",
+        ).run(packet, store)
+
+    assert store.count("source_notes") == 2
+    assert store.count("knowledge_graph") == 1
+    graph_record = store.iter_records("knowledge_graph")[0]
+    source_records = store.iter_records("source_notes")
+    assert graph_record.metadata["hierarchical"]["source_record_ids"] == [source_records[-1].record_id]
+    assert packet.trace["organization"]["source_written_record_ids"] == [source_records[-1].record_id]
+    assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
 
 
 def test_memory_store_graph_link_round_trip_returns_neighbors() -> None:

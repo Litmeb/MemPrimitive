@@ -16,7 +16,7 @@ from ..contracts import (
 from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
 from ..interfaces import OrganizationModule
 
-from ..utils._graph_family import graph_metadata_for_unit
+from ..utils._graph_family import graph_metadata_for_unit, graph_metadata_from_record, normalize_graph_metadata
 from ..utils._hierarchical_family import (
     append_hierarchical_records,
     build_extracted_triple_metadata,
@@ -37,6 +37,7 @@ from ..utils._llm_function_tools import (
     write_tool_specs_require_graph_contracts,
 )
 from ..utils._runtime import Runtime
+from ..utils._runtime import get_runtime
 from ..utils._template import (
     PromptPlan,
     ensure_prompt_plan,
@@ -126,6 +127,39 @@ def _append_records_for_placements(
         written_record_ids.append(record.record_id)
         written_unit_ids.append(unit.unit_id)
     return written_record_ids, written_unit_ids, skipped_units
+
+
+def _ensure_unit_embedding(unit) -> Any:
+    if unit.embedding is not None:
+        return unit
+    runtime = get_runtime()
+    return replace(unit, embedding=runtime.embed(unit.text))
+
+
+def _representation_summary_for_graph_merge(unit, existing_record: MemoryRecord) -> dict[str, Any]:
+    existing_representation = existing_record.metadata.get("representation", {})
+    if not isinstance(existing_representation, dict):
+        existing_representation = {}
+    updated = {
+        **existing_representation,
+        "text": unit.text,
+        "normalized_text": unit.normalized_text or unit.text.casefold().strip(),
+    }
+    if unit.embedding is not None:
+        updated["embedding"] = {"dim": len(unit.embedding)}
+    return updated
+
+
+def _merge_graph_triples(
+    existing_triples: list[tuple[str, str, str]],
+    incoming_triples: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    merged: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for triple in existing_triples:
+        merged[(str(triple[1]), str(triple[2]))] = tuple(str(value) for value in triple)
+    for triple in incoming_triples:
+        merged[(str(triple[1]), str(triple[2]))] = tuple(str(value) for value in triple)
+    return list(merged.values())
 
 
 class ConditionalLayerOrganization(OrganizationModule):
@@ -326,6 +360,188 @@ class GraphAppendOrganization(OrganizationModule):
             written_record_ids.append(triple_record.record_id)
             written_unit_ids.append(unit.unit_id)
         return written_record_ids, written_unit_ids, skipped_units, source_written_record_ids
+
+
+class GraphDeduplicationAppendOrganization(OrganizationModule):
+    """Append graph records, but merge into the nearest existing node when similar enough."""
+
+    spec = ModuleSpec(
+        name="graph_deduplication_append_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        store_requirements=("shape:Graph", "index:graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+        side_effects=("modify_store", "append_records", "rewrite_records"),
+    )
+    requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
+
+    def __init__(
+        self,
+        *,
+        target_layer: str = "knowledge_graph",
+        threshold: float,
+        separate: bool = False,
+        separate_layer: str | None = None,
+    ) -> None:
+        self.target_layer = target_layer
+        self.threshold = float(threshold)
+        self.separate = separate
+        self.separate_layer = None if separate_layer is None else str(separate_layer).strip()
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("GraphDeduplicationAppendOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("GraphDeduplicationAppendOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("GraphDeduplicationAppendOrganization requires decisions aligned with units.")
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(
+                f"GraphDeduplicationAppendOrganization requires target layer {self.target_layer!r} to be Graph."
+            )
+        if self.separate and not self.separate_layer:
+            raise ValueError("GraphDeduplicationAppendOrganization requires separate_layer when separate=True.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        written_record_ids: list[str] = []
+        written_unit_ids: list[str] = []
+        source_written_record_ids: list[str] = []
+        effects: list[dict[str, Any]] = []
+        skipped_units = 0
+
+        for raw_unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            if not decision:
+                skipped_units += 1
+                effects.append({"unit_id": raw_unit.unit_id, "effect_type": "skipped"})
+                continue
+
+            unit = _ensure_unit_embedding(raw_unit)
+            source_record = None
+            if self.separate:
+                source_sequence_id = store.next_sequence_id()
+                source_record = MemoryRecord.from_unit(unit=unit, layer=self.separate_layer, sequence_id=source_sequence_id)
+                store.append(source_record)
+                source_written_record_ids.append(source_record.record_id)
+
+            matched_record, top1_similarity = self._find_best_match(store, unit)
+            if matched_record is not None and top1_similarity > self.threshold:
+                merged_record = self._merge_record(matched_record, unit)
+                if source_record is not None:
+                    merged_record.metadata.update(
+                        build_extracted_triple_metadata(
+                            source_layer=self.separate_layer,
+                            target_layer=placement.target_layer,
+                            source_record=source_record,
+                            triples=list(merged_record.metadata["graph"]["triples"]),
+                        )
+                    )
+                store.replace_record(self.target_layer, matched_record.record_id, merged_record)
+                written_record_ids.append(matched_record.record_id)
+                written_unit_ids.append(unit.unit_id)
+                effects.append(
+                    {
+                        "unit_id": unit.unit_id,
+                        "effect_type": "merge",
+                        "matched_record_id": matched_record.record_id,
+                        "top1_similarity": float(top1_similarity),
+                        "threshold": self.threshold,
+                        "source_record_id": None if source_record is None else source_record.record_id,
+                    }
+                )
+                continue
+
+            sequence_id = store.next_sequence_id()
+            record = MemoryRecord.from_unit(unit=unit, layer=placement.target_layer, sequence_id=sequence_id)
+            record.metadata.update({"graph": graph_metadata_for_unit(unit, layer=placement.target_layer)})
+            if source_record is not None:
+                record.metadata.update(
+                    build_extracted_triple_metadata(
+                        source_layer=self.separate_layer,
+                        target_layer=placement.target_layer,
+                        source_record=source_record,
+                        triples=list(record.metadata["graph"]["triples"]),
+                    )
+                )
+            store.append(record)
+            written_record_ids.append(record.record_id)
+            written_unit_ids.append(unit.unit_id)
+            effects.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "effect_type": "append",
+                    "record_id": record.record_id,
+                    "top1_similarity": None if top1_similarity is None else float(top1_similarity),
+                    "threshold": self.threshold,
+                    "source_record_id": None if source_record is None else source_record.record_id,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "threshold": self.threshold,
+            "separate": self.separate,
+            "separate_layer": self.separate_layer,
+            "written_record_ids": written_record_ids,
+            "source_written_record_ids": source_written_record_ids,
+            "written_unit_ids": written_unit_ids,
+            "skipped_unit_count": skipped_units,
+            "effects": effects,
+            "graph_metadata_schema": (
+                "graph.layer",
+                "graph.shape",
+                "graph.entities",
+                "graph.triples",
+                "graph.links",
+                "graph.node_count",
+                "graph.link_count",
+                "graph.last_linked_at",
+                "graph.link_history",
+            ),
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+    def _find_best_match(self, store: MemoryStore, unit) -> tuple[MemoryRecord | None, float | None]:
+        if unit.embedding is None:
+            return None, None
+        best_record: MemoryRecord | None = None
+        best_similarity: float | None = None
+        for candidate in store.iter_records(self.target_layer):
+            if candidate.embedding is None or len(candidate.embedding) != len(unit.embedding):
+                continue
+            similarity = Runtime.cosine_similarity(unit.embedding, candidate.embedding)
+            if best_similarity is None or similarity > best_similarity:
+                best_record = candidate
+                best_similarity = float(similarity)
+        return best_record, best_similarity
+
+    def _merge_record(self, existing_record: MemoryRecord, unit) -> MemoryRecord:
+        existing_graph = graph_metadata_from_record(existing_record)
+        merged_graph = normalize_graph_metadata(
+            {
+                **existing_graph,
+                "entities": list(unit.entities),
+                "triples": _merge_graph_triples(list(existing_graph["triples"]), list(unit.triples)),
+            },
+            layer=existing_record.layer,
+        )
+        return MemoryRecord(
+            record_id=existing_record.record_id,
+            unit_id=unit.unit_id,
+            layer=existing_record.layer,
+            text=unit.text,
+            timestamp=unit.timestamp,
+            embedding=None if unit.embedding is None else list(unit.embedding),
+            metadata={
+                **existing_record.metadata,
+                "unit_type": unit.unit_type,
+                "representation": _representation_summary_for_graph_merge(unit, existing_record),
+                "graph": merged_graph,
+            },
+        )
 
 
 class PlacementWithoutAppendOrganization(OrganizationModule):
@@ -760,6 +976,7 @@ BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
     ConditionalLayerOrganization,
     GraphAppendOrganization,
+    GraphDeduplicationAppendOrganization,
     PlacementWithoutAppendOrganization,
     GraphAppendLinkReadyOrganization,
     HierarchicalOrganization,
