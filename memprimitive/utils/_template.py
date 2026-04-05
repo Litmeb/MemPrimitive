@@ -481,12 +481,12 @@ def render_recall_query(
     return str(recall_query_builder(packet, store, context) or "")
 
 
-def run_prompt_plan_sub_recall(
-    plan: PromptPlan,
+def run_child_recall_pipeline(
     *,
     store: MemoryStore,
     query_text: str,
     retrieve_pipeline,
+    fallback_readout_plan: PromptPlan | str | None = None,
 ) -> tuple[Readout, MemoryStore]:
     from ..pipeline import _iter_slot_modules
 
@@ -499,17 +499,41 @@ def run_prompt_plan_sub_recall(
     if readout_module is not None:
         for module in _iter_slot_modules(readout_module):
             packet, current_store = module.run(packet, current_store)
-    else:
+    elif fallback_readout_plan is not None:
         rendered_text, metadata, current_store = render_prompt_plan(
-            ensure_prompt_plan(plan, metadata_mode="readout"),
+            ensure_prompt_plan(fallback_readout_plan, metadata_mode="readout"),
             packet=packet,
             store=current_store,
         )
-        packet = replace(packet, readout=Readout(text=rendered_text, source_ids=list(metadata.get("used_record_ids", [])), metadata=metadata))
+        packet = replace(
+            packet,
+            readout=Readout(
+                text=rendered_text,
+                source_ids=list(metadata.get("used_record_ids", [])),
+                metadata=metadata,
+            ),
+        )
+    else:
+        raise RuntimeError("Child recall pipeline returned no readout and no fallback readout plan was provided.")
 
     if packet.readout is None:
         raise RuntimeError("Sub recall pipeline returned no readout.")
     return packet.readout, current_store
+
+
+def run_prompt_plan_sub_recall(
+    plan: PromptPlan,
+    *,
+    store: MemoryStore,
+    query_text: str,
+    retrieve_pipeline,
+) -> tuple[Readout, MemoryStore]:
+    return run_child_recall_pipeline(
+        store=store,
+        query_text=query_text,
+        retrieve_pipeline=retrieve_pipeline,
+        fallback_readout_plan=plan,
+    )
 
 
 def metadata_from_resolution_state(*, state: ResolutionState) -> dict[str, Any]:
