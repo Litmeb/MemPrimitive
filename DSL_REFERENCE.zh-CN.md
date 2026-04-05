@@ -190,6 +190,7 @@ unit_formation
 | `GraphReadout` (`graph_readout`) | `include_links=True` | 展示图记录及 links。 |
 | `PromptContextReadout` (`prompt_context_readout`) | `memory_layer="reflections"`, `default_strategy="reflexion"`, `top_k=3` | 把 recall 结果整理成 prompt context。 |
 | `NoteRenderReadout` (`note_render_readout`) | `note_namespace="note"`, `default_category="Uncategorized"`, `include_context=True`, `include_tags=True` | 渲染富 note payload。 |
+| `MidDecodingMemoryReadout` (`mid_decoding_memory_readout`) | `prompt`, `retrieve_pipeline`, `tools=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `runtime_now_factory=None`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 在 readout 阶段复用 `Runtime.run_agent(..., tools=..., max_turns=...)` 做多轮 tool-calling answer generation。第一版默认只内建 `MEM_READ`：LLM 可在生成中途用 JSON 参数触发一次子 recall，再继续完成最终答案。最终仍返回标准 `Readout(text, source_ids, metadata)`，其中 `source_ids` 汇总所有 `MEM_READ` 命中的 `record_id`。 |
 | `TemplateReadout` (`template_readout`) | `prompt`, `filters=None`, `missing_value=""`, `note_namespace="note"`, `default_category="Uncategorized"`, `runtime_now_factory=None` | 通过模板系统把 recall 结果渲染成可控文本，是当前 template prompt/readout 的统一公开入口。 |
 
 ## Tool Call 写路径

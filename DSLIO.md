@@ -774,6 +774,18 @@ readout(retrieved, store, context, config)
 
 这是一个非常实用的起点。
 
+现在 `readout` 也不必只做“retrieval 结果的最后格式化”。
+
+在当前 MemPrimitive baseline 里，`MidDecodingMemoryReadout` 说明了一种更强但仍保持接口稳定的模式：
+
+* `retrieval` 先正常产出初始 `retrieved`
+* `readout` 内部再通过 `Runtime.run_agent(..., tools=..., max_turns=...)` 做多轮生成
+* LLM 可以在生成中途调用 `MEM_READ` 这类 readout-side tool
+* `MEM_READ` 再复用一个 child `retrieve_pipeline` / 现有 recall 能力执行 memory read
+* 最终对外仍然只返回标准 `Readout(text, source_ids, metadata)`
+
+也就是说，mid-decoding tool calling 可以先落在 `readout` IO 边界内，而不必为了这类能力额外引入新的 pipeline slot。
+
 ---
 
 # 8. 一个具体例子：如何模块化组合
