@@ -195,9 +195,55 @@ def builtin_write_tool_spec(name: str, *, module_name: str) -> WriteToolSpec:
             },
             executor=_build_delete_executor(module_name=module_name, graph_aware=True),
         )
+    if normalized == "GRAPH_ADD_LINK":
+        return WriteToolSpec(
+            name="GRAPH_ADD_LINK",
+            description="Append one or more outgoing links to an existing graph memory record.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string"},
+                    "links": {"type": "array"},
+                },
+                "required": ["record_id", "links"],
+                "additionalProperties": False,
+            },
+            executor=_build_graph_link_add_executor(module_name=module_name),
+        )
+    if normalized == "GRAPH_UPDATE_LINK":
+        return WriteToolSpec(
+            name="GRAPH_UPDATE_LINK",
+            description="Replace the outgoing links of an existing graph memory record.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string"},
+                    "links": {"type": "array"},
+                },
+                "required": ["record_id", "links"],
+                "additionalProperties": False,
+            },
+            executor=_build_graph_link_update_executor(module_name=module_name),
+        )
+    if normalized == "GRAPH_DELETE_LINK":
+        return WriteToolSpec(
+            name="GRAPH_DELETE_LINK",
+            description="Delete one or more outgoing links from an existing graph memory record.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string"},
+                    "links": {"type": "array"},
+                },
+                "required": ["record_id", "links"],
+                "additionalProperties": False,
+            },
+            executor=_build_graph_link_delete_executor(module_name=module_name),
+        )
     raise ValueError(
         f"Unknown built-in write tool {name!r}. Supported values: "
-        "ADD, UPDATE, DELETE, GRAPH_ADD, GRAPH_UPDATE, GRAPH_DELETE."
+        "ADD, UPDATE, DELETE, GRAPH_ADD, GRAPH_UPDATE, GRAPH_DELETE, "
+        "GRAPH_ADD_LINK, GRAPH_UPDATE_LINK, GRAPH_DELETE_LINK."
     )
 
 
@@ -319,7 +365,7 @@ def _accumulate_effect_ids(state: ToolExecutionState, effects: list[dict[str, An
             continue
         if action == "add" and record_id not in state.written_record_ids:
             state.written_record_ids.append(record_id)
-        elif action == "update" and record_id not in state.updated_record_ids:
+        elif action in {"update", "graph_add_link", "graph_update_link", "graph_delete_link"} and record_id not in state.updated_record_ids:
             state.updated_record_ids.append(record_id)
         elif action == "delete" and record_id not in state.deleted_record_ids:
             state.deleted_record_ids.append(record_id)
@@ -493,8 +539,171 @@ def _build_delete_executor(
     return _execute
 
 
+def _build_graph_link_add_executor(
+    *,
+    module_name: str,
+) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
+    def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
+        record = find_record_by_id(
+            context.store,
+            str(arguments.get("record_id", "")).strip(),
+            visible_records=context.visible_records,
+            restricted=context.module_slot == "memory_evolution",
+        )
+        return _apply_graph_link_change(
+            context,
+            record=record,
+            links=_coerce_graph_links(arguments.get("links"), tool_name="GRAPH_ADD_LINK"),
+            module_name=module_name,
+            tool_name="GRAPH_ADD_LINK",
+            action="graph_add_link",
+            effect_type="graph_link_add",
+            operation="add",
+        )
+
+    return _execute
+
+
+def _build_graph_link_update_executor(
+    *,
+    module_name: str,
+) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
+    def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
+        record = find_record_by_id(
+            context.store,
+            str(arguments.get("record_id", "")).strip(),
+            visible_records=context.visible_records,
+            restricted=context.module_slot == "memory_evolution",
+        )
+        return _apply_graph_link_change(
+            context,
+            record=record,
+            links=_coerce_graph_links(arguments.get("links"), tool_name="GRAPH_UPDATE_LINK"),
+            module_name=module_name,
+            tool_name="GRAPH_UPDATE_LINK",
+            action="graph_update_link",
+            effect_type="graph_link_update",
+            operation="replace",
+        )
+
+    return _execute
+
+
+def _build_graph_link_delete_executor(
+    *,
+    module_name: str,
+) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
+    def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
+        record = find_record_by_id(
+            context.store,
+            str(arguments.get("record_id", "")).strip(),
+            visible_records=context.visible_records,
+            restricted=context.module_slot == "memory_evolution",
+        )
+        return _apply_graph_link_change(
+            context,
+            record=record,
+            links=_coerce_graph_links(arguments.get("links"), tool_name="GRAPH_DELETE_LINK"),
+            module_name=module_name,
+            tool_name="GRAPH_DELETE_LINK",
+            action="graph_delete_link",
+            effect_type="graph_link_delete",
+            operation="remove",
+        )
+
+    return _execute
+
+
+def _coerce_graph_links(value: Any, *, tool_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{tool_name} links must be an array of strings.")
+    links: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{tool_name} links must be an array of strings.")
+        normalized = item.strip()
+        if normalized:
+            links.append(normalized)
+    return list(dict.fromkeys(links))
+
+
+def _apply_graph_link_change(
+    context: WriteToolCallContext,
+    *,
+    record: MemoryRecord,
+    links: list[str],
+    module_name: str,
+    tool_name: str,
+    action: str,
+    effect_type: str,
+    operation: Literal["add", "replace", "remove"],
+) -> WriteToolResult:
+    _require_graph_layer(context.store, record.layer, tool_name=tool_name)
+    graph = graph_metadata_for_write(layer=record.layer, record=record)
+    previous_links = list(graph.get("links", []))
+    if operation == "add":
+        current_links = list(dict.fromkeys([*previous_links, *links]))
+        added_links = [link for link in current_links if link not in previous_links]
+        removed_links: list[str] = []
+    elif operation == "replace":
+        current_links = list(links)
+        added_links = [link for link in current_links if link not in previous_links]
+        removed_links = [link for link in previous_links if link not in current_links]
+    else:
+        current_links = [link for link in previous_links if link not in set(links)]
+        added_links = []
+        removed_links = [link for link in previous_links if link not in current_links]
+    updated = replace(
+        record,
+        metadata={
+            **record.metadata,
+            "graph": {
+                **graph,
+                "links": current_links,
+                "link_count": len(current_links),
+                "last_linked_at": _utc_now_iso(),
+            },
+            "llm_tool": {
+                **(record.metadata.get("llm_tool", {}) if isinstance(record.metadata.get("llm_tool"), dict) else {}),
+                "action": tool_name,
+                "module": module_name,
+                "module_slot": context.module_slot,
+                "timestamp": _utc_now_iso(),
+            },
+        },
+    )
+    context.store.replace_record(record.layer, record.record_id, updated)
+    return WriteToolResult(
+        effects=[
+            {
+                "action": action,
+                "effect_type": effect_type,
+                "record_id": record.record_id,
+                "layer": record.layer,
+                "status": "applied",
+                "links": list(links),
+                "previous_links": previous_links,
+                "current_links": current_links,
+                "added_links": added_links,
+                "removed_links": removed_links,
+            }
+        ],
+        store=context.store,
+    )
+
+
 def write_tool_specs_require_graph_contracts(specs: tuple[WriteToolSpec, ...]) -> bool:
-    return any(spec.name in {"GRAPH_ADD", "GRAPH_UPDATE", "GRAPH_DELETE"} for spec in specs)
+    return any(
+        spec.name in {
+            "GRAPH_ADD",
+            "GRAPH_UPDATE",
+            "GRAPH_DELETE",
+            "GRAPH_ADD_LINK",
+            "GRAPH_UPDATE_LINK",
+            "GRAPH_DELETE_LINK",
+        }
+        for spec in specs
+    )
 
 
 def _require_graph_layer(store: MemoryStore, layer: str, *, tool_name: str) -> None:

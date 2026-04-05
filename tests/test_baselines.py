@@ -960,6 +960,195 @@ def test_llm_function_call_evolution_graph_delete_rejects_record_outside_selecte
         )
 
 
+def test_llm_function_call_organization_graph_add_link_only_updates_links() -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+    from memprimitive.utils._graph_family import graph_metadata_from_record
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="seed-1",
+            layer="knowledge_graph",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:01Z",
+            metadata={"graph": {"entities": ["Alice"], "triples": [["Alice", "likes", "tea"]], "links": []}},
+        )
+    )
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="link Alice to Bob", source="dialogue")),
+        store,
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(
+        prompt="Patch graph links for {{ unit.text }}",
+        tools=["GRAPH_ADD_LINK"],
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "links": ["rec-2", "rec-3", "rec-2"]})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    record = store.iter_records("knowledge_graph")[0]
+    graph = graph_metadata_from_record(record)
+    assert record.text == "Alice likes tea"
+    assert graph["entities"] == ["Alice"]
+    assert graph["triples"] == [("Alice", "likes", "tea")]
+    assert graph["links"] == ["rec-2", "rec-3"]
+    assert graph["link_count"] == 2
+    assert record.metadata["llm_tool"]["action"] == "GRAPH_ADD_LINK"
+    assert packet_out.trace["organization"]["updated_record_ids"] == ["rec-1"]
+    assert packet_out.trace["organization"]["effects"][0]["added_links"] == ["rec-2", "rec-3"]
+
+
+def test_llm_function_call_organization_graph_link_tool_rejects_non_graph_layer() -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+
+    store = MemoryStore()
+    _seed_layer(store, "default", ["plain note"])
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="try graph link", source="dialogue")),
+        store,
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(
+        prompt="Patch links",
+        tools=["GRAPH_ADD_LINK"],
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "links": ["rec-2"]})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="GRAPH_ADD_LINK requires target layer 'default' to be Graph."):
+        module.run(packet, store)
+
+
+def test_llm_function_call_evolution_graph_add_link_rejects_record_outside_selected_records() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="seed-1",
+            layer="knowledge_graph",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:01Z",
+            metadata={"graph": {"entities": ["Alice"], "links": [], "triples": []}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="seed-2",
+            layer="knowledge_graph",
+            text="Bob likes coffee",
+            timestamp="2026-01-01T00:00:02Z",
+            metadata={"graph": {"entities": ["Bob"], "links": [], "triples": []}},
+        )
+    )
+    module = LLMFunctionCallEvolution(
+        prompt="Patch links for {{ selected_records.0.text }}",
+        tools=["GRAPH_ADD_LINK"],
+        source_layer="knowledge_graph",
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Patch links for Alice likes tea"
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "links": ["rec-9"]})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(KeyError, match="Record 'rec-2' is not in the current evolution candidate set."):
+        module.run(
+            Packet(decisions_store={"knowledge_graph": {"record_ids": ["rec-1"]}}),
+            store,
+        )
+
+
+def test_llm_function_call_evolution_graph_update_link_replaces_links() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+    from memprimitive.utils._graph_family import graph_metadata_from_record
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="seed-1",
+            layer="knowledge_graph",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:01Z",
+            metadata={"graph": {"entities": ["Alice"], "links": ["rec-2"], "triples": []}},
+        )
+    )
+    module = LLMFunctionCallEvolution(
+        prompt="Replace links for {{ selected_records.0.text }}",
+        tools=["GRAPH_UPDATE_LINK"],
+        source_layer="knowledge_graph",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "links": ["rec-3", "rec-4"]})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(), store)
+
+    record = store.iter_records("knowledge_graph")[0]
+    graph = graph_metadata_from_record(record)
+    assert graph["links"] == ["rec-3", "rec-4"]
+    assert graph["link_count"] == 2
+    assert packet_out.trace["memory_evolution"]["updated_record_ids"] == ["rec-1"]
+    assert packet_out.trace["memory_evolution"]["effects"][0]["previous_links"] == ["rec-2"]
+    assert packet_out.trace["memory_evolution"]["effects"][0]["current_links"] == ["rec-3", "rec-4"]
+    assert record.metadata["llm_tool"]["action"] == "GRAPH_UPDATE_LINK"
+
+
+def test_llm_function_call_evolution_graph_delete_link_removes_only_requested_links() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+    from memprimitive.utils._graph_family import graph_metadata_from_record
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="seed-1",
+            layer="knowledge_graph",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:01Z",
+            metadata={"graph": {"entities": ["Alice"], "links": ["rec-2", "rec-3"], "triples": []}},
+        )
+    )
+    module = LLMFunctionCallEvolution(
+        prompt="Delete links for {{ selected_records.0.text }}",
+        tools=["GRAPH_DELETE_LINK"],
+        source_layer="knowledge_graph",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "links": ["rec-2", "rec-9"]})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(), store)
+
+    record = store.iter_records("knowledge_graph")[0]
+    graph = graph_metadata_from_record(record)
+    assert graph["links"] == ["rec-3"]
+    assert graph["link_count"] == 1
+    assert packet_out.trace["memory_evolution"]["effects"][0]["removed_links"] == ["rec-2"]
+    assert record.metadata["llm_tool"]["action"] == "GRAPH_DELETE_LINK"
+
+
 def test_llm_function_call_evolution_graph_tools_declare_graph_contracts() -> None:
     from memprimitive.baselines import LLMFunctionCallEvolution
     from memprimitive.contracts import RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT
@@ -971,6 +1160,19 @@ def test_llm_function_call_evolution_graph_tools_declare_graph_contracts() -> No
     assert graph_module.get_produces_contracts() == frozenset({RECORD_GRAPH_LINKS_CONTRACT})
     assert plain_module.get_requires_contracts() == frozenset()
     assert plain_module.get_produces_contracts() == frozenset()
+
+
+def test_llm_function_call_graph_link_tools_declare_graph_contracts() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization
+    from memprimitive.contracts import RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT
+
+    graph_org = LLMFunctionCallOrganization(prompt="x", tools=["GRAPH_ADD_LINK"])
+    graph_evo = LLMFunctionCallEvolution(prompt="x", tools=["GRAPH_DELETE_LINK"], source_layer="knowledge_graph")
+
+    assert graph_org.get_requires_contracts() == frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    assert graph_org.get_produces_contracts() == frozenset({RECORD_GRAPH_LINKS_CONTRACT})
+    assert graph_evo.get_requires_contracts() == frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    assert graph_evo.get_produces_contracts() == frozenset({RECORD_GRAPH_LINKS_CONTRACT})
 
 
 def test_llm_function_call_evolution_rejects_missing_tool_calls_when_required() -> None:

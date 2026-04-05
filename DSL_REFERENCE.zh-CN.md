@@ -5,7 +5,7 @@
 本文档重点覆盖：
 
 1. Pipeline 八个 slot 当前有哪些 baseline module。
-2. `tool call` 写路径里的六种默认工具与自定义工具协议。
+2. `tool call` 写路径里的九种默认工具与自定义工具协议。
 3. 如何使用模板系统编写 template prompt。
 
 ## Pipeline Slots
@@ -94,6 +94,7 @@ unit_formation
 | `AppendOrganization` (`append_organization`) | `target_layer="default"` | 直接 append 到固定 layer。 |
 | `ConditionalLayerOrganization` (`conditional_layer_organization`) | `default_layer="default"`, `rules=()` | 按 tags、entities、metadata 等规则路由到不同 layer。 |
 | `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 向图层追加记录，并维护 graph metadata；`separate=True` 时原文本与 triple 记录可分层落库。 |
+| `GraphDeduplicationAppendOrganization` (`graph_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 向图层写入前先与同 layer 现有 graph records 做 embedding top-1 相似度匹配；若 `similarity > threshold`，则原地合并节点并更新 text / embedding / triples，否则正常 append；`separate=True` 时 source 文本仍可单独落到 side layer。 |
 | `PlacementWithoutAppendOrganization` (`placement_without_append_organization`) | `target_layer="trial_buffer"` | 只给出 placement，不实际 append。 |
 | `GraphAppendLinkReadyOrganization` (`graph_append_link_ready_organization`) | `target_layer="knowledge_graph"`, `note_namespace="note"` | 追加 link-ready 图记录，为后续图演化准备 metadata。 |
 | `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 对选中的 source-layer records 做抽象聚合，再通过子 `MemoryPipeline.ingest()` 写入高层记忆。 |
@@ -201,9 +202,9 @@ unit_formation
 
 二者共享同一套工具协议、参数校验规则和 trace 结构。
 
-### 六种默认工具
+### 九种默认工具
 
-当前内置六种 built-in write tools，传给 `tools=[...]` 时使用字符串名字即可：
+当前内置九种 built-in write tools，传给 `tools=[...]` 时使用字符串名字即可：
 
 | 工具名 | 作用 | 参数 schema 概要 | 备注 |
 | --- | --- | --- | --- |
@@ -213,11 +214,15 @@ unit_formation
 | `GRAPH_ADD` | 新增一条 graph record | 与 `ADD` 相同 | 目标层必须是 `Graph`；会规范化 `metadata["graph"]`。 |
 | `GRAPH_UPDATE` | 更新一条 graph record | 与 `UPDATE` 相同 | 记录所在层必须是 `Graph`；会规范化 graph metadata。 |
 | `GRAPH_DELETE` | 删除一条 graph record | 与 `DELETE` 相同 | 删除后会清理同层 dangling graph links。 |
+| `GRAPH_ADD_LINK` | 给一条 graph record 追加 outgoing links | `record_id`、`links` 必填 | 只改 `metadata["graph"]["links"]`，不会改节点文本、entities、triples。 |
+| `GRAPH_UPDATE_LINK` | 全量替换一条 graph record 的 outgoing links | `record_id`、`links` 必填 | 只改边；当前语义是“replace whole outgoing link list”。 |
+| `GRAPH_DELETE_LINK` | 从一条 graph record 删除部分 outgoing links | `record_id`、`links` 必填 | 只删指定边；未命中的 link 会被忽略。 |
 
 ### 默认工具的行为约定
 
 - 所有 built-in tool 都要求 arguments 是 JSON object。
 - 参数校验基于每个工具自己的 `parameters_json_schema`，并执行最小 JSON type 检查。
+- 三个 `GRAPH_*_LINK` built-in 只允许修改 `metadata["graph"]["links"]` / `link_count` / `last_linked_at`，不改节点内容，也不自动维护反向边。
 - 执行结果统一落到 trace：
   - `tool_calls`
   - `effects`
