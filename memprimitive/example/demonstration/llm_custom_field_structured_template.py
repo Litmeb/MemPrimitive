@@ -80,6 +80,7 @@ def main() -> None:
             LLMRepresentation(
                 field="keywords",
                 prompt="Extract short retrieval keywords for this memory unit.",
+                value_type=list[str],
             ),
         ),
         organization=AppendOrganization(target_layer="profile"),
