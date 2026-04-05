@@ -29,11 +29,8 @@ from ..utils._amem_family import (
     DEFAULT_CATEGORY,
     DEFAULT_NOTE_NAMESPACE,
     build_enhanced_embedding_text,
-    collect_neighbor_candidates,
-    merge_records_by_id,
     note_payload_from_record,
     repair_note_payload,
-    retrieve_candidates_by_embedding,
 )
 from ..utils._graph_family import graph_metadata_from_record
 from ..utils._reflexion_family import DEFAULT_MEMORY_SIZE, DEFAULT_REFLECTION_LAYER
@@ -88,28 +85,6 @@ def _graph_seed_record_ids(query) -> list[str]:
     if isinstance(nested, dict) and "seed_record_ids" in nested:
         return [str(value).strip() for value in nested["seed_record_ids"] if str(value).strip()]
     return []
-
-
-def _graph_token_haystack(record) -> set[str]:
-    graph = graph_metadata_from_record(record)
-    tokens = set(_document_tokens(record))
-    tokens.update(_tokenize_text(" ".join(graph["entities"])))
-    for subject, predicate, obj in graph["triples"]:
-        tokens.update(_tokenize_text(subject))
-        tokens.update(_tokenize_text(predicate))
-        tokens.update(_tokenize_text(obj))
-    return tokens
-
-
-def _score_graph_seed(query_text: str, record) -> float:
-    query_tokens = _query_tokens(query_text)
-    if not query_tokens:
-        return 0.0
-    graph = graph_metadata_from_record(record)
-    haystack = _graph_token_haystack(record)
-    overlap = len(query_tokens & haystack)
-    entity_overlap = len(query_tokens & {entity.casefold() for entity in graph["entities"]})
-    return float(overlap + (2 * entity_overlap))
 
 
 _RETRIEVAL_SOURCES: Final[frozenset[str]] = frozenset({"store", "retrieved"})
@@ -1131,132 +1106,6 @@ class GraphNeighborRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
-class GraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
-    """Select graph seed records from query text, then expand through links.
-
-    Constructor: ``top_k`` and ``seed_top_k`` must be positive. ``layer`` must
-    refer to a graph layer. The simplified baseline uses token/entity overlap to
-    choose seed records before performing one-hop graph expansion; this is an
-    inferred engineering decomposition of the classic A-MEM-style motif.
-
-    ``run`` requires ``packet.query`` and does not mutate the store. It returns
-    seeds plus expanded neighbors, deduplicated and optionally bounded by a
-    query-provided graph candidate set.
-    """
-
-    spec = ModuleSpec(
-        name="graph_seed_and_expand_retrieval",
-        slot="retrieval",
-        input_requirements=("query.text",),
-        output_guarantees=("retrieved.items", "retrieved.scores"),
-        store_requirements=("index:graph", "shape:Graph"),
-        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
-    )
-    requires_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT})
-
-    def __init__(
-        self,
-        top_k: int = 3,
-        layer: str = "knowledge_graph",
-        *,
-        seed_top_k: int = 2,
-        include_seed_records: bool = True,
-    ) -> None:
-        if top_k <= 0:
-            raise ValueError("GraphSeedAndExpandRetrieval requires top_k > 0.")
-        if seed_top_k <= 0:
-            raise ValueError("GraphSeedAndExpandRetrieval requires seed_top_k > 0.")
-        self.top_k = top_k
-        self.layer = layer
-        self.target_layer = layer
-        self.seed_top_k = seed_top_k
-        self.include_seed_records = include_seed_records
-
-    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.query is None:
-            raise ValueError("GraphSeedAndExpandRetrieval requires packet.query.")
-
-        candidate_filter = _graph_candidate_record_ids(packet.query)
-        candidate_records = [
-            record
-            for record in store.iter_records(self.layer)
-            if candidate_filter is None or record.record_id in candidate_filter
-        ]
-        scored_seeds = [
-            (_score_graph_seed(packet.query.text, record), order_index, record)
-            for order_index, record in enumerate(reversed(candidate_records))
-        ]
-        scored_seeds = [item for item in scored_seeds if item[0] > 0.0]
-        scored_seeds.sort(key=lambda item: (-item[0], item[1]))
-        seed_candidates = scored_seeds[: self.seed_top_k]
-
-        merged_records: list[Any] = []
-        merged_scores: list[dict[str, Any]] = []
-        seen_record_ids: set[str] = set()
-        expanded_neighbor_ids: list[str] = []
-
-        def append_result(record, *, strategy: str, score: float, seed_record_id: str, hop: int) -> None:
-            if record.record_id in seen_record_ids:
-                return
-            seen_record_ids.add(record.record_id)
-            merged_records.append(record)
-            merged_scores.append(
-                {
-                    "record_id": record.record_id,
-                    "rank": len(merged_records),
-                    "score": score,
-                    "strategy": strategy,
-                    "seed_record_id": seed_record_id,
-                    "hop": hop,
-                }
-            )
-
-        for seed_score, _, seed_record in seed_candidates:
-            if self.include_seed_records:
-                append_result(
-                    seed_record,
-                    strategy="graph_seed",
-                    score=seed_score,
-                    seed_record_id=seed_record.record_id,
-                    hop=0,
-                )
-                if len(merged_records) >= self.top_k:
-                    break
-            for neighbor in store.iter_graph_neighbors(self.layer, seed_record.record_id):
-                expanded_neighbor_ids.append(neighbor.record_id)
-                neighbor_score = max(seed_score - 0.5, 0.0)
-                append_result(
-                    neighbor,
-                    strategy="graph_expand",
-                    score=neighbor_score,
-                    seed_record_id=seed_record.record_id,
-                    hop=1,
-                )
-                if len(merged_records) >= self.top_k:
-                    break
-            if len(merged_records) >= self.top_k:
-                break
-
-        retrieved = RetrievedSet(
-            items=merged_records[: self.top_k],
-            scores=merged_scores[: self.top_k],
-            trace={
-                "module": self.spec.name,
-                "layer": self.layer,
-                "top_k": self.top_k,
-                "seed_top_k": self.seed_top_k,
-                "candidate_count": len(candidate_records),
-                "candidate_filter_count": 0 if candidate_filter is None else len(candidate_filter),
-                "seed_record_ids": [record.record_id for _, _, record in seed_candidates],
-                "expanded_neighbor_ids": list(dict.fromkeys(expanded_neighbor_ids)),
-                "returned_count": min(len(merged_records), self.top_k),
-            },
-        )
-        trace = copy_trace(packet)
-        trace["retrieval"] = retrieved.trace
-        return replace(packet, retrieved=retrieved, trace=trace), store
-
-
 class ExpandRetrievedGraphNeighbors(RetrievalModule):
     """Expand graph neighbors from ``packet.retrieved.items`` seed records."""
 
@@ -1651,7 +1500,7 @@ class BufferRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
 
 
 class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
-    """Use vector seeds plus graph-neighbor expansion for enriched note records.
+    """Wrap generic seed retrieval plus graph-neighbor expansion for note records.
 
     Constructor: ``top_k`` and ``candidate_k`` must be positive. ``layer`` must
     refer to a graph layer that supports the vector index. ``neighbor_expansion_k``
@@ -1708,9 +1557,10 @@ class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModu
             raise ValueError("VectorGraphSeedAndExpandRetrieval requires packet.query.")
 
         runtime = None
+        query = packet.query
         query_payload = repair_note_payload(
-            {"content": packet.query.text, "note_text": packet.query.text},
-            fallback_content=packet.query.text,
+            {"content": query.text, "note_text": query.text},
+            fallback_content=query.text,
             default_category="query",
         )
         query_expansion_prompt_trace: dict[str, Any] | None = None
@@ -1722,12 +1572,12 @@ class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModu
             query_expansion_system_prompt, query_expansion_prompt_trace, store = self._render_query_expansion_prompt(packet, store)
             raw = runtime.json(
                 system=query_expansion_system_prompt,
-                user=json.dumps({"query": packet.query.text}, ensure_ascii=False),
+                user=json.dumps({"query": query.text}, ensure_ascii=False),
             )
-            query_payload = repair_note_payload(raw, fallback_content=packet.query.text, default_category="query")
-            query_payload["content"] = query_payload["content"] or packet.query.text
-        if packet.query.embedding is not None:
-            query_embedding = list(packet.query.embedding)
+            query_payload = repair_note_payload(raw, fallback_content=query.text, default_category="query")
+            query_payload["content"] = query_payload["content"] or query.text
+        if query.embedding is not None:
+            query = replace(query, embedding=list(query.embedding))
         else:
             if runtime is None:
                 from ..utils._runtime import get_runtime
@@ -1741,28 +1591,47 @@ class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModu
                     tags=query_payload["tags"],
                 )
                 if self.query_expand_with_llm
-                else packet.query.text
+                else query.text
             )
-            query_embedding = runtime.embed(embedding_text)
-        query = replace(packet.query, embedding=list(query_embedding))
+            query = replace(query, embedding=runtime.embed(embedding_text))
 
-        primary = retrieve_candidates_by_embedding(
-            store=store,
-            layer=self.layer,
-            query_embedding=list(query_embedding),
+        seed_packet, store = EmbeddingSimilarityRetrieval(
             top_k=self.candidate_k,
-        )
-        primary_records = [record for _, record in primary]
-        neighbor_records = collect_neighbor_candidates(
-            store=store,
             layer=self.layer,
-            seed_records=primary_records,
-            neighbor_expansion_k=self.neighbor_expansion_k,
+            source="store",
+        ).run(
+            replace(packet, query=query),
+            store,
         )
-        merged_records = merge_records_by_id(primary_records + neighbor_records)
+        seed_retrieved = seed_packet.retrieved if seed_packet.retrieved is not None else RetrievedSet()
+
+        combined_packet = seed_packet
+        expand_trace: dict[str, Any] | None = None
+        if self.neighbor_expansion_k > 0:
+            expand_top_k = self.candidate_k + self.neighbor_expansion_k
+            combined_packet, store = ExpandRetrievedGraphNeighbors(
+                top_k=expand_top_k,
+                layer=self.layer,
+                include_seed_records=True,
+                per_seed_top_k=self.neighbor_expansion_k,
+                dedupe=True,
+            ).run(
+                seed_packet,
+                store,
+            )
+            combined_retrieved = combined_packet.retrieved if combined_packet.retrieved is not None else RetrievedSet()
+            expand_trace = dict(combined_retrieved.trace)
+        else:
+            combined_retrieved = seed_retrieved
+
+        merged_records = list(combined_retrieved.items)
+        seed_scores = {
+            str(score.get("record_id")): float(score.get("score", 0.0))
+            for score in seed_retrieved.scores
+            if isinstance(score.get("record_id"), str)
+        }
 
         candidate_payload = []
-        primary_scores = {record.record_id: score for score, record in primary}
         for record in merged_records:
             payload = note_payload_from_record(
                 record,
@@ -1777,7 +1646,7 @@ class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModu
                     "context": payload["context"],
                     "tags": payload["tags"],
                     "keywords": payload["keywords"],
-                    "score": float(primary_scores.get(record.record_id, 0.0)),
+                    "score": seed_scores.get(record.record_id, 0.0),
                 }
             )
 
@@ -1793,25 +1662,27 @@ class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModu
                 top_k=self.top_k,
             )
             retrieval_mode = "search_agentic"
+            record_by_id = {record.record_id: record for record in merged_records}
+            items = [record_by_id[item["id"]] for item in reranked if item["id"] in record_by_id][: self.top_k]
+            scores = [
+                {
+                    "record_id": item["id"],
+                    "score": float(item.get("score", 0.0)),
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "strategy": retrieval_mode,
+                }
+                for item in reranked
+                if item["id"] in record_by_id
+            ][: self.top_k]
         else:
-            reranked = sorted(
-                candidate_payload,
-                key=lambda item: (-float(item.get("score", 0.0)), str(item.get("id", ""))),
-            )[: self.top_k]
-            retrieval_mode = "vector_plus_links"
+            items = merged_records[: self.top_k]
+            scores = []
+            for rank, score in enumerate(combined_retrieved.scores[: self.top_k], start=1):
+                normalized_score = dict(score)
+                normalized_score["rank"] = rank
+                scores.append(normalized_score)
+            retrieval_mode = "embedding_similarity_plus_graph_expand"
 
-        record_by_id = {record.record_id: record for record in merged_records}
-        items = [record_by_id[item["id"]] for item in reranked if item["id"] in record_by_id][: self.top_k]
-        scores = [
-            {
-                "record_id": item["id"],
-                "score": float(item.get("score", 0.0)),
-                "rationale": str(item.get("rationale", "")).strip(),
-                "strategy": retrieval_mode,
-            }
-            for item in reranked
-            if item["id"] in record_by_id
-        ][: self.top_k]
         retrieved = RetrievedSet(
             items=items,
             scores=scores,
@@ -1821,16 +1692,22 @@ class VectorGraphSeedAndExpandRetrieval(_MultiQueryRetrievalMixin, RetrievalModu
                 "candidate_count": len(merged_records),
                 "selected_count": len(items),
                 "candidate_record_ids": [record.record_id for record in merged_records],
-                "expanded_neighbor_ids": [record.record_id for record in neighbor_records],
+                "expanded_neighbor_ids": list(
+                    dict.fromkeys(
+                        expand_trace.get("expanded_neighbor_ids", []) if isinstance(expand_trace, dict) else []
+                    )
+                ),
                 "note_namespace": self.note_namespace,
                 "query_expand_with_llm": self.query_expand_with_llm,
                 "system_prompt_is_template": bool(query_expansion_prompt_trace and query_expansion_prompt_trace.get("prompt_is_template")),
                 "query_expansion_prompt_trace": query_expansion_prompt_trace,
+                "seed_trace": dict(seed_retrieved.trace),
+                "expand_trace": expand_trace,
             },
         )
         trace = copy_trace(packet)
         trace["retrieval"] = retrieved.trace
-        return replace(packet, query=query, retrieved=retrieved, trace=trace), store
+        return replace(packet, query=query if query.embedding is not None else seed_packet.query, retrieved=retrieved, trace=trace), store
 
     def _render_query_expansion_prompt(self, packet: Packet, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
         default_template = (
@@ -1863,7 +1740,6 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     EntityRetrieval,
     BM25Retrieval,
     GraphNeighborRetrieval,
-    GraphSeedAndExpandRetrieval,
     ExpandRetrievedGraphNeighbors,
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,

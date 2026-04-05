@@ -625,11 +625,11 @@ def __init__(
   - 将新 trigger 类纳入 `write_trigger` / `evolution_trigger` baseline 列表
   - 继续使用现有 `slot=` 注入模式
 
-- [tests/test_baselines.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/tests/test_baselines.py)
+- [tests/test_baselines_triggers.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/tests/test_baselines_triggers.py)（以及同目录下其他 `tests/test_baselines_*.py` 拆分文件）
   - 为每个新增 trigger 增加最小单测
   - 覆盖 write/evolution 两个 slot 实例化分支
 
-- [tests/test_pipeline.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/tests/test_pipeline.py)
+- [tests/test_pipeline_core.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/tests/test_pipeline_core.py)、[tests/test_pipeline_triggers_dispatch.py](D:/Git/MemPrimitive-MemEngineDemo/MemPrimitive/tests/test_pipeline_triggers_dispatch.py)
   - 覆盖统一 trigger 类在两个 slot 的组合行为
   - 保证默认 pipeline 行为不变
 

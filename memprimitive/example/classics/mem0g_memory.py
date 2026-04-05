@@ -20,8 +20,8 @@ the official Neo4j-based implementation.
 
 Several mismatches still remain and are worth stating plainly. The graph is
 stored here as graph-shaped records rather than first-class Neo4j nodes/edges,
-graph seeding uses the current baseline retrieval stack rather than the exact
-upstream node-lookup implementation, and stale relations are maintained through
+graph seeding uses ``VectorGraphSeedAndExpandRetrieval`` (embedding seeds on
+graph-vector records) rather than Neo4j's entity-index lookup, and stale relations are maintained through
 direct link update/delete instead of the upstream ``valid=false`` soft
 invalidation scheme. Those differences matter for exact fidelity, especially
 for benchmark-grade reproduction, so this file should still be treated as a
@@ -78,7 +78,6 @@ from memprimitive.baselines import (
     EmbeddingSimilarityRetrieval,
     GraphEntityDeduplicationAppendOrganization,
     GraphRelationReadout,
-    GraphSeedAndExpandRetrieval,
     JSONReadout,
     LLMFunctionCallEvolution,
     LLMRepresentation,
@@ -87,6 +86,7 @@ from memprimitive.baselines import (
     RecencyRetrieval,
     SummaryRewriteEvolution,
     TripleRepresentation,
+    VectorGraphSeedAndExpandRetrieval,
 )
 from memprimitive.utils._mem0_family import (
     build_fixed_profile_tools,
@@ -201,6 +201,8 @@ def build_mem0g_memory_system(
     rerank_top_k: int = 5,
     recall_top_k: int = 5,
 ) -> dict[str, object]:
+    # Inner expand budget matches VectorGraphSeedAndExpandRetrieval: expand_top_k = candidate_k + neighbor_expansion_k.
+    neighbor_expansion_k = max(1, graph_expand_top_k - graph_seed_top_k)
     topology = StoreTopology.from_layers(
         [
             StoreLayerSpec(name="recent_dialogue", theme="working", indices=("temporal",)),
@@ -230,10 +232,11 @@ def build_mem0g_memory_system(
     graph_context_recall = MemoryPipeline(
         retrieval=(
             QueryRewriteRetrieval(
-                retriever=GraphSeedAndExpandRetrieval(
+                retriever=VectorGraphSeedAndExpandRetrieval(
                     top_k=graph_expand_top_k,
                     layer="knowledge_graph",
-                    seed_top_k=graph_seed_top_k,
+                    candidate_k=graph_seed_top_k,
+                    neighbor_expansion_k=neighbor_expansion_k,
                 ),
                 strategy="llm",
                 allow_multi_query=True,
@@ -564,10 +567,11 @@ def build_mem0g_memory_system(
     graph_recall_pipeline = MemoryPipeline(
         retrieval=(
             QueryRewriteRetrieval(
-                retriever=GraphSeedAndExpandRetrieval(
+                retriever=VectorGraphSeedAndExpandRetrieval(
                     top_k=graph_expand_top_k,
                     layer="knowledge_graph",
-                    seed_top_k=graph_seed_top_k,
+                    candidate_k=graph_seed_top_k,
+                    neighbor_expansion_k=neighbor_expansion_k,
                 ),
                 strategy="llm",
                 allow_multi_query=True,
