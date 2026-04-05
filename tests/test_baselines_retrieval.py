@@ -414,6 +414,144 @@ def test_query_rewrite_retrieval_prompt_template_trace_is_preserved() -> None:
     assert rewrite_trace["rendered_prompt"] == "Rewrite who with graphs"
 
 
+def test_triple_exact_match_retrieval_supports_metadata_subject_relation_query() -> None:
+    from memprimitive.baselines import TripleExactMatchRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="profile",
+            text="Alice likes tea.",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"triples": [("Alice", "likes", "tea")]}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="profile",
+            text="Alice likes coffee.",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"representation": {"triples": [("Alice", "likes", "coffee")]}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-3",
+            unit_id="unit-3",
+            layer="profile",
+            text="Bob likes tea.",
+            timestamp="2026-01-01T00:00:02+00:00",
+            metadata={"representation": {"triples": [("Bob", "likes", "tea")]}},
+        )
+    )
+
+    packet_out, _ = TripleExactMatchRetrieval(top_k=2, layer="profile").run(
+        Packet(
+            query=Query(
+                text="unused",
+                metadata={
+                    "triple_query": {
+                        "subject": "Alice",
+                        "relation": "likes",
+                        "object": "*",
+                    }
+                },
+            )
+        ),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+    assert packet_out.retrieved.scores[0]["strategy"] == "triple_exact_match"
+    assert packet_out.retrieved.scores[0]["matched_triples"] == [("Alice", "likes", "coffee")]
+    assert packet_out.retrieved.trace["query_mode"] == "subject_relation"
+    assert packet_out.retrieved.trace["query_source"] == "metadata.triple_query"
+
+
+def test_triple_exact_match_retrieval_supports_text_relation_object_query_and_graph_triples() -> None:
+    from memprimitive.baselines import TripleExactMatchRetrieval
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "entity"))]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-g-1",
+            unit_id="unit-g-1",
+            layer="knowledge_graph",
+            text="graph node",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"graph": {"triples": [("Alice", "likes", "tea")], "links": []}},
+        )
+    )
+
+    packet_out, _ = TripleExactMatchRetrieval(top_k=1, layer="knowledge_graph").run(
+        Packet(query=Query(text=" >> likes >> tea ")),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-g-1"]
+    assert packet_out.retrieved.trace["query_mode"] == "relation_object"
+    assert packet_out.retrieved.trace["query_source"] == "query.text"
+    assert packet_out.retrieved.trace["query_triple"] == {
+        "subject": None,
+        "relation": "likes",
+        "object": "tea",
+    }
+
+
+def test_triple_exact_match_retrieval_source_retrieved_limits_candidates() -> None:
+    from memprimitive.baselines import TripleExactMatchRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    candidate = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="profile",
+        text="Alice likes tea.",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={"representation": {"triples": [("Alice", "likes", "tea")]}},
+    )
+    outside_match = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="profile",
+        text="Alice likes green tea.",
+        timestamp="2026-01-01T00:00:01+00:00",
+        metadata={"representation": {"triples": [("Alice", "likes", "green tea")]}},
+    )
+    for record in (candidate, outside_match):
+        store.append(record)
+
+    packet_out, _ = TripleExactMatchRetrieval(top_k=2, source="retrieved").run(
+        Packet(
+            query=Query(text="Alice >> likes >> tea"),
+            retrieved=RetrievedSet(items=[candidate], scores=[]),
+        ),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.retrieved.trace["source"] == "retrieved"
+    assert packet_out.retrieved.trace["candidate_count"] == 1
+
+
+def test_triple_exact_match_retrieval_rejects_unstructured_query_text() -> None:
+    from memprimitive.baselines import TripleExactMatchRetrieval
+
+    with pytest.raises(ValueError, match="structured triple query"):
+        TripleExactMatchRetrieval().run(Packet(query=Query(text="Alice likes tea")), MemoryStore())
+
+
 def test_retrieval_does_not_mutate_store() -> None:
     from memprimitive.baselines import RecencyRetrieval
 
