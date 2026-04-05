@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, get_args, get_origin
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -540,12 +540,16 @@ class LLMRepresentation(RepresentationModule):
 
     _LIST_FIELDS: ClassVar[frozenset[str]] = frozenset({"tags", "entities", "keywords", "relation_tags"})
     _DICT_FIELDS: ClassVar[frozenset[str]] = frozenset({"time_anchor", "kv"})
+    _VALUE_KIND_TEXT: ClassVar[str] = "text"
+    _VALUE_KIND_LIST: ClassVar[str] = "list"
+    _VALUE_KIND_DICT: ClassVar[str] = "dict"
 
     def __init__(
         self,
         *,
         field: str,
         prompt: PromptPlan | str,
+        value_type: Any | None = None,
         embedding_model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -564,6 +568,8 @@ class LLMRepresentation(RepresentationModule):
             raise ValueError("LLMRepresentation requires a non-empty prompt.")
         self.field = normalized_field
         self.prompt = normalized_prompt
+        self.value_type = value_type
+        self._declared_value_kind = self._resolve_declared_value_kind(value_type)
         self.embedding_model = embedding_model or env.get(
             "MEMPRIMITIVE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
@@ -594,6 +600,7 @@ class LLMRepresentation(RepresentationModule):
         trace["representation"] = {
             "module": self.spec.name,
             "field": self.field,
+            "declared_value_type": self._declared_value_type_name(),
             "prompt_is_template": prompt_plan.mode == "structured" or (isinstance(prompt_plan.template, str) and "{{" in prompt_plan.template and "}}" in prompt_plan.template),
             "unit_ids": [unit.unit_id for unit in represented_units],
             "per_unit": per_unit_trace,
@@ -644,16 +651,48 @@ class LLMRepresentation(RepresentationModule):
         return updated, {
             "field": self.field,
             "kind": self._value_kind(),
+            "declared_value_type": self._declared_value_type_name(),
             "value": trace_value,
             **prompt_trace,
         }, store
 
     def _value_kind(self) -> str:
+        if self._declared_value_kind is not None:
+            return self._declared_value_kind
         if self.field in self._LIST_FIELDS:
-            return "list"
+            return self._VALUE_KIND_LIST
         if self.field in self._DICT_FIELDS:
-            return "dict"
-        return "text"
+            return self._VALUE_KIND_DICT
+        return self._VALUE_KIND_TEXT
+
+    def _declared_value_type_name(self) -> str | None:
+        if self.value_type is None:
+            return None
+        if self._declared_value_kind == self._VALUE_KIND_TEXT:
+            return "str"
+        if self._declared_value_kind == self._VALUE_KIND_LIST:
+            return "list[str]"
+        if self._declared_value_kind == self._VALUE_KIND_DICT:
+            return "dict[str, str]"
+        return str(self.value_type)
+
+    @classmethod
+    def _resolve_declared_value_kind(cls, value_type: Any | None) -> str | None:
+        if value_type is None:
+            return None
+        if value_type is str:
+            return cls._VALUE_KIND_TEXT
+
+        origin = get_origin(value_type)
+        args = get_args(value_type)
+        if origin is list and args == (str,):
+            return cls._VALUE_KIND_LIST
+        if origin is dict and args == (str, str):
+            return cls._VALUE_KIND_DICT
+
+        raise ValueError(
+            "LLMRepresentation value_type only supports str, list[str], or dict[str, str]."
+        )
 
     def _runtime(self):
         from ..utils._runtime import Runtime
@@ -683,9 +722,10 @@ class LLMRepresentation(RepresentationModule):
             },
             ensure_ascii=False,
         )
-        if self.field in self._LIST_FIELDS:
+        kind = self._value_kind()
+        if kind == self._VALUE_KIND_LIST:
             return _normalize_string_list(self._llm_json(user=user)), prompt_trace, store
-        if self.field in self._DICT_FIELDS:
+        if kind == self._VALUE_KIND_DICT:
             return _normalize_string_dict(self._llm_json(user=user)), prompt_trace, store
         return self._llm_text(user=user), prompt_trace, store
 
@@ -718,7 +758,8 @@ class LLMRepresentation(RepresentationModule):
     def _llm_json(self, *, user: str) -> Any:
         runtime = self._runtime()
         runtime.require_llm(capability=f"LLMRepresentation field {self.field!r}")
-        shape = "a strict JSON array of strings" if self.field in self._LIST_FIELDS else "a strict JSON object"
+        kind = self._value_kind()
+        shape = "a strict JSON array of strings" if kind == self._VALUE_KIND_LIST else "a strict JSON object"
         return runtime.json(
             system=(
                 "You extract one requested representation field for a memory unit. "

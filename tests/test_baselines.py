@@ -328,6 +328,88 @@ def test_llm_representation_writes_summary_and_custom_fields_into_representation
     assert "custom_topic" in custom_unit.representation_elements
 
 
+def test_llm_representation_custom_field_explicit_str_type_matches_text_path() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    rep = LLMRepresentation(field="custom_topic", prompt="Extract the main topic.", value_type=str)
+    rep._llm_text = lambda *, user: "graph memory"  # type: ignore[method-assign]
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.metadata["representation"]["custom_topic"] == "graph memory"
+    assert packet_out.trace["representation"]["declared_value_type"] == "str"
+    assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "text"
+    assert packet_out.trace["representation"]["per_unit"][0]["declared_value_type"] == "str"
+
+
+def test_llm_representation_custom_field_explicit_list_type_writes_json_list() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    rep = LLMRepresentation(field="custom_topics", prompt="Extract topics.", value_type=list[str])
+    rep._llm_json = lambda *, user: ["graph-memory", "research"]  # type: ignore[method-assign]
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.metadata["representation"]["custom_topics"] == ["graph-memory", "research"]
+    assert packet_out.trace["representation"]["declared_value_type"] == "list[str]"
+    assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "list"
+
+
+def test_llm_representation_custom_field_explicit_dict_type_writes_json_dict() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    rep = LLMRepresentation(field="custom_slots", prompt="Extract slots.", value_type=dict[str, str])
+    rep._llm_json = lambda *, user: {"topic": "graph memory", "goal": "research"}  # type: ignore[method-assign]
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.metadata["representation"]["custom_slots"] == {"topic": "graph memory", "goal": "research"}
+    assert packet_out.trace["representation"]["declared_value_type"] == "dict[str, str]"
+    assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "dict"
+
+
+def test_llm_representation_known_field_explicit_list_type_preserves_unit_writeback() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    rep = LLMRepresentation(field="tags", prompt="Extract retrieval tags.", value_type=list[str])
+    rep._llm_json = lambda *, user: ["graph-memory", "research"]  # type: ignore[method-assign]
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.tags == ["graph-memory", "research"]
+    assert unit.metadata["representation"]["tags"] == ["graph-memory", "research"]
+    assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "list"
+
+
+def test_llm_representation_rejects_unsupported_value_types() -> None:
+    from memprimitive.baselines import LLMRepresentation
+
+    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], or dict\\[str, str\\]"):
+        LLMRepresentation(field="custom_score", prompt="Extract score.", value_type=int)
+
+    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], or dict\\[str, str\\]"):
+        LLMRepresentation(field="custom_scores", prompt="Extract scores.", value_type=list[int])
+
+    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], or dict\\[str, str\\]"):
+        LLMRepresentation(field="custom_items", prompt="Extract items.", value_type=list)
+
+
 def test_llm_representation_prompt_template_renders_unit_context_and_trace() -> None:
     from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
 
