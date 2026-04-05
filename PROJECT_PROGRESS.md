@@ -16,6 +16,8 @@ This file is the shared long-lived project status note for future agents. Keep i
 
 ## Current Status
 
+- Optional integration smoke coverage for real LLM / embedding baselines lives in `tests/test_smoke_real_model_modules.py` (marker `integration`): each LLM-backed or embedding-backed **representation / retrieval / organization / trigger / memory_evolution** baseline listed in that module’s docstring is exercised at least once when `MEMPRIMITIVE_API_KEY`, `MEMPRIMITIVE_BASE_URL`, and `MEMPRIMITIVE_MODEL` are set (see `require_real_runtime`); otherwise LLM tests skip.
+
 The project is already beyond the concept stage.
 
 - The stage-1 runtime is real and usable: slot-based composition, topology/store contracts, baseline modules, and a shared LLM/runtime path all exist.
