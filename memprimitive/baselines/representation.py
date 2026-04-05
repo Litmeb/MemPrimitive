@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import inspect
 import json
 import os
 import re
@@ -330,17 +331,27 @@ class TripleRepresentation(RepresentationModule):
         self,
         *,
         method: str = "direct",
+        prompt: PromptPlan | str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
         embedding_model: str | None = None,
+        embed_extracted: bool = False,
+        embed_entities: bool = False,
     ) -> None:
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
         normalized_method = str(method).strip().lower()
         if normalized_method not in self._VALID_METHODS:
             raise ValueError(f"TripleRepresentation method must be one of: {sorted(self._VALID_METHODS)}.")
+        if isinstance(prompt, str):
+            normalized_prompt = prompt.strip()
+            if not normalized_prompt:
+                raise ValueError("TripleRepresentation prompt must be non-empty when provided.")
+        else:
+            normalized_prompt = prompt
         self.method = normalized_method
+        self.prompt = normalized_prompt
         self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
         self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
         self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
@@ -348,6 +359,8 @@ class TripleRepresentation(RepresentationModule):
             "MEMPRIMITIVE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
         )
+        self.embed_extracted = bool(embed_extracted)
+        self.embed_entities = bool(embed_entities)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
@@ -356,7 +369,7 @@ class TripleRepresentation(RepresentationModule):
         represented_units: list[MemoryUnit] = []
         per_unit_trace: list[dict[str, Any]] = []
         for unit in packet.units:
-            represented_unit, extraction_trace = self._represent_unit(unit)
+            represented_unit, extraction_trace, store = self._dispatch_represent_unit(packet, unit, store)
             represented_units.append(represented_unit)
             per_unit_trace.append(
                 {
@@ -367,15 +380,43 @@ class TripleRepresentation(RepresentationModule):
             )
 
         trace = copy_trace(packet)
+        prompt_plan = ensure_prompt_plan(self.prompt, metadata_mode="prompt") if self.prompt is not None else None
         trace["representation"] = {
             "module": self.spec.name,
             "method": self.method,
+            "embed_extracted": self.embed_extracted,
+            "embed_entities": self.embed_entities,
+            "prompt_is_template": bool(
+                prompt_plan is not None
+                and (
+                    prompt_plan.mode == "structured"
+                    or (isinstance(prompt_plan.template, str) and "{{" in prompt_plan.template and "}}" in prompt_plan.template)
+                )
+            ),
             "unit_ids": [unit.unit_id for unit in represented_units],
             "per_unit": per_unit_trace,
         }
         return replace(packet, units=represented_units, trace=trace), store
 
-    def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+    def _dispatch_represent_unit(
+        self,
+        packet: Packet,
+        unit: MemoryUnit,
+        store: MemoryStore,
+    ) -> tuple[MemoryUnit, dict[str, Any], MemoryStore]:
+        parameters = tuple(inspect.signature(self._represent_unit).parameters.values())
+        if len(parameters) <= 1:
+            represented_unit, extraction_trace = self._represent_unit(unit)  # type: ignore[misc]
+            return represented_unit, extraction_trace, store
+        return self._represent_unit(unit, packet, store)
+
+    def _represent_unit(
+        self,
+        unit: MemoryUnit,
+        packet: Packet | None = None,
+        store: MemoryStore | None = None,
+    ) -> tuple[MemoryUnit, dict[str, Any], MemoryStore]:
+        current_store = store if store is not None else MemoryStore()
         normalized_text = unit.text.strip()
         normalized_casefold = normalized_text.casefold()
         hinted_triples = _normalize_hinted_triples(unit.metadata.get("triples"))
@@ -394,20 +435,39 @@ class TripleRepresentation(RepresentationModule):
                 "entities": entities,
                 "triple_count": len(hinted_triples),
             }
-            return self._replace_unit(unit, normalized_text, normalized_casefold, entities, hinted_triples), extraction_trace
+            return (
+                self._replace_unit(unit, normalized_text, normalized_casefold, entities, hinted_triples),
+                extraction_trace,
+                current_store,
+            )
 
         runtime = self._runtime()
         runtime.require_llm(capability=f"TripleRepresentation method {self.method!r}")
+        prompt_trace: dict[str, Any] = {}
+        rendered_prompt: str | None = None
+        if packet is not None and store is not None and self.prompt is not None:
+            rendered_prompt, prompt_trace, current_store = self._render_prompt(packet, unit, store)
 
         if self.method == "direct":
-            payload = self._extract_direct(runtime=runtime, text=normalized_text)
-            extraction_trace = {"source": "llm_direct", "entities": payload["entities"], "triple_count": len(payload["triples"])}
+            payload = self._extract_direct(runtime=runtime, text=normalized_text, prompt=rendered_prompt)
+            extraction_trace = {
+                "source": "llm_direct",
+                "entities": payload["entities"],
+                "triple_count": len(payload["triples"]),
+                **prompt_trace,
+            }
         else:
-            payload = self._extract_two_stage(runtime=runtime, text=normalized_text)
-            extraction_trace = {"source": "llm_two_stage", "entities": payload["entities"], "triple_count": len(payload["triples"])}
+            payload = self._extract_two_stage(runtime=runtime, text=normalized_text, prompt=rendered_prompt)
+            extraction_trace = {
+                "source": "llm_two_stage",
+                "entities": payload["entities"],
+                "triple_count": len(payload["triples"]),
+                **prompt_trace,
+            }
         return (
             self._replace_unit(unit, normalized_text, normalized_casefold, payload["entities"], payload["triples"]),
             extraction_trace,
+            current_store,
         )
 
     def _replace_unit(
@@ -419,14 +479,31 @@ class TripleRepresentation(RepresentationModule):
         triples: list[tuple[str, str, str]],
     ) -> MemoryUnit:
         elements = set(unit.representation_elements)
+        embedding = list(unit.embedding) if unit.embedding is not None else None
+        entity_embeddings: dict[str, list[float]] = {}
         if triples:
             elements.add("triple")
         if entities:
             elements.add("entities")
+        runtime = None
+        if self.embed_extracted or self.embed_entities:
+            runtime = self._runtime()
+        embedding_text = self._build_embedding_text(entities=entities, triples=triples)
+        if self.embed_extracted and embedding_text is not None:
+            assert runtime is not None
+            embedding = list(runtime.embed(embedding_text))
+            elements.add("embedding")
+        if self.embed_entities:
+            assert runtime is not None
+            entity_embeddings = {
+                entity: list(runtime.embed(entity))
+                for entity in _dedupe_non_empty_strings([str(entity) for entity in entities])
+            }
         represented = replace(
             unit,
             text=normalized_text,
             normalized_text=normalized_casefold,
+            embedding=embedding,
             entities=entities,
             triples=triples,
             representation_elements=tuple(sorted(elements)),
@@ -435,9 +512,41 @@ class TripleRepresentation(RepresentationModule):
             represented,
             metadata={
                 **represented.metadata,
-                "representation": _representation_summary_from_unit(represented),
+                "representation": {
+                    **_representation_summary_from_unit(represented),
+                    **({"entity_embeddings": entity_embeddings} if entity_embeddings else {}),
+                },
             },
         )
+
+    @staticmethod
+    def _build_embedding_text(
+        *,
+        entities: list[str],
+        triples: list[tuple[str, str, str]],
+    ) -> str | None:
+        normalized_entities = _dedupe_non_empty_strings([str(entity) for entity in entities])
+        normalized_triples = list(
+            dict.fromkeys(
+                (
+                    str(subject).strip(),
+                    str(predicate).strip(),
+                    str(obj).strip(),
+                )
+                for subject, predicate, obj in triples
+                if str(subject).strip() and str(predicate).strip() and str(obj).strip()
+            )
+        )
+        if not normalized_entities and not normalized_triples:
+            return None
+        lines: list[str] = []
+        if normalized_entities:
+            lines.append("entities:")
+            lines.extend(f"- {entity}" for entity in normalized_entities)
+        if normalized_triples:
+            lines.append("triples:")
+            lines.extend(f"- {subject} | {predicate} | {obj}" for subject, predicate, obj in normalized_triples)
+        return "\n".join(lines)
 
     def _runtime(self):
         from ..utils._runtime import Runtime
@@ -449,42 +558,89 @@ class TripleRepresentation(RepresentationModule):
             embedding_model=self.embedding_model,
         )
 
-    def _extract_direct(self, *, runtime, text: str) -> dict[str, list[Any]]:
+    def _render_prompt(self, packet: Packet, unit: MemoryUnit, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
+        plan = ensure_prompt_plan(
+            self.prompt,
+            metadata_mode="prompt",
+            context_builder=lambda packet, current_store: {
+                "unit": project_unit_for_template(unit),
+            },
+        )
+        return render_prompt_plan(plan, packet=packet, store=store)
+
+    def _extract_direct(self, *, runtime, text: str, prompt: str | None = None) -> dict[str, list[Any]]:
+        instructions = (
+            "Extract a clean knowledge-graph representation from the text. "
+            "Return only entities explicitly grounded in the text and relationships that can be expressed as triples. "
+            "Each relationship must have non-empty subject, predicate, and object."
+        )
+        if prompt is not None:
+            instructions = (
+                "You extract a clean knowledge-graph representation from the provided text. "
+                "Follow the user-provided prompt exactly when deciding what entities and relationships to keep. "
+                "Return only grounded entities and relationships that can be expressed as triples. "
+                "Each relationship must have non-empty subject, predicate, and object."
+            )
         output = runtime.run_agent(
             name="MemPrimitiveTripleDirectAgent",
-            instructions=(
-                "Extract a clean knowledge-graph representation from the text. "
-                "Return only entities explicitly grounded in the text and relationships that can be expressed as triples. "
-                "Each relationship must have non-empty subject, predicate, and object."
+            instructions=instructions,
+            input_text=json.dumps(
+                {"text": text, **({"prompt": prompt} if prompt is not None else {})},
+                ensure_ascii=False,
             ),
-            input_text=json.dumps({"text": text}, ensure_ascii=False),
             temperature=0.0,
             max_turns=1,
             output_type=_TripleDirectOutput,
         )
         return self._normalize_triple_output(output)
 
-    def _extract_two_stage(self, *, runtime, text: str) -> dict[str, list[Any]]:
+    def _extract_two_stage(self, *, runtime, text: str, prompt: str | None = None) -> dict[str, list[Any]]:
+        entity_instructions = (
+            "Extract the canonical entities explicitly mentioned in the text. "
+            "Return only grounded entities and avoid duplicates."
+        )
+        relation_instructions = (
+            "Extract relationships from the text using the provided entities as anchors. "
+            "Only emit relationships that are directly supported by the text and can be written as triples. "
+            "Prefer the provided canonical entity strings for subject/object values."
+        )
+        if prompt is not None:
+            entity_instructions = (
+                "You extract canonical entities from the provided text. "
+                "Follow the user-provided prompt exactly when deciding which grounded entities matter. "
+                "Return only grounded entities and avoid duplicates."
+            )
+            relation_instructions = (
+                "You extract relationships from the provided text using the provided entities as anchors. "
+                "Follow the user-provided prompt exactly when deciding which grounded relationships matter. "
+                "Only emit relationships directly supported by the text that can be written as triples. "
+                "Prefer the provided canonical entity strings for subject/object values."
+            )
         entity_output = runtime.run_agent(
             name="MemPrimitiveTripleEntityAgent",
-            instructions=(
-                "Extract the canonical entities explicitly mentioned in the text. "
-                "Return only grounded entities and avoid duplicates."
+            instructions=entity_instructions,
+            input_text=json.dumps(
+                {"text": text, **({"prompt": prompt} if prompt is not None else {})},
+                ensure_ascii=False,
             ),
-            input_text=json.dumps({"text": text}, ensure_ascii=False),
             temperature=0.0,
             max_turns=1,
             output_type=_TripleEntityOutput,
         )
-        entities = _dedupe_non_empty_strings(list(getattr(entity_output, "entities", [])))
+        if isinstance(entity_output, BaseModel):
+            raw_entities = entity_output.model_dump().get("entities", [])
+        elif isinstance(entity_output, dict):
+            raw_entities = entity_output.get("entities", [])
+        else:
+            raw_entities = getattr(entity_output, "entities", [])
+        entities = _dedupe_non_empty_strings([str(item) for item in raw_entities] if isinstance(raw_entities, list) else [])
         relationship_output = runtime.run_agent(
             name="MemPrimitiveTripleRelationAgent",
-            instructions=(
-                "Extract relationships from the text using the provided entities as anchors. "
-                "Only emit relationships that are directly supported by the text and can be written as triples. "
-                "Prefer the provided canonical entity strings for subject/object values."
+            instructions=relation_instructions,
+            input_text=json.dumps(
+                {"text": text, "entities": entities, **({"prompt": prompt} if prompt is not None else {})},
+                ensure_ascii=False,
             ),
-            input_text=json.dumps({"text": text, "entities": entities}, ensure_ascii=False),
             temperature=0.0,
             max_turns=1,
             output_type=_TripleRelationshipOutput,

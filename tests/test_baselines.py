@@ -237,6 +237,503 @@ def test_triple_representation_two_stage_uses_real_llm(require_real_runtime: Non
     assert all(subject and predicate and obj for subject, predicate, obj in unit.triples)
 
 
+def test_triple_representation_custom_string_prompt_is_passed_to_llm_and_traced() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def require_llm(self, *, capability: str) -> None:
+            self.calls.append({"capability": capability})
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            payload = json.loads(input_text)
+            self.calls.append(
+                {
+                    "name": name,
+                    "instructions": instructions,
+                    "payload": payload,
+                    "temperature": temperature,
+                    "max_turns": max_turns,
+                    "output_type": output_type,
+                }
+            )
+            return {
+                "entities": ["Alice", "jasmine tea"],
+                "relationships": [{"subject": "Alice", "predicate": "likes", "object": "jasmine tea"}],
+            }
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes jasmine tea.", source="notes")),
+        MemoryStore(),
+    )
+    fake_runtime = _FakeRuntime()
+    rep = TripleRepresentation(method="direct", prompt="Keep only durable preference triples.")
+    rep._runtime = lambda: fake_runtime  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    llm_call = next(call for call in fake_runtime.calls if call.get("name") == "MemPrimitiveTripleDirectAgent")
+    assert llm_call["payload"]["prompt"] == "Keep only durable preference triples."
+    assert llm_call["payload"]["text"] == "Alice likes jasmine tea."
+    assert packet_out.trace["representation"]["prompt_is_template"] is False
+    assert packet_out.trace["representation"]["per_unit"][0]["rendered_prompt"] == "Keep only durable preference triples."
+    assert packet_out.trace["representation"]["per_unit"][0]["missing_variables"] == []
+    assert packet_out.units[0].triples == [("Alice", "likes", "jasmine tea")]
+
+
+def test_triple_representation_prompt_template_renders_unit_context_and_trace() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def require_llm(self, *, capability: str) -> None:
+            self.calls.append({"capability": capability})
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            payload = json.loads(input_text)
+            self.calls.append({"name": name, "payload": payload})
+            return {
+                "entities": ["Alice", "tea"],
+                "relationships": [{"subject": "Alice", "predicate": "likes", "object": "tea"}],
+            }
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="Alice likes tea.",
+                source="notes",
+                metadata={"session_id": "sess-1"},
+            )
+        ),
+        MemoryStore(),
+    )
+    fake_runtime = _FakeRuntime()
+    rep = TripleRepresentation(
+        method="direct",
+        prompt="Extract triples for {{ unit.text }} in {{ unit.metadata.session_id | default('none') }}.",
+    )
+    rep._runtime = lambda: fake_runtime  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    llm_call = next(call for call in fake_runtime.calls if call.get("name") == "MemPrimitiveTripleDirectAgent")
+    assert llm_call["payload"]["prompt"] == "Extract triples for Alice likes tea. in sess-1."
+    assert packet_out.trace["representation"]["prompt_is_template"] is True
+    assert packet_out.trace["representation"]["per_unit"][0]["rendered_prompt"] == "Extract triples for Alice likes tea. in sess-1."
+    assert packet_out.trace["representation"]["per_unit"][0]["missing_variables"] == []
+
+
+def test_triple_representation_prompt_template_missing_variables_do_not_crash() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            payload = json.loads(input_text)
+            assert payload["prompt"] == "Extract  from Alice likes tea."
+            return {"entities": ["Alice", "tea"], "relationships": [{"subject": "Alice", "predicate": "likes", "object": "tea"}]}
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="direct", prompt="Extract {{ unit.metadata.unknown_key }} from {{ unit.text }}")
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    assert "unit.metadata.unknown_key" in packet_out.trace["representation"]["per_unit"][0]["missing_variables"]
+
+
+def test_triple_representation_without_prompt_keeps_default_llm_payload_shape() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            payload = json.loads(input_text)
+            self.payloads.append(payload)
+            return {"entities": ["Alice", "tea"], "relationships": [{"subject": "Alice", "predicate": "likes", "object": "tea"}]}
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+    fake_runtime = _FakeRuntime()
+    rep = TripleRepresentation(method="direct")
+    rep._runtime = lambda: fake_runtime  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    assert fake_runtime.payloads == [{"text": "Alice likes tea."}]
+    assert packet_out.trace["representation"]["prompt_is_template"] is False
+    assert "rendered_prompt" not in packet_out.trace["representation"]["per_unit"][0]
+
+
+def test_triple_representation_embed_extracted_from_metadata_hints() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def embed(self, text: str) -> list[float]:
+            return [float(len(text)), 1.0, 2.0]
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="Alice likes tea.",
+                source="notes",
+                metadata={
+                    "entities": ["Alice", "tea"],
+                    "triples": [("Alice", "likes", "tea")],
+                },
+            )
+        ),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="direct", embed_extracted=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.embedding == [54.0, 1.0, 2.0]
+    assert "embedding" in unit.representation_elements
+    assert unit.metadata["representation"]["embedding"] == {"dim": 3}
+    assert packet_out.trace["representation"]["embed_extracted"] is True
+
+
+def test_triple_representation_embed_extracted_direct_llm_path() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def embed(self, text: str) -> list[float]:
+            return [9.0, float(text.count("Alice")), float(text.count("tea"))]
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            return {
+                "entities": ["Alice", "tea"],
+                "relationships": [{"subject": "Alice", "predicate": "likes", "object": "tea"}],
+            }
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="direct", embed_extracted=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.embedding == [9.0, 2.0, 2.0]
+    assert unit.metadata["representation"]["embedding"] == {"dim": 3}
+
+
+def test_triple_representation_embed_extracted_two_stage_llm_path() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def embed(self, text: str) -> list[float]:
+            return [7.0, float(text.count("Bob")), float(text.count("graphs"))]
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            if name == "MemPrimitiveTripleEntityAgent":
+                return {"entities": ["Bob", "graphs"]}
+            return {"relationships": [{"subject": "Bob", "predicate": "studies", "object": "graphs"}]}
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Bob studies graphs.", source="notes")),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="two_stage", embed_extracted=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.embedding == [7.0, 2.0, 2.0]
+    assert unit.metadata["representation"]["embedding"] == {"dim": 3}
+
+
+def test_triple_representation_embed_extracted_skips_empty_graph_payload() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="No structured graph fact.", source="notes")),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="direct", embed_extracted=True)
+
+    represented = rep._replace_unit(
+        unit_packet.units[0],
+        "No structured graph fact.",
+        "no structured graph fact.",
+        [],
+        [],
+    )
+
+    assert represented.embedding is None
+    assert "embedding" not in represented.representation_elements
+
+
+def test_triple_representation_embed_entities_from_metadata_hints() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def embed(self, text: str) -> list[float]:
+            return [float(len(text)), float(text.count("a")), float(text.count("e"))]
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="Alice likes tea.",
+                source="notes",
+                metadata={
+                    "entities": ["Alice", "tea"],
+                    "triples": [("Alice", "likes", "tea")],
+                },
+            )
+        ),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="direct", embed_entities=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.embedding is None
+    assert unit.metadata["representation"]["entity_embeddings"] == {
+        "Alice": [5.0, 0.0, 1.0],
+        "tea": [3.0, 1.0, 1.0],
+    }
+    assert packet_out.trace["representation"]["embed_entities"] is True
+
+
+def test_triple_representation_embed_entities_direct_llm_path_can_coexist_with_graph_embedding() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def embed(self, text: str) -> list[float]:
+            lowered = text.casefold()
+            return [float(len(text)), 10.0 if lowered == "alice" else 0.0, 5.0 if lowered == "tea" else 0.0]
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            return {
+                "entities": ["Alice", "tea"],
+                "relationships": [{"subject": "Alice", "predicate": "likes", "object": "tea"}],
+            }
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="direct", embed_extracted=True, embed_entities=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.embedding == [54.0, 0.0, 0.0]
+    assert unit.metadata["representation"]["embedding"] == {"dim": 3}
+    assert unit.metadata["representation"]["entity_embeddings"] == {
+        "Alice": [5.0, 10.0, 0.0],
+        "tea": [3.0, 0.0, 5.0],
+    }
+
+
+def test_triple_representation_embed_entities_two_stage_llm_path() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def embed(self, text: str) -> list[float]:
+            return [7.0, float(text.count("Bob")), float(text.count("graphs"))]
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            if name == "MemPrimitiveTripleEntityAgent":
+                return {"entities": ["Bob", "graphs"]}
+            return {"relationships": [{"subject": "Bob", "predicate": "studies", "object": "graphs"}]}
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Bob studies graphs.", source="notes")),
+        MemoryStore(),
+    )
+    rep = TripleRepresentation(method="two_stage", embed_entities=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.embedding is None
+    assert unit.metadata["representation"]["entity_embeddings"] == {
+        "Bob": [7.0, 1.0, 0.0],
+        "graphs": [7.0, 0.0, 1.0],
+    }
+
+
+def test_triple_representation_two_stage_reuses_one_prompt_for_both_calls() -> None:
+    from memprimitive.baselines import PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            payload = json.loads(input_text)
+            self.calls.append({"name": name, "payload": payload, "instructions": instructions})
+            if name == "MemPrimitiveTripleEntityAgent":
+                return {"entities": ["Alice", "Bob"]}
+            return {"relationships": [{"subject": "Alice", "predicate": "mentors", "object": "Bob"}]}
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice mentors Bob.", source="notes")),
+        MemoryStore(),
+    )
+    fake_runtime = _FakeRuntime()
+    rep = TripleRepresentation(method="two_stage", prompt="Keep only durable people and relationship triples.")
+    rep._runtime = lambda: fake_runtime  # type: ignore[method-assign]
+
+    packet_out, _ = rep.run(unit_packet, store)
+
+    entity_call = next(call for call in fake_runtime.calls if call["name"] == "MemPrimitiveTripleEntityAgent")
+    relation_call = next(call for call in fake_runtime.calls if call["name"] == "MemPrimitiveTripleRelationAgent")
+    assert entity_call["payload"]["prompt"] == "Keep only durable people and relationship triples."
+    assert relation_call["payload"]["prompt"] == "Keep only durable people and relationship triples."
+    assert relation_call["payload"]["entities"] == ["Alice", "Bob"]
+    assert packet_out.units[0].entities == ["Alice", "Bob"]
+    assert packet_out.units[0].triples == [("Alice", "mentors", "Bob")]
+
+
+def test_mem0g_example_builds_with_prompt_driven_triple_representation() -> None:
+    from memprimitive.baselines import TripleRepresentation
+    from memprimitive.example.classics.mem0g_memory import build_mem0g_memory_system
+
+    system = build_mem0g_memory_system()
+    pipeline = system["mem0g_write_pipeline"]
+    representation = pipeline.representation
+
+    assert isinstance(representation, tuple)
+    assert isinstance(representation[0], TripleRepresentation)
+    assert representation[0].prompt is not None
+    assert representation[0].embed_extracted is True
+
+
 def test_basic_representation_rejects_summary_and_description_elements() -> None:
     from memprimitive.baselines import BasicRepresentation
 
@@ -2161,6 +2658,14 @@ def test_graph_deduplication_append_organization_is_registered_in_baseline_expor
     assert "GraphDeduplicationAppendOrganization" in registered_baseline_class_names()
 
 
+def test_graph_entity_append_organization_is_registered_in_baseline_exports() -> None:
+    assert "GraphEntityAppendOrganization" in registered_baseline_class_names()
+
+
+def test_graph_entity_deduplication_append_organization_is_registered_in_baseline_exports() -> None:
+    assert "GraphEntityDeduplicationAppendOrganization" in registered_baseline_class_names()
+
+
 class _FakeAMEMRuntime:
     def require_llm(self, *, capability: str) -> None:
         return None
@@ -3516,6 +4021,44 @@ def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadat
     assert packet.trace["organization"]["source_written_record_ids"] == []
 
 
+def test_graph_append_organization_preserves_standard_record_embedding_shape() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            triples = [("Alice", "likes", "tea")]
+            entities = ["Alice", "tea"]
+            represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            represented = replace(represented, embedding=[1.0, 2.0, 3.0])
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata["representation"],
+                        "embedding": {"dim": 3},
+                    },
+                },
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+
+    record = store.iter_records("knowledge_graph")[0]
+    assert record.embedding == [1.0, 2.0, 3.0]
+    assert record.metadata["representation"]["embedding"] == {"dim": 3}
+    assert "embedding" not in record.metadata["graph"]
+    assert packet.trace["organization"]["writes_embedding_from_record_field"] is True
+    assert packet.trace["organization"]["records_with_embedding"] == 1
+
+
 def test_graph_append_organization_separate_mode_writes_source_and_triple_layers() -> None:
     from memprimitive.baselines import AlwaysTrigger, GraphAppendOrganization, PassThroughUnitFormation, TripleRepresentation
 
@@ -3577,6 +4120,130 @@ def test_graph_append_organization_separate_mode_requires_separate_layer() -> No
         GraphAppendOrganization(target_layer="knowledge_graph", separate=True).run(packet, store)
 
 
+def test_graph_entity_append_organization_writes_one_record_per_entity() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphEntityAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            triples = [("Alice", "likes", "tea")]
+            entities = ["Alice", "tea"]
+            represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            represented = replace(represented, embedding=[1.0, 2.0, 3.0])
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata["representation"],
+                        "embedding": {"dim": 3},
+                    },
+                },
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert [record.text for record in records] == ["Alice", "tea"]
+    assert all(record.embedding == [1.0, 2.0, 3.0] for record in records)
+    assert all(record.metadata["representation"]["embedding"] == {"dim": 3} for record in records)
+    assert all(record.metadata["graph"]["entities"] == ["Alice", "tea"] for record in records)
+    assert all(record.metadata["graph"]["triples"] == [("Alice", "likes", "tea")] for record in records)
+    assert packet.trace["organization"]["fanout_mode"] == "per_entity"
+    assert packet.trace["organization"]["entity_written_record_ids"] == [record.record_id for record in records]
+    assert packet.trace["organization"]["written_unit_ids"] == [packet.units[0].unit_id, packet.units[0].unit_id]
+    assert packet.trace["organization"]["records_with_embedding"] == 2
+    assert packet.trace["organization"]["skipped_unit_count"] == 0
+
+
+def test_graph_entity_append_organization_separate_mode_writes_source_and_entity_layers() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphEntityAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            triples = [("Alice", "likes", "tea")]
+            entities = ["Alice", "tea"]
+            represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="source_notes"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityAppendOrganization(
+        target_layer="knowledge_graph",
+        separate=True,
+        separate_layer="source_notes",
+    ).run(packet, store)
+
+    source_record = store.iter_records("source_notes")[0]
+    entity_records = store.iter_records("knowledge_graph")
+    assert source_record.text == "Alice likes tea."
+    assert [record.text for record in entity_records] == ["Alice", "tea"]
+    assert all("graph" in record.metadata for record in entity_records)
+    assert all("hierarchical" in record.metadata for record in entity_records)
+    assert all(record.metadata["hierarchical"]["source_record_ids"] == [source_record.record_id] for record in entity_records)
+    assert all(record.metadata["hierarchical"]["source_unit_ids"] == [source_record.unit_id] for record in entity_records)
+    assert all(
+        record.metadata["hierarchical"]["field_payload"]["triples"] == [("Alice", "likes", "tea")]
+        for record in entity_records
+    )
+    assert packet.trace["organization"]["source_written_record_ids"] == [source_record.record_id]
+    assert packet.trace["organization"]["entity_written_record_ids"] == [record.record_id for record in entity_records]
+
+
+def test_graph_entity_append_organization_skips_units_without_entities() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphEntityAppendOrganization, PassThroughUnitFormation
+
+    store = _graph_store()
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="No entities here.", source="notes")),
+        store,
+    )
+    packet = replace(
+        packet,
+        units=[
+            replace(
+                packet.units[0],
+                entities=[],
+                triples=[],
+                metadata={
+                    **packet.units[0].metadata,
+                    "representation": {
+                        **packet.units[0].metadata.get("representation", {}),
+                        "entities": [],
+                        "triples": [],
+                    },
+                },
+            )
+        ],
+    )
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+
+    assert store.count("knowledge_graph") == 0
+    assert packet.trace["organization"]["written_record_ids"] == []
+    assert packet.trace["organization"]["entity_written_record_ids"] == []
+    assert packet.trace["organization"]["skipped_unit_count"] == 1
+
+
 def test_graph_deduplication_append_organization_merges_top1_match_and_dedupes_relation_destination_pairs() -> None:
     from memprimitive.baselines import AlwaysTrigger, GraphDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
 
@@ -3636,6 +4303,8 @@ def test_graph_deduplication_append_organization_merges_top1_match_and_dedupes_r
     assert effect["effect_type"] == "merge"
     assert effect["matched_record_id"] == record.record_id
     assert effect["top1_similarity"] > 0.8
+    assert effect["embedding_source"] == "existing_unit_embedding"
+    assert effect["record_has_embedding"] is True
     assert packet.trace["organization"]["written_record_ids"] == [record.record_id]
 
 
@@ -3738,7 +4407,62 @@ def test_graph_deduplication_append_organization_uses_runtime_embedding_and_skip
     assert record.text == "Alice likes tea."
     assert record.embedding == target_embedding
     assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
+    assert packet.trace["organization"]["effects"][0]["embedding_source"] == "runtime_fallback"
+    assert packet.trace["organization"]["records_with_embedding"] == 1
     assert store.count("knowledge_graph") == 3
+
+
+def test_graph_deduplication_append_organization_uses_triple_representation_embedding_when_enabled() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+
+    class _FakeRuntime:
+        def require_llm(self, *, capability: str) -> None:
+            return None
+
+        def embed(self, text: str) -> list[float]:
+            lowered = text.casefold()
+            return [10.0 if "alice" in lowered else 0.0, 5.0 if "tea" in lowered else 0.0, float(len(text))]
+
+        def run_agent(
+            self,
+            *,
+            name: str,
+            instructions: str,
+            input_text: str,
+            temperature: float = 0.0,
+            tools: list[Any] | None = None,
+            max_turns: int = 10,
+            output_type: type[Any] | None = None,
+        ) -> Any:
+            payload = json.loads(input_text)
+            text = payload.get("text", "")
+            if "jasmine" in text:
+                return {
+                    "entities": ["Alice", "jasmine tea"],
+                    "relationships": [{"subject": "Alice", "predicate": "likes", "object": "jasmine tea"}],
+                }
+            return {
+                "entities": ["Alice", "tea"],
+                "relationships": [{"subject": "Alice", "predicate": "likes", "object": "tea"}],
+            }
+
+    store = _graph_store()
+    rep = TripleRepresentation(method="direct", embed_extracted=True)
+    rep._runtime = lambda: _FakeRuntime()  # type: ignore[method-assign]
+
+    for text in ("Alice likes tea.", "Alice likes jasmine tea."):
+        packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
+        packet, store = rep.run(packet, store)
+        packet, store = AlwaysTrigger().run(packet, store)
+        packet, store = GraphDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.8).run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert len(records) == 1
+    record = records[0]
+    assert record.embedding is not None
+    assert record.metadata["representation"]["embedding"]["dim"] == len(record.embedding)
+    assert "embedding" not in record.metadata["graph"]
+    assert packet.trace["organization"]["effects"][0]["embedding_source"] == "existing_unit_embedding"
 
 
 def test_graph_deduplication_append_organization_separate_mode_still_writes_source_record_on_merge() -> None:
@@ -3797,6 +4521,269 @@ def test_graph_deduplication_append_organization_separate_mode_still_writes_sour
     assert graph_record.metadata["hierarchical"]["source_record_ids"] == [source_records[-1].record_id]
     assert packet.trace["organization"]["source_written_record_ids"] == [source_records[-1].record_id]
     assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
+
+
+def test_graph_entity_deduplication_append_organization_merges_per_entity_and_appends_unmatched_entities() -> None:
+    from memprimitive.baselines import (
+        AlwaysTrigger,
+        GraphEntityDeduplicationAppendOrganization,
+        PassThroughUnitFormation,
+        TripleRepresentation,
+    )
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=["Alice", "tea"],
+                triples=[("Alice", "likes", "tea")],
+                representation_elements=("entities", "triple"),
+            )
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata.get("representation", {}),
+                        "entity_embeddings": {
+                            "Alice": [1.0, 0.0],
+                            "tea": [0.0, 1.0],
+                        },
+                    },
+                },
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-alice",
+            unit_id="seed-alice",
+            layer="knowledge_graph",
+            text="Alice",
+            timestamp="t0",
+            embedding=[1.0, 0.0],
+            metadata={
+                "representation": {"text": "Alice", "normalized_text": "alice", "embedding": {"dim": 2}},
+                "graph": {"entities": ["Alice"], "triples": [("Alice", "likes", "coffee")], "links": []},
+            },
+        )
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.8).run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert len(records) == 2
+    alice_record = [record for record in records if record.record_id == "rec-alice"][0]
+    tea_record = [record for record in records if record.record_id != "rec-alice"][0]
+    assert alice_record.text == "Alice"
+    assert alice_record.embedding == [1.0, 0.0]
+    assert alice_record.metadata["graph"]["triples"] == [
+        ("Alice", "likes", "coffee"),
+        ("Alice", "likes", "tea"),
+    ]
+    assert tea_record.text == "tea"
+    assert tea_record.embedding == [0.0, 1.0]
+    effects = packet.trace["organization"]["effects"]
+    assert [effect["effect_type"] for effect in effects] == ["merge", "append"]
+    assert [effect["entity"] for effect in effects] == ["Alice", "tea"]
+    assert packet.trace["organization"]["entity_written_record_ids"] == ["rec-alice", tea_record.record_id]
+
+
+def test_graph_entity_deduplication_append_organization_appends_when_threshold_not_met() -> None:
+    from memprimitive.baselines import (
+        AlwaysTrigger,
+        GraphEntityDeduplicationAppendOrganization,
+        PassThroughUnitFormation,
+        TripleRepresentation,
+    )
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=["Alice"],
+                triples=[("Alice", "likes", "tea")],
+                representation_elements=("entities", "triple"),
+            )
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata.get("representation", {}),
+                        "entity_embeddings": {"Alice": [0.0, 1.0]},
+                    },
+                },
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-old-alice",
+            unit_id="seed-alice",
+            layer="knowledge_graph",
+            text="Alice",
+            timestamp="t0",
+            embedding=[1.0, 0.0],
+            metadata={
+                "representation": {"text": "Alice", "normalized_text": "alice", "embedding": {"dim": 2}},
+                "graph": {"entities": ["Alice"], "triples": [("Alice", "likes", "coffee")], "links": []},
+            },
+        )
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.95).run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert len(records) == 2
+    effect = packet.trace["organization"]["effects"][0]
+    assert effect["effect_type"] == "append"
+    assert effect["entity"] == "Alice"
+    assert effect["top1_similarity"] == 0.0
+
+
+def test_graph_entity_deduplication_append_organization_skips_entities_without_entity_embedding() -> None:
+    from memprimitive.baselines import (
+        AlwaysTrigger,
+        GraphEntityDeduplicationAppendOrganization,
+        PassThroughUnitFormation,
+        TripleRepresentation,
+    )
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=["Alice", "tea"],
+                triples=[("Alice", "likes", "tea")],
+                representation_elements=("entities", "triple"),
+            )
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata.get("representation", {}),
+                        "entity_embeddings": {"Alice": [1.0, 0.0]},
+                    },
+                },
+            )
+            return represented, {"source": "test_seed"}
+
+    store = _graph_store()
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityDeduplicationAppendOrganization(target_layer="knowledge_graph", threshold=0.8).run(packet, store)
+
+    records = store.iter_records("knowledge_graph")
+    assert [record.text for record in records] == ["Alice"]
+    assert packet.trace["organization"]["skipped_entity_count"] == 1
+    assert packet.trace["organization"]["effects"][1]["effect_type"] == "skipped_entity_missing_embedding"
+    assert packet.trace["organization"]["effects"][1]["entity"] == "tea"
+
+
+def test_graph_entity_deduplication_append_organization_separate_mode_writes_source_and_entity_records() -> None:
+    from memprimitive.baselines import (
+        AlwaysTrigger,
+        GraphEntityDeduplicationAppendOrganization,
+        PassThroughUnitFormation,
+        TripleRepresentation,
+    )
+
+    class SeededTripleRepresentation(TripleRepresentation):
+        def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
+            represented = replace(
+                unit,
+                normalized_text=unit.text.strip().casefold(),
+                entities=["Alice", "tea"],
+                triples=[("Alice", "likes", "tea")],
+                representation_elements=("entities", "triple"),
+            )
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata.get("representation", {}),
+                        "entity_embeddings": {
+                            "Alice": [1.0, 0.0],
+                            "tea": [0.0, 1.0],
+                        },
+                    },
+                },
+            )
+            return represented, {"source": "test_seed"}
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="source_notes"),
+                StoreLayerSpec(name="knowledge_graph", theme="semantic", shape="Graph", indices=("graph", "entity")),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-alice",
+            unit_id="seed-alice",
+            layer="knowledge_graph",
+            text="Alice",
+            timestamp="t0",
+            embedding=[1.0, 0.0],
+            metadata={
+                "representation": {"text": "Alice", "normalized_text": "alice", "embedding": {"dim": 2}},
+                "graph": {"entities": ["Alice"], "triples": [("Alice", "likes", "coffee")], "links": []},
+            },
+        )
+    )
+
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        store,
+    )
+    packet, store = SeededTripleRepresentation().run(packet, store)
+    packet, store = AlwaysTrigger().run(packet, store)
+    packet, store = GraphEntityDeduplicationAppendOrganization(
+        target_layer="knowledge_graph",
+        threshold=0.8,
+        separate=True,
+        separate_layer="source_notes",
+    ).run(packet, store)
+
+    source_records = store.iter_records("source_notes")
+    graph_records = store.iter_records("knowledge_graph")
+    assert len(source_records) == 1
+    assert len(graph_records) == 2
+    source_record = source_records[0]
+    alice_record = [record for record in graph_records if record.record_id == "rec-alice"][0]
+    tea_record = [record for record in graph_records if record.record_id != "rec-alice"][0]
+    assert source_record.text == "Alice likes tea."
+    assert alice_record.metadata["hierarchical"]["source_record_ids"] == [source_record.record_id]
+    assert tea_record.metadata["hierarchical"]["source_record_ids"] == [source_record.record_id]
+    assert packet.trace["organization"]["source_written_record_ids"] == [source_record.record_id]
+    assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
+    assert packet.trace["organization"]["effects"][1]["effect_type"] == "append"
 
 
 def test_memory_store_graph_link_round_trip_returns_neighbors() -> None:

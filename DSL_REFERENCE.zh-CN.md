@@ -57,7 +57,7 @@ unit_formation
 | Module | 构造参数 | 效果 |
 | --- | --- | --- |
 | `BasicRepresentation` (`basic_representation`) | `elements=("text", "embedding")`, `embedding_model=None`, `api_key=None`, `base_url=None`, `model=None` | 生成基础表示，适合文本和 embedding 等轻量字段。 |
-| `TripleRepresentation` (`triple_representation`) | `method="direct"`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM 抽取 `(subject, relation, object)` triples。 |
+| `TripleRepresentation` (`triple_representation`) | `method="direct"`, `prompt=None`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None`, `embed_extracted=False`, `embed_entities=False` | 用 LLM 抽取 `(subject, relation, object)` triples；`embed_extracted=True` 时给整份抽取出的 `entities + triples` 生成一个 graph-object embedding 写回 `unit.embedding`，`embed_entities=True` 时额外把每个 entity 的 embedding 写入 `metadata["representation"]["entity_embeddings"]`。 |
 | `LLMRepresentation` (`llm_representation`) | `field`, `prompt`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 prompt 驱动的方式为 unit 生成一个语义字段，并回写到 `metadata["representation"]` 等标准位置。 |
 | `SemanticFieldEnrichmentRepresentation` (`semantic_field_enrichment_representation`) | `note_namespace="note"`, `strict_llm=True`, `default_category="Uncategorized"` | 生成更丰富的 note 结构字段，供图存储或高阶检索使用。 |
 | `RetrievalOrientedEmbeddingRepresentation` (`retrieval_oriented_embedding_representation`) | `note_namespace="note"`, `default_category="Uncategorized"`, `embedding_version="content_context_keywords_tags_v2"`, `embedding_model=None` | 为 note 风格记录构造更适合检索的复合 embedding。 |
@@ -94,7 +94,9 @@ unit_formation
 | `AppendOrganization` (`append_organization`) | `target_layer="default"` | 直接 append 到固定 layer。 |
 | `ConditionalLayerOrganization` (`conditional_layer_organization`) | `default_layer="default"`, `rules=()` | 按 tags、entities、metadata 等规则路由到不同 layer。 |
 | `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 向图层追加记录，并维护 graph metadata；`separate=True` 时原文本与 triple 记录可分层落库。 |
+| `GraphEntityAppendOrganization` (`graph_entity_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 保持 `GraphAppendOrganization` 的 graph metadata / provenance 约定，但把一个 unit 展开成多条 graph record，每条 `record.text` 是一个 entity；若当前 unit 没有 entity，则跳过该 unit。 |
 | `GraphDeduplicationAppendOrganization` (`graph_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 向图层写入前先与同 layer 现有 graph records 做 embedding top-1 相似度匹配；若 `similarity > threshold`，则原地合并节点并更新 text / embedding / triples，否则正常 append；`separate=True` 时 source 文本仍可单独落到 side layer。 |
+| `GraphEntityDeduplicationAppendOrganization` (`graph_entity_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 保持 `GraphDeduplicationAppendOrganization` 的阈值去重与 provenance 语义，但按 entity 独立执行 merge-or-append：每个 entity 用自己的 entity embedding 与现有 graph records 比较，相似度超过阈值时合并到命中节点，否则追加一个新的 entity 节点；缺少该 entity embedding 时只跳过该 entity。 |
 | `PlacementWithoutAppendOrganization` (`placement_without_append_organization`) | `target_layer="trial_buffer"` | 只给出 placement，不实际 append。 |
 | `GraphAppendLinkReadyOrganization` (`graph_append_link_ready_organization`) | `target_layer="knowledge_graph"`, `note_namespace="note"` | 追加 link-ready 图记录，为后续图演化准备 metadata。 |
 | `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 对选中的 source-layer records 做抽象聚合，再通过子 `MemoryPipeline.ingest()` 写入高层记忆。 |
