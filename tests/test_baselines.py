@@ -761,6 +761,58 @@ def test_llm_function_call_evolution_deletes_records_from_source_layer_scan() ->
     assert packet_out.trace["memory_evolution"]["deleted_record_ids"] == ["rec-1"]
 
 
+def test_llm_function_call_evolution_update_rejects_record_outside_selected_records() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["selected profile", "other profile"])
+    module = LLMFunctionCallEvolution(
+        prompt="Rewrite {{ selected_records.0.text }}",
+        tools=["UPDATE"],
+        source_layer="profile",
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Rewrite selected profile"
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "should fail"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(KeyError, match="Record 'rec-2' is not in the current evolution candidate set."):
+        module.run(
+            Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}),
+            store,
+        )
+
+
+def test_llm_function_call_evolution_delete_rejects_record_outside_selected_records() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["selected profile", "other profile"])
+    module = LLMFunctionCallEvolution(
+        prompt="Delete {{ selected_records.0.text }}",
+        tools=["DELETE"],
+        source_layer="profile",
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Delete selected profile"
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "reason": "should fail"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(KeyError, match="Record 'rec-2' is not in the current evolution candidate set."):
+        module.run(
+            Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}),
+            store,
+        )
+
+
 def test_llm_function_call_evolution_graph_update_normalizes_graph_metadata() -> None:
     from memprimitive.baselines import LLMFunctionCallEvolution
     from memprimitive.utils._graph_family import graph_metadata_from_record
@@ -861,6 +913,51 @@ def test_llm_function_call_evolution_graph_delete_cleans_dangling_links() -> Non
         effect.get("effect_type") == "graph_link_cleanup"
         for effect in packet_out.trace["memory_evolution"]["effects"]
     )
+
+
+def test_llm_function_call_evolution_graph_delete_rejects_record_outside_selected_records() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = _graph_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="seed-1",
+            layer="knowledge_graph",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:01Z",
+            metadata={"graph": {"entities": ["Alice"], "links": [], "triples": []}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="seed-2",
+            layer="knowledge_graph",
+            text="Tea is warm",
+            timestamp="2026-01-01T00:00:02Z",
+            metadata={"graph": {"entities": ["tea"], "links": [], "triples": []}},
+        )
+    )
+    module = LLMFunctionCallEvolution(
+        prompt="Delete {{ selected_records.0.text }}",
+        tools=["GRAPH_DELETE"],
+        source_layer="knowledge_graph",
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Delete Alice likes tea"
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "reason": "should fail"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(KeyError, match="Record 'rec-2' is not in the current evolution candidate set."):
+        module.run(
+            Packet(decisions_store={"knowledge_graph": {"record_ids": ["rec-1"]}}),
+            store,
+        )
 
 
 def test_llm_function_call_evolution_graph_tools_declare_graph_contracts() -> None:

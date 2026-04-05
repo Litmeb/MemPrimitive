@@ -219,7 +219,7 @@ def build_runtime_tools(
                 validate_tool_arguments(payload, spec.parameters_json_schema, tool_name=spec.name)
                 result = spec.executor(context, payload)
                 context.store = result.store
-                context.visible_records = list(context.store.iter_records())
+                context.visible_records = _refresh_visible_records(context)
                 state.effects.extend(dict(effect) for effect in result.effects)
                 _accumulate_effect_ids(state, result.effects)
                 state.tool_calls.append(
@@ -392,7 +392,12 @@ def _build_update_executor(
     graph_aware: bool = False,
 ) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
     def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
-        record = find_record_by_id(context.store, str(arguments.get("record_id", "")).strip())
+        record = find_record_by_id(
+            context.store,
+            str(arguments.get("record_id", "")).strip(),
+            visible_records=context.visible_records,
+            restricted=context.module_slot == "memory_evolution",
+        )
         if graph_aware:
             _require_graph_layer(context.store, record.layer, tool_name="GRAPH_UPDATE")
         metadata_patch = arguments.get("metadata_patch", {})
@@ -448,7 +453,12 @@ def _build_delete_executor(
     graph_aware: bool = False,
 ) -> Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]:
     def _execute(context: WriteToolCallContext, arguments: dict[str, Any]) -> WriteToolResult:
-        record = find_record_by_id(context.store, str(arguments.get("record_id", "")).strip())
+        record = find_record_by_id(
+            context.store,
+            str(arguments.get("record_id", "")).strip(),
+            visible_records=context.visible_records,
+            restricted=context.module_slot == "memory_evolution",
+        )
         if graph_aware:
             _require_graph_layer(context.store, record.layer, tool_name="GRAPH_DELETE")
         removed = context.store.delete_record(record.layer, record.record_id)
@@ -492,10 +502,30 @@ def _require_graph_layer(store: MemoryStore, layer: str, *, tool_name: str) -> N
         raise ValueError(f"{tool_name} requires target layer {layer!r} to be Graph.")
 
 
-def find_record_by_id(store: MemoryStore, record_id: str) -> MemoryRecord:
+def _refresh_visible_records(context: WriteToolCallContext) -> list[MemoryRecord]:
+    if context.module_slot != "memory_evolution":
+        return list(context.store.iter_records())
+    allowed_ids = {record.record_id for record in context.visible_records}
+    if not allowed_ids:
+        return []
+    return [record for record in context.store.iter_records() if record.record_id in allowed_ids]
+
+
+def find_record_by_id(
+    store: MemoryStore,
+    record_id: str,
+    *,
+    visible_records: list[MemoryRecord] | None = None,
+    restricted: bool = False,
+) -> MemoryRecord:
     normalized = str(record_id).strip()
     if not normalized:
         raise ValueError("record_id must be a non-empty string.")
+    if restricted:
+        for record in visible_records or []:
+            if record.record_id == normalized:
+                return record
+        raise KeyError(f"Record {normalized!r} is not in the current evolution candidate set.")
     for record in store.iter_records():
         if record.record_id == normalized:
             return record
