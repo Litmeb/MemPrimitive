@@ -87,6 +87,94 @@ def _graph_seed_record_ids(query) -> list[str]:
     return []
 
 
+def _normalize_triple_query_part(value: Any) -> str | None:
+    text = str(value).strip()
+    if not text or text == "*":
+        return None
+    return text
+
+
+def _parse_triple_query(query: Query) -> tuple[dict[str, Any], str]:
+    metadata = query.metadata if isinstance(query.metadata, dict) else {}
+    candidates = []
+    if isinstance(metadata.get("triple_query"), dict):
+        candidates.append(("metadata.triple_query", metadata["triple_query"]))
+    if isinstance(metadata.get("triple"), dict):
+        candidates.append(("metadata.triple", metadata["triple"]))
+
+    for source, payload in candidates:
+        subject = _normalize_triple_query_part(payload.get("subject"))
+        relation = _normalize_triple_query_part(payload.get("relation"))
+        obj = _normalize_triple_query_part(payload.get("object"))
+        break
+    else:
+        parts = [part.strip() for part in str(query.text).split(">>")]
+        if len(parts) != 3:
+            raise ValueError(
+                "TripleExactMatchRetrieval requires a structured triple query. "
+                "Use Query.metadata['triple_query'] with subject/relation/object "
+                "or query.text formatted as 'subject >> relation >> object'."
+            )
+        subject = _normalize_triple_query_part(parts[0])
+        relation = _normalize_triple_query_part(parts[1])
+        obj = _normalize_triple_query_part(parts[2])
+        source = "query.text"
+
+    if relation is None:
+        raise ValueError("TripleExactMatchRetrieval requires a non-empty relation in the structured triple query.")
+    if subject is None and obj is None:
+        raise ValueError(
+            "TripleExactMatchRetrieval requires at least one grounded entity in the structured triple query."
+        )
+
+    mode = "full_triple"
+    if subject is None:
+        mode = "relation_object"
+    elif obj is None:
+        mode = "subject_relation"
+
+    return {
+        "subject": subject,
+        "relation": relation,
+        "object": obj,
+        "mode": mode,
+    }, source
+
+
+def _record_triples(record) -> list[tuple[str, str, str]]:
+    triples: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    representation_triples = _representation(record).get("triples", [])
+    graph_triples = graph_metadata_from_record(record).get("triples", [])
+    for source in (representation_triples, graph_triples):
+        if not isinstance(source, list):
+            continue
+        for value in source:
+            if not isinstance(value, (list, tuple)) or len(value) != 3:
+                continue
+            triple = (str(value[0]).strip(), str(value[1]).strip(), str(value[2]).strip())
+            if not all(triple) or triple in seen:
+                continue
+            seen.add(triple)
+            triples.append(triple)
+    return triples
+
+
+def _triple_matches_query(triple: tuple[str, str, str], *, query_spec: dict[str, Any]) -> bool:
+    subject, relation, obj = triple
+    query_subject = query_spec["subject"]
+    query_relation = query_spec["relation"]
+    query_object = query_spec["object"]
+
+    if query_subject is not None and subject.casefold() != str(query_subject).casefold():
+        return False
+    if relation.casefold() != str(query_relation).casefold():
+        return False
+    if query_object is not None and obj.casefold() != str(query_object).casefold():
+        return False
+    return True
+
+
 _RETRIEVAL_SOURCES: Final[frozenset[str]] = frozenset({"store", "retrieved"})
 _QUERY_REWRITE_STRATEGIES: Final[frozenset[str]] = frozenset({"llm", "regex"})
 _QUERY_REWRITE_REGEX_FLAGS: Final[dict[str, int]] = {
@@ -929,6 +1017,124 @@ class EntityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
+class TripleExactMatchRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
+    """Retrieve triple-bearing records that exactly match a structured triple query.
+
+    The query may be provided either as ``Query.metadata["triple_query"]`` with
+    ``subject`` / ``relation`` / ``object`` fields, or in ``query.text`` using
+    the API-style format ``subject >> relation >> object``. Empty strings or
+    ``*`` act as wildcards, but the relation must always be grounded and at
+    least one of subject/object must be grounded.
+    """
+
+    spec = ModuleSpec(
+        name="triple_exact_match_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(self, top_k: int = 3, layer: str | None = None, *, source: str = "store") -> None:
+        if top_k <= 0:
+            raise ValueError("TripleExactMatchRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.layer = layer
+        self.source = _normalize_retrieval_source(source)
+
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("TripleExactMatchRetrieval requires packet.query.")
+
+        query_spec, query_source = _parse_triple_query(packet.query)
+        all_records = list(reversed(_candidate_records(packet, store, source=self.source, layer=self.layer)))
+        if not all_records:
+            packet = _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source=self.source,
+                query_mode=query_spec["mode"],
+                query_source=query_source,
+                query_triple={
+                    "subject": query_spec["subject"],
+                    "relation": query_spec["relation"],
+                    "object": query_spec["object"],
+                },
+                candidate_count=0,
+                triple_candidate_count=0,
+                matched_candidate_count=0,
+            )
+            return packet, store
+
+        scored: list[tuple[int, int, Any, list[tuple[str, str, str]]]] = []
+        triple_candidate_count = 0
+        for order_index, record in enumerate(all_records):
+            record_triples = _record_triples(record)
+            if record_triples:
+                triple_candidate_count += 1
+            matched_triples = [
+                triple
+                for triple in record_triples
+                if _triple_matches_query(triple, query_spec=query_spec)
+            ]
+            if not matched_triples:
+                continue
+            scored.append((len(matched_triples), order_index, record, matched_triples))
+
+        if not scored:
+            packet = _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source=self.source,
+                query_mode=query_spec["mode"],
+                query_source=query_source,
+                query_triple={
+                    "subject": query_spec["subject"],
+                    "relation": query_spec["relation"],
+                    "object": query_spec["object"],
+                },
+                candidate_count=len(all_records),
+                triple_candidate_count=triple_candidate_count,
+                matched_candidate_count=0,
+            )
+            return packet, store
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        selected = scored[: self.top_k]
+        items = [record for _, _, record, _ in selected]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": float(match_count),
+                "strategy": "triple_exact_match",
+                "matched_triples": list(matched_triples),
+            }
+            for rank, (match_count, _, record, matched_triples) in enumerate(selected, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "source": self.source,
+                "query_mode": query_spec["mode"],
+                "query_source": query_source,
+                "query_triple": {
+                    "subject": query_spec["subject"],
+                    "relation": query_spec["relation"],
+                    "object": query_spec["object"],
+                },
+                "candidate_count": len(all_records),
+                "triple_candidate_count": triple_candidate_count,
+                "matched_candidate_count": len(scored),
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+
 class BM25Retrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Rank records with BM25 over text plus representation keywords, then recency."""
 
@@ -1738,6 +1944,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     EmbeddingSimilarityRetrieval,
     TagRetrieval,
     EntityRetrieval,
+    TripleExactMatchRetrieval,
     BM25Retrieval,
     GraphNeighborRetrieval,
     ExpandRetrievedGraphNeighbors,
