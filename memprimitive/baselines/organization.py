@@ -129,6 +129,52 @@ def _append_records_for_placements(
     return written_record_ids, written_unit_ids, skipped_units
 
 
+def _record_from_unit_with_text(
+    unit,
+    *,
+    layer: str,
+    sequence_id: int,
+    text: str,
+    embedding: list[float] | None = None,
+) -> MemoryRecord:
+    normalized_text = str(text).strip()
+    if not normalized_text:
+        raise ValueError("text override must be a non-empty string.")
+    representation_elements = set(unit.representation_elements)
+    if embedding is not None:
+        representation_elements.add("embedding")
+    projected_unit = replace(
+        unit,
+        text=normalized_text,
+        normalized_text=normalized_text.casefold().strip(),
+        embedding=None if embedding is None else list(embedding),
+        representation_elements=tuple(sorted(representation_elements)),
+    )
+    return MemoryRecord.from_unit(unit=projected_unit, layer=layer, sequence_id=sequence_id)
+
+
+def _entity_embedding_map_from_unit(unit) -> dict[str, list[float]]:
+    representation = unit.metadata.get("representation", {})
+    if not isinstance(representation, dict):
+        return {}
+    raw_entity_embeddings = representation.get("entity_embeddings", {})
+    if not isinstance(raw_entity_embeddings, dict):
+        return {}
+    normalized: dict[str, list[float]] = {}
+    for raw_entity, raw_embedding in raw_entity_embeddings.items():
+        entity_text = str(raw_entity).strip()
+        if not entity_text or not isinstance(raw_embedding, list):
+            continue
+        try:
+            embedding = [float(value) for value in raw_embedding]
+        except (TypeError, ValueError):
+            continue
+        if not embedding:
+            continue
+        normalized[entity_text] = embedding
+    return normalized
+
+
 def _ensure_unit_embedding(unit) -> Any:
     if unit.embedding is not None:
         return unit
@@ -300,6 +346,13 @@ class GraphAppendOrganization(OrganizationModule):
             "target_layer": self.target_layer,
             "separate": self.separate,
             "separate_layer": self.separate_layer,
+            "writes_embedding_from_record_field": True,
+            "records_with_embedding": sum(
+                1
+                for record_id in written_record_ids
+                for record in store.iter_records(self.target_layer)
+                if record.record_id == record_id and record.embedding is not None
+            ),
             "written_record_ids": written_record_ids,
             "source_written_record_ids": separate_source_record_ids,
             "triple_written_record_ids": written_record_ids,
@@ -362,6 +415,159 @@ class GraphAppendOrganization(OrganizationModule):
         return written_record_ids, written_unit_ids, skipped_units, source_written_record_ids
 
 
+class GraphEntityAppendOrganization(GraphAppendOrganization):
+    """Append one graph record per extracted entity instead of one per raw unit."""
+
+    spec = ModuleSpec(
+        name="graph_entity_append_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        store_requirements=("shape:Graph", "index:graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+        side_effects=("modify_store", "append_records"),
+    )
+    requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("GraphEntityAppendOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("GraphEntityAppendOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("GraphEntityAppendOrganization requires decisions aligned with units.")
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(f"GraphEntityAppendOrganization requires target layer {self.target_layer!r} to be Graph.")
+        if self.separate and not self.separate_layer:
+            raise ValueError("GraphEntityAppendOrganization requires separate_layer when separate=True.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        source_written_record_ids: list[str] = []
+        if self.separate:
+            written_record_ids, written_unit_ids, skipped_units, source_written_record_ids = self._append_separate_records(
+                packet,
+                store,
+                placements,
+            )
+        else:
+            written_record_ids, written_unit_ids, skipped_units = self._append_entity_records(packet, store, placements)
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "separate": self.separate,
+            "separate_layer": self.separate_layer,
+            "fanout_mode": "per_entity",
+            "writes_embedding_from_record_field": True,
+            "records_with_embedding": sum(
+                1
+                for record_id in written_record_ids
+                for record in store.iter_records(self.target_layer)
+                if record.record_id == record_id and record.embedding is not None
+            ),
+            "written_record_ids": written_record_ids,
+            "source_written_record_ids": source_written_record_ids,
+            "entity_written_record_ids": written_record_ids,
+            "written_unit_ids": written_unit_ids,
+            "skipped_unit_count": skipped_units,
+            "graph_metadata_schema": (
+                "graph.layer",
+                "graph.shape",
+                "graph.entities",
+                "graph.triples",
+                "graph.links",
+                "graph.node_count",
+                "graph.link_count",
+                "graph.last_linked_at",
+                "graph.link_history",
+            ),
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+    @staticmethod
+    def _entity_texts(unit) -> list[str]:
+        return list(dict.fromkeys(str(entity).strip() for entity in unit.entities if str(entity).strip()))
+
+    def _append_entity_records(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        placements: list[Placement],
+    ) -> tuple[list[str], list[str], int]:
+        written_record_ids: list[str] = []
+        written_unit_ids: list[str] = []
+        skipped_units = 0
+        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            if not decision:
+                skipped_units += 1
+                continue
+            entity_texts = self._entity_texts(unit)
+            if not entity_texts:
+                skipped_units += 1
+                continue
+            for entity_text in entity_texts:
+                sequence_id = store.next_sequence_id()
+                record = _record_from_unit_with_text(
+                    unit,
+                    layer=placement.target_layer,
+                    sequence_id=sequence_id,
+                    text=entity_text,
+                )
+                record.metadata.update(self._graph_metadata(unit, placement))
+                store.append(record)
+                written_record_ids.append(record.record_id)
+                written_unit_ids.append(unit.unit_id)
+        return written_record_ids, written_unit_ids, skipped_units
+
+    def _append_separate_records(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        placements: list[Placement],
+    ) -> tuple[list[str], list[str], int, list[str]]:
+        written_record_ids: list[str] = []
+        written_unit_ids: list[str] = []
+        source_written_record_ids: list[str] = []
+        skipped_units = 0
+        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            if not decision:
+                skipped_units += 1
+                continue
+            entity_texts = self._entity_texts(unit)
+            if not entity_texts:
+                skipped_units += 1
+                continue
+
+            source_sequence_id = store.next_sequence_id()
+            source_record = MemoryRecord.from_unit(unit=unit, layer=self.separate_layer, sequence_id=source_sequence_id)
+            store.append(source_record)
+            source_written_record_ids.append(source_record.record_id)
+
+            for entity_text in entity_texts:
+                entity_sequence_id = store.next_sequence_id()
+                entity_record = _record_from_unit_with_text(
+                    unit,
+                    layer=placement.target_layer,
+                    sequence_id=entity_sequence_id,
+                    text=entity_text,
+                )
+                entity_record.metadata.update(self._graph_metadata(unit, placement))
+                entity_record.metadata.update(
+                    build_extracted_triple_metadata(
+                        source_layer=self.separate_layer,
+                        target_layer=placement.target_layer,
+                        source_record=source_record,
+                        triples=list(entity_record.metadata["graph"]["triples"]),
+                    )
+                )
+                store.append(entity_record)
+                written_record_ids.append(entity_record.record_id)
+                written_unit_ids.append(unit.unit_id)
+        return written_record_ids, written_unit_ids, skipped_units, source_written_record_ids
+
+
 class GraphDeduplicationAppendOrganization(OrganizationModule):
     """Append graph records, but merge into the nearest existing node when similar enough."""
 
@@ -417,7 +623,7 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
                 effects.append({"unit_id": raw_unit.unit_id, "effect_type": "skipped"})
                 continue
 
-            unit = _ensure_unit_embedding(raw_unit)
+            unit = raw_unit
             source_record = None
             if self.separate:
                 source_sequence_id = store.next_sequence_id()
@@ -425,7 +631,7 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
                 store.append(source_record)
                 source_written_record_ids.append(source_record.record_id)
 
-            matched_record, top1_similarity = self._find_best_match(store, unit)
+            matched_record, top1_similarity, embedding_source = self._find_best_match(store, unit)
             if matched_record is not None and top1_similarity > self.threshold:
                 merged_record = self._merge_record(matched_record, unit)
                 if source_record is not None:
@@ -447,6 +653,8 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
                         "matched_record_id": matched_record.record_id,
                         "top1_similarity": float(top1_similarity),
                         "threshold": self.threshold,
+                        "embedding_source": embedding_source,
+                        "record_has_embedding": merged_record.embedding is not None,
                         "source_record_id": None if source_record is None else source_record.record_id,
                     }
                 )
@@ -474,6 +682,8 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
                     "record_id": record.record_id,
                     "top1_similarity": None if top1_similarity is None else float(top1_similarity),
                     "threshold": self.threshold,
+                    "embedding_source": embedding_source,
+                    "record_has_embedding": record.embedding is not None,
                     "source_record_id": None if source_record is None else source_record.record_id,
                 }
             )
@@ -485,6 +695,13 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
             "threshold": self.threshold,
             "separate": self.separate,
             "separate_layer": self.separate_layer,
+            "writes_embedding_from_record_field": True,
+            "records_with_embedding": sum(
+                1
+                for record_id in written_record_ids
+                for record in store.iter_records(self.target_layer)
+                if record.record_id == record_id and record.embedding is not None
+            ),
             "written_record_ids": written_record_ids,
             "source_written_record_ids": source_written_record_ids,
             "written_unit_ids": written_unit_ids,
@@ -504,19 +721,26 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
         }
         return replace(packet, placements=placements, trace=trace), store
 
-    def _find_best_match(self, store: MemoryStore, unit) -> tuple[MemoryRecord | None, float | None]:
+    def _find_best_match(self, store: MemoryStore, unit) -> tuple[MemoryRecord | None, float | None, str]:
+        embedding_source = "existing_unit_embedding"
+        candidate_unit = unit
         if unit.embedding is None:
-            return None, None
+            candidate_unit = _ensure_unit_embedding(unit)
+            embedding_source = "runtime_fallback"
+        if candidate_unit.embedding is None:
+            return None, None, embedding_source
         best_record: MemoryRecord | None = None
         best_similarity: float | None = None
         for candidate in store.iter_records(self.target_layer):
-            if candidate.embedding is None or len(candidate.embedding) != len(unit.embedding):
+            if candidate.embedding is None or len(candidate.embedding) != len(candidate_unit.embedding):
                 continue
-            similarity = Runtime.cosine_similarity(unit.embedding, candidate.embedding)
+            similarity = Runtime.cosine_similarity(candidate_unit.embedding, candidate.embedding)
             if best_similarity is None or similarity > best_similarity:
                 best_record = candidate
                 best_similarity = float(similarity)
-        return best_record, best_similarity
+        if unit.embedding is None and candidate_unit.embedding is not None:
+            unit.embedding = list(candidate_unit.embedding)
+        return best_record, best_similarity, embedding_source
 
     def _merge_record(self, existing_record: MemoryRecord, unit) -> MemoryRecord:
         existing_graph = graph_metadata_from_record(existing_record)
@@ -539,6 +763,245 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
                 **existing_record.metadata,
                 "unit_type": unit.unit_type,
                 "representation": _representation_summary_for_graph_merge(unit, existing_record),
+                "graph": merged_graph,
+            },
+        )
+
+
+class GraphEntityDeduplicationAppendOrganization(GraphDeduplicationAppendOrganization):
+    """Deduplicate graph writes per extracted entity instead of per raw unit."""
+
+    spec = ModuleSpec(
+        name="graph_entity_deduplication_append_organization",
+        slot="organization",
+        input_requirements=("units", "decisions"),
+        output_guarantees=("placements",),
+        store_requirements=("shape:Graph", "index:graph"),
+        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
+        side_effects=("modify_store", "append_records", "rewrite_records"),
+    )
+    requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
+    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.units is None:
+            raise ValueError("GraphEntityDeduplicationAppendOrganization requires packet.units.")
+        if packet.decisions is None:
+            raise ValueError("GraphEntityDeduplicationAppendOrganization requires packet.decisions.")
+        if len(packet.units) != len(packet.decisions):
+            raise ValueError("GraphEntityDeduplicationAppendOrganization requires decisions aligned with units.")
+        if store.layer_shape(self.target_layer) != "Graph":
+            raise ValueError(
+                f"GraphEntityDeduplicationAppendOrganization requires target layer {self.target_layer!r} to be Graph."
+            )
+        if self.separate and not self.separate_layer:
+            raise ValueError("GraphEntityDeduplicationAppendOrganization requires separate_layer when separate=True.")
+
+        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
+        written_record_ids: list[str] = []
+        written_unit_ids: list[str] = []
+        source_written_record_ids: list[str] = []
+        effects: list[dict[str, Any]] = []
+        skipped_units = 0
+        skipped_entities = 0
+
+        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
+            if not decision:
+                skipped_units += 1
+                effects.append({"unit_id": unit.unit_id, "effect_type": "skipped"})
+                continue
+
+            entity_texts = GraphEntityAppendOrganization._entity_texts(unit)
+            if not entity_texts:
+                skipped_units += 1
+                effects.append({"unit_id": unit.unit_id, "effect_type": "skipped_no_entities"})
+                continue
+
+            source_record = None
+            if self.separate:
+                source_sequence_id = store.next_sequence_id()
+                source_record = MemoryRecord.from_unit(unit=unit, layer=self.separate_layer, sequence_id=source_sequence_id)
+                store.append(source_record)
+                source_written_record_ids.append(source_record.record_id)
+
+            entity_embeddings = _entity_embedding_map_from_unit(unit)
+            wrote_any_entity = False
+            for entity_text in entity_texts:
+                entity_embedding = entity_embeddings.get(entity_text)
+                if entity_embedding is None:
+                    skipped_entities += 1
+                    effects.append(
+                        {
+                            "unit_id": unit.unit_id,
+                            "entity": entity_text,
+                            "effect_type": "skipped_entity_missing_embedding",
+                            "source_record_id": None if source_record is None else source_record.record_id,
+                        }
+                    )
+                    continue
+
+                matched_record, top1_similarity = self._find_best_match_for_entity(store, entity_embedding)
+                if matched_record is not None and top1_similarity is not None and top1_similarity > self.threshold:
+                    merged_record = self._merge_record_for_entity(
+                        existing_record=matched_record,
+                        unit=unit,
+                        entity_text=entity_text,
+                        entity_embedding=entity_embedding,
+                    )
+                    if source_record is not None:
+                        merged_record.metadata.update(
+                            build_extracted_triple_metadata(
+                                source_layer=self.separate_layer,
+                                target_layer=placement.target_layer,
+                                source_record=source_record,
+                                triples=list(merged_record.metadata["graph"]["triples"]),
+                            )
+                        )
+                    store.replace_record(self.target_layer, matched_record.record_id, merged_record)
+                    written_record_ids.append(matched_record.record_id)
+                    written_unit_ids.append(unit.unit_id)
+                    wrote_any_entity = True
+                    effects.append(
+                        {
+                            "unit_id": unit.unit_id,
+                            "entity": entity_text,
+                            "effect_type": "merge",
+                            "matched_record_id": matched_record.record_id,
+                            "top1_similarity": float(top1_similarity),
+                            "threshold": self.threshold,
+                            "embedding_source": "entity_representation_embedding",
+                            "record_has_embedding": merged_record.embedding is not None,
+                            "source_record_id": None if source_record is None else source_record.record_id,
+                        }
+                    )
+                    continue
+
+                sequence_id = store.next_sequence_id()
+                record = _record_from_unit_with_text(
+                    unit,
+                    layer=placement.target_layer,
+                    sequence_id=sequence_id,
+                    text=entity_text,
+                    embedding=entity_embedding,
+                )
+                record.metadata.update({"graph": graph_metadata_for_unit(unit, layer=placement.target_layer)})
+                if source_record is not None:
+                    record.metadata.update(
+                        build_extracted_triple_metadata(
+                            source_layer=self.separate_layer,
+                            target_layer=placement.target_layer,
+                            source_record=source_record,
+                            triples=list(record.metadata["graph"]["triples"]),
+                        )
+                    )
+                store.append(record)
+                written_record_ids.append(record.record_id)
+                written_unit_ids.append(unit.unit_id)
+                wrote_any_entity = True
+                effects.append(
+                    {
+                        "unit_id": unit.unit_id,
+                        "entity": entity_text,
+                        "effect_type": "append",
+                        "record_id": record.record_id,
+                        "top1_similarity": None if top1_similarity is None else float(top1_similarity),
+                        "threshold": self.threshold,
+                        "embedding_source": "entity_representation_embedding",
+                        "record_has_embedding": record.embedding is not None,
+                        "source_record_id": None if source_record is None else source_record.record_id,
+                    }
+                )
+
+            if not wrote_any_entity:
+                skipped_units += 1
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "target_layer": self.target_layer,
+            "threshold": self.threshold,
+            "separate": self.separate,
+            "separate_layer": self.separate_layer,
+            "fanout_mode": "per_entity",
+            "writes_embedding_from_record_field": True,
+            "records_with_embedding": sum(
+                1
+                for record_id in written_record_ids
+                for record in store.iter_records(self.target_layer)
+                if record.record_id == record_id and record.embedding is not None
+            ),
+            "written_record_ids": written_record_ids,
+            "entity_written_record_ids": written_record_ids,
+            "source_written_record_ids": source_written_record_ids,
+            "written_unit_ids": written_unit_ids,
+            "skipped_unit_count": skipped_units,
+            "skipped_entity_count": skipped_entities,
+            "effects": effects,
+            "graph_metadata_schema": (
+                "graph.layer",
+                "graph.shape",
+                "graph.entities",
+                "graph.triples",
+                "graph.links",
+                "graph.node_count",
+                "graph.link_count",
+                "graph.last_linked_at",
+                "graph.link_history",
+            ),
+        }
+        return replace(packet, placements=placements, trace=trace), store
+
+    def _find_best_match_for_entity(
+        self,
+        store: MemoryStore,
+        entity_embedding: list[float],
+    ) -> tuple[MemoryRecord | None, float | None]:
+        best_record: MemoryRecord | None = None
+        best_similarity: float | None = None
+        for candidate in store.iter_records(self.target_layer):
+            if candidate.embedding is None or len(candidate.embedding) != len(entity_embedding):
+                continue
+            similarity = Runtime.cosine_similarity(entity_embedding, candidate.embedding)
+            if best_similarity is None or similarity > best_similarity:
+                best_record = candidate
+                best_similarity = float(similarity)
+        return best_record, best_similarity
+
+    def _merge_record_for_entity(
+        self,
+        *,
+        existing_record: MemoryRecord,
+        unit,
+        entity_text: str,
+        entity_embedding: list[float],
+    ) -> MemoryRecord:
+        projected_unit = replace(
+            unit,
+            text=entity_text,
+            normalized_text=entity_text.casefold().strip(),
+            embedding=list(entity_embedding),
+            representation_elements=tuple(sorted(set(unit.representation_elements) | {"embedding"})),
+        )
+        existing_graph = graph_metadata_from_record(existing_record)
+        merged_graph = normalize_graph_metadata(
+            {
+                **existing_graph,
+                "entities": list(unit.entities),
+                "triples": _merge_graph_triples(list(existing_graph["triples"]), list(unit.triples)),
+            },
+            layer=existing_record.layer,
+        )
+        return MemoryRecord(
+            record_id=existing_record.record_id,
+            unit_id=unit.unit_id,
+            layer=existing_record.layer,
+            text=entity_text,
+            timestamp=unit.timestamp,
+            embedding=list(entity_embedding),
+            metadata={
+                **existing_record.metadata,
+                "unit_type": unit.unit_type,
+                "representation": _representation_summary_for_graph_merge(projected_unit, existing_record),
                 "graph": merged_graph,
             },
         )
@@ -976,7 +1439,9 @@ BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
     ConditionalLayerOrganization,
     GraphAppendOrganization,
+    GraphEntityAppendOrganization,
     GraphDeduplicationAppendOrganization,
+    GraphEntityDeduplicationAppendOrganization,
     PlacementWithoutAppendOrganization,
     GraphAppendLinkReadyOrganization,
     HierarchicalOrganization,

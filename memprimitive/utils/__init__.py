@@ -12,9 +12,17 @@ _amem_family
     embedding text construction, record<->note payload conversion, and
     embedding-based candidate collection for graph-note pipelines.
 
+_example_dialogue
+    Reusable example-level dialogue helpers for building/rendering message
+    pairs and recalling prompt context text from a pipeline.
+
 _graph_family
     Graph-family helpers: graph metadata normalization, record rewrite
     utilities, and link-history management for graph baseline modules.
+
+_mem0_family
+    Shared Mem0/Mem0g example helpers: per-fact profile recall, fixed-layer
+    profile write tools, pair-context builders, and common turn orchestration.
 
 _reflexion_family
     Reflexion-like helpers: control parsing, prompt-context formatting,
