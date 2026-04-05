@@ -465,7 +465,7 @@
 - 要补的能力是什么
   - 在 retrieval 内完成 query named entity extraction、entity-to-node linking、query seed weighting、Personalized PageRank 扩散，以及 passage 排名输出。
 - 为什么现有模块不够
-  - `GraphSeedAndExpandRetrieval` 和 `VectorGraphSeedAndExpandRetrieval` 只有 seed + expand 的近似骨架，没有 query linking、PPR、node specificity 与 passage incidence 聚合。
+  - `VectorGraphSeedAndExpandRetrieval` 与 `ExpandRetrievedGraphNeighbors` 只有 seed + expand 的近似骨架，没有 query linking、PPR、node specificity 与 passage incidence 聚合。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。它对应的是一类“graph propagation retrieval”而不只是一篇论文。
 
@@ -487,7 +487,7 @@
 - 要补的能力是什么
   - 先从 query 中检索相关 semantic triplets 并做受控图扩展，再基于这些 triplets 回连 episodic memories，对 past observations 打分并返回 top-k。
 - 为什么现有模块不够
-  - `GraphSeedAndExpandRetrieval` 只有 graph seed-expand 的轮廓，没有 AriGraph 所需的“semantic retrieval -> episodic retrieval”两段式检索；
+  - 现有 graph retrieval 仍只有“先选 seed 再做一跳 expand”的轮廓，没有 AriGraph 所需的“semantic retrieval -> episodic retrieval”两段式检索；
   - `EmbeddingSimilarityRetrieval` 也不能把 semantic 检索结果进一步转成 episodic recall。
 - 这是为 AriGraph 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。它对应的是一类“图事实检索后回连事件/轨迹记忆”的 agent-memory 模式。
@@ -518,7 +518,7 @@
   - 作为 Mem0 graph 版的 retrieval 主干。
 - 为什么现有模块不够
   - `EmbeddingSimilarityRetrieval` 只覆盖基础向量检索；
-  - `GraphSeedAndExpandRetrieval` 只有通用 seed-expand 骨架，没有 Mem0 graph 版的 entity-centric + triplet semantic retrieval 双路径。
+  - `VectorGraphSeedAndExpandRetrieval` 与 `ExpandRetrievedGraphNeighbors` 只覆盖通用 seed-expand 骨架，没有 Mem0 graph 版的 entity-centric + triplet semantic retrieval 双路径。
 - 这是为 Mem0 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。它对应的是一类“图锚定检索 + triplet 语义匹配”的图记忆检索模式。
 

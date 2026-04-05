@@ -150,8 +150,8 @@ HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启
 - MemPrimitive 现有哪些模块可直接复用
   - 无可直接完整复用模块。
 - 哪些模块只能部分复用
-  - `GraphSeedAndExpandRetrieval`
-    - 覆盖了“从 query 找 graph seed 再做一跳扩散”的粗轮廓，但当前是 token/entity overlap + one-hop expansion，不是 query entity linking + PPR。
+  - `ExpandRetrievedGraphNeighbors`
+    - 覆盖了“从 seed records 做一跳图扩散”的粗轮廓，但不负责 query entity linking、query-side seed weighting 或 PPR。
   - `VectorGraphSeedAndExpandRetrieval`
     - 覆盖了“vector seed + graph expansion”的粗轮廓，但服务对象是 enriched note graph，不是 HippoRAG 的 noun phrase/entity KG。
   - `EmbeddingSimilarityRetrieval`
@@ -397,9 +397,9 @@ AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 wor
 - MemPrimitive 现有哪些模块可直接复用
   - 无可直接完整复用模块。
 - 哪些模块只能部分复用
-  - `GraphSeedAndExpandRetrieval`
-    - 覆盖了“先找 seed，再沿图扩展”的粗轮廓。
-    - 但它当前仍是 MemPrimitive baseline graph 的一跳 seed-expand，不包含 AriGraph 的“semantic triplet retrieval -> episodic retrieval”两段式输出语义。
+  - `ExpandRetrievedGraphNeighbors`
+    - 覆盖了“先有 seed 再沿图扩展”的粗轮廓。
+    - 但它当前仍只是一跳 seed-expand 组件，不包含 AriGraph 的“semantic triplet retrieval -> episodic retrieval”两段式输出语义。
   - `EmbeddingSimilarityRetrieval`
     - 可类比 AriGraph semantic search 中的 embedding-based relevance，但它只返回相似记录，不会继续图扩展，也不会回连 episodic memory。
   - `GraphNeighborRetrieval`
@@ -891,7 +891,7 @@ Mem0 论文主体的核心不是“把整段对话直接塞进向量库”，而
   - `EmbeddingSimilarityRetrieval`
     - 对基础版 user-facing recall 足够接近。
 - 哪些模块只能部分复用
-  - `GraphSeedAndExpandRetrieval`
+  - `VectorGraphSeedAndExpandRetrieval`
     - 能表达“图中找 seed 再扩展”的粗轮廓，但不等于 Mem0 graph 版的 entity-anchor traversal。
   - `BM25Retrieval`
     - 对 graph repo 的 BM25 relation rerank only 是很弱的局部近似，不是论文主干。
