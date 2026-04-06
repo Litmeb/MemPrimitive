@@ -111,7 +111,7 @@ def _parse_triple_query(query: Query) -> tuple[dict[str, Any], str]:
         parts = [part.strip() for part in str(query.text).split(">>")]
         if len(parts) != 3:
             raise ValueError(
-                "TripleExactMatchRetrieval requires a structured triple query. "
+                "TripleMemoryRetrieval requires a structured triple query. "
                 "Use Query.metadata['triple_query'] with subject/relation/object "
                 "or query.text formatted as 'subject >> relation >> object'."
             )
@@ -120,24 +120,20 @@ def _parse_triple_query(query: Query) -> tuple[dict[str, Any], str]:
         obj = _normalize_triple_query_part(parts[2])
         source = "query.text"
 
-    if relation is None:
-        raise ValueError("TripleExactMatchRetrieval requires a non-empty relation in the structured triple query.")
-    if subject is None and obj is None:
+    grounded_slots = [slot for slot, value in (("subject", subject), ("relation", relation), ("object", obj)) if value is not None]
+    if not grounded_slots:
         raise ValueError(
-            "TripleExactMatchRetrieval requires at least one grounded entity in the structured triple query."
+            "TripleMemoryRetrieval requires at least one grounded slot in the structured triple query."
         )
 
-    mode = "full_triple"
-    if subject is None:
-        mode = "relation_object"
-    elif obj is None:
-        mode = "subject_relation"
+    mode = "_".join(grounded_slots)
 
     return {
         "subject": subject,
         "relation": relation,
         "object": obj,
         "mode": mode,
+        "grounded_slots": grounded_slots,
     }, source
 
 
@@ -168,11 +164,22 @@ def _triple_matches_query(triple: tuple[str, str, str], *, query_spec: dict[str,
 
     if query_subject is not None and subject.casefold() != str(query_subject).casefold():
         return False
-    if relation.casefold() != str(query_relation).casefold():
+    if query_relation is not None and relation.casefold() != str(query_relation).casefold():
         return False
     if query_object is not None and obj.casefold() != str(query_object).casefold():
         return False
     return True
+
+
+def _triple_slot_value(triple: tuple[str, str, str], slot: str) -> str:
+    subject, relation, obj = triple
+    if slot == "subject":
+        return subject
+    if slot == "relation":
+        return relation
+    if slot == "object":
+        return obj
+    raise ValueError(f"Unknown triple slot {slot!r}.")
 
 
 _RETRIEVAL_SOURCES: Final[frozenset[str]] = frozenset({"store", "retrieved"})
@@ -1017,36 +1024,63 @@ class EntityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
-class TripleExactMatchRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
-    """Retrieve triple-bearing records that exactly match a structured triple query.
+class TripleMemoryRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
+    """Retrieve triple-bearing records by exact slot match with fuzzy fallback.
 
-    The query may be provided either as ``Query.metadata["triple_query"]`` with
-    ``subject`` / ``relation`` / ``object`` fields, or in ``query.text`` using
-    the API-style format ``subject >> relation >> object``. Empty strings or
-    ``*`` act as wildcards, but the relation must always be grounded and at
-    least one of subject/object must be grounded.
+    Queries use the structured format ``subject >> relation >> object`` or
+    ``Query.metadata["triple_query"]`` with ``subject`` / ``relation`` /
+    ``object`` fields. Empty strings or ``*`` act as wildcards.
+
+    The retriever first searches for exact slot matches across any grounded slot
+    combination. When no exact result exists, it falls back to vector-similarity
+    matching over grounded query terms and keeps only candidate triples whose
+    per-slot similarity clears ``candidate_similarity_threshold`` and whose
+    average grounded-slot similarity clears ``final_similarity_threshold``.
     """
 
     spec = ModuleSpec(
-        name="triple_exact_match_retrieval",
+        name="triple_memory_retrieval",
         slot="retrieval",
         input_requirements=("query.text",),
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
+    _embedding_cache: ClassVar[dict[str, SentenceTransformer]] = {}
+    _term_embedding_cache: ClassVar[dict[tuple[str, str], list[float]]] = {}
 
-    def __init__(self, top_k: int = 3, layer: str | None = None, *, source: str = "store") -> None:
+    def __init__(
+        self,
+        top_k: int = 3,
+        layer: str | None = None,
+        *,
+        source: str = "store",
+        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        candidate_similarity_threshold: float = 0.7,
+        final_similarity_threshold: float = 0.85,
+    ) -> None:
         if top_k <= 0:
-            raise ValueError("TripleExactMatchRetrieval requires top_k > 0.")
+            raise ValueError("TripleMemoryRetrieval requires top_k > 0.")
+        if not 0.0 <= candidate_similarity_threshold <= 1.0:
+            raise ValueError("candidate_similarity_threshold must be in [0, 1].")
+        if not 0.0 <= final_similarity_threshold <= 1.0:
+            raise ValueError("final_similarity_threshold must be in [0, 1].")
         self.top_k = top_k
         self.layer = layer
         self.source = _normalize_retrieval_source(source)
+        self.embedding_model = embedding_model
+        self.candidate_similarity_threshold = float(candidate_similarity_threshold)
+        self.final_similarity_threshold = float(final_similarity_threshold)
 
     def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
-            raise ValueError("TripleExactMatchRetrieval requires packet.query.")
+            raise ValueError("TripleMemoryRetrieval requires packet.query.")
 
         query_spec, query_source = _parse_triple_query(packet.query)
         all_records = list(reversed(_candidate_records(packet, store, source=self.source, layer=self.layer)))
+        query_triple = {
+            "subject": query_spec["subject"],
+            "relation": query_spec["relation"],
+            "object": query_spec["object"],
+        }
         if not all_records:
             packet = _empty_retrieved(
                 packet,
@@ -1055,18 +1089,18 @@ class TripleExactMatchRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
                 source=self.source,
                 query_mode=query_spec["mode"],
                 query_source=query_source,
-                query_triple={
-                    "subject": query_spec["subject"],
-                    "relation": query_spec["relation"],
-                    "object": query_spec["object"],
-                },
+                query_triple=query_triple,
                 candidate_count=0,
                 triple_candidate_count=0,
                 matched_candidate_count=0,
+                retrieval_mode="exact",
+                fallback_used=False,
+                candidate_similarity_threshold=self.candidate_similarity_threshold,
+                final_similarity_threshold=self.final_similarity_threshold,
             )
             return packet, store
 
-        scored: list[tuple[int, int, Any, list[tuple[str, str, str]]]] = []
+        exact_scored: list[tuple[int, int, Any, list[tuple[str, str, str]]]] = []
         triple_candidate_count = 0
         for order_index, record in enumerate(all_records):
             record_triples = _record_triples(record)
@@ -1077,11 +1111,59 @@ class TripleExactMatchRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
                 for triple in record_triples
                 if _triple_matches_query(triple, query_spec=query_spec)
             ]
-            if not matched_triples:
-                continue
-            scored.append((len(matched_triples), order_index, record, matched_triples))
+            if matched_triples:
+                exact_scored.append((len(matched_triples), order_index, record, matched_triples))
 
-        if not scored:
+        if exact_scored:
+            exact_scored.sort(key=lambda item: (-item[0], item[1]))
+            selected = exact_scored[: self.top_k]
+            items = [record for _, _, record, _ in selected]
+            scores = [
+                {
+                    "record_id": record.record_id,
+                    "rank": rank,
+                    "score": float(match_count),
+                    "strategy": "triple_memory_exact",
+                    "retrieval_mode": "exact",
+                    "matched_triples": list(matched_triples),
+                }
+                for rank, (match_count, _, record, matched_triples) in enumerate(selected, start=1)
+            ]
+            retrieved = RetrievedSet(
+                items=items,
+                scores=scores,
+                trace={
+                    "module": self.spec.name,
+                    "top_k": self.top_k,
+                    "source": self.source,
+                    "query_mode": query_spec["mode"],
+                    "query_source": query_source,
+                    "query_triple": query_triple,
+                    "candidate_count": len(all_records),
+                    "triple_candidate_count": triple_candidate_count,
+                    "matched_candidate_count": len(exact_scored),
+                    "retrieval_mode": "exact",
+                    "fallback_used": False,
+                    "candidate_similarity_threshold": self.candidate_similarity_threshold,
+                    "final_similarity_threshold": self.final_similarity_threshold,
+                },
+            )
+            return _with_retrieved(packet, retrieved), store
+
+        fuzzy_scored: list[tuple[float, int, int, Any, list[dict[str, Any]]]] = []
+        for order_index, record in enumerate(all_records):
+            fuzzy_matches: list[dict[str, Any]] = []
+            for triple in _record_triples(record):
+                match = self._fuzzy_match(triple, query_spec=query_spec)
+                if match is None:
+                    continue
+                fuzzy_matches.append(match)
+            if not fuzzy_matches:
+                continue
+            best_score = max(float(match["score"]) for match in fuzzy_matches)
+            fuzzy_scored.append((best_score, len(fuzzy_matches), order_index, record, fuzzy_matches))
+
+        if not fuzzy_scored:
             packet = _empty_retrieved(
                 packet,
                 module_name=self.spec.name,
@@ -1089,29 +1171,38 @@ class TripleExactMatchRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
                 source=self.source,
                 query_mode=query_spec["mode"],
                 query_source=query_source,
-                query_triple={
-                    "subject": query_spec["subject"],
-                    "relation": query_spec["relation"],
-                    "object": query_spec["object"],
-                },
+                query_triple=query_triple,
                 candidate_count=len(all_records),
                 triple_candidate_count=triple_candidate_count,
                 matched_candidate_count=0,
+                retrieval_mode="fuzzy",
+                fallback_used=True,
+                candidate_similarity_threshold=self.candidate_similarity_threshold,
+                final_similarity_threshold=self.final_similarity_threshold,
             )
             return packet, store
 
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        selected = scored[: self.top_k]
-        items = [record for _, _, record, _ in selected]
+        fuzzy_scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        selected = fuzzy_scored[: self.top_k]
+        items = [record for _, _, _, record, _ in selected]
         scores = [
             {
                 "record_id": record.record_id,
                 "rank": rank,
-                "score": float(match_count),
-                "strategy": "triple_exact_match",
-                "matched_triples": list(matched_triples),
+                "score": best_score,
+                "strategy": "triple_memory_fuzzy",
+                "retrieval_mode": "fuzzy",
+                "matched_triples": [tuple(match["triple"]) for match in fuzzy_matches],
+                "matched_triple_scores": [
+                    {
+                        "triple": tuple(match["triple"]),
+                        "score": float(match["score"]),
+                        "slot_similarities": dict(match["slot_similarities"]),
+                    }
+                    for match in fuzzy_matches
+                ],
             }
-            for rank, (match_count, _, record, matched_triples) in enumerate(selected, start=1)
+            for rank, (best_score, _, _, record, fuzzy_matches) in enumerate(selected, start=1)
         ]
         retrieved = RetrievedSet(
             items=items,
@@ -1122,17 +1213,66 @@ class TripleExactMatchRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
                 "source": self.source,
                 "query_mode": query_spec["mode"],
                 "query_source": query_source,
-                "query_triple": {
-                    "subject": query_spec["subject"],
-                    "relation": query_spec["relation"],
-                    "object": query_spec["object"],
-                },
+                "query_triple": query_triple,
                 "candidate_count": len(all_records),
                 "triple_candidate_count": triple_candidate_count,
-                "matched_candidate_count": len(scored),
+                "matched_candidate_count": len(fuzzy_scored),
+                "retrieval_mode": "fuzzy",
+                "fallback_used": True,
+                "candidate_similarity_threshold": self.candidate_similarity_threshold,
+                "final_similarity_threshold": self.final_similarity_threshold,
             },
         )
         return _with_retrieved(packet, retrieved), store
+
+    def _fuzzy_match(self, triple: tuple[str, str, str], *, query_spec: dict[str, Any]) -> dict[str, Any] | None:
+        slot_similarities: dict[str, float] = {}
+        grounded_slots = list(query_spec.get("grounded_slots", []))
+        if not grounded_slots:
+            return None
+        for slot in grounded_slots:
+            query_value = str(query_spec[slot])
+            triple_value = _triple_slot_value(triple, slot)
+            similarity = 1.0
+            if triple_value.casefold() != query_value.casefold():
+                similarity = self._cosine_similarity(self._embed_text(query_value), self._embed_text(triple_value))
+            if similarity < self.candidate_similarity_threshold:
+                return None
+            slot_similarities[slot] = float(similarity)
+        score = sum(slot_similarities.values()) / len(slot_similarities)
+        if score < self.final_similarity_threshold:
+            return None
+        return {
+            "triple": list(triple),
+            "score": float(score),
+            "slot_similarities": slot_similarities,
+        }
+
+    def _embed_text(self, text: str) -> list[float]:
+        normalized = str(text).strip().casefold()
+        key = (self.embedding_model, normalized)
+        cached = self._term_embedding_cache.get(key)
+        if cached is not None:
+            return cached
+        model = self._embedding_cache.get(self.embedding_model)
+        if model is None:
+            model = SentenceTransformer(self.embedding_model)
+            self._embedding_cache[self.embedding_model] = model
+        embedding = [float(value) for value in model.encode(normalized, normalize_embeddings=True).tolist()]
+        self._term_embedding_cache[key] = embedding
+        return embedding
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        numerator = sum(lv * rv for lv, rv in zip(left, right, strict=True))
+        left_norm = sqrt(sum(value * value for value in left))
+        right_norm = sqrt(sum(value * value for value in right))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        return numerator / (left_norm * right_norm)
+
+
+TripleExactMatchRetrieval = TripleMemoryRetrieval
 
 
 class BM25Retrieval(_MultiQueryRetrievalMixin, RetrievalModule):
@@ -1944,7 +2084,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     EmbeddingSimilarityRetrieval,
     TagRetrieval,
     EntityRetrieval,
-    TripleExactMatchRetrieval,
+    TripleMemoryRetrieval,
     BM25Retrieval,
     GraphNeighborRetrieval,
     ExpandRetrievedGraphNeighbors,
