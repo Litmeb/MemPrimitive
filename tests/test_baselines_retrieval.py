@@ -414,8 +414,8 @@ def test_query_rewrite_retrieval_prompt_template_trace_is_preserved() -> None:
     assert rewrite_trace["rendered_prompt"] == "Rewrite who with graphs"
 
 
-def test_triple_exact_match_retrieval_supports_metadata_subject_relation_query() -> None:
-    from memprimitive.baselines import TripleExactMatchRetrieval
+def test_triple_memory_retrieval_supports_metadata_subject_relation_query() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
 
     store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
     store.append(
@@ -449,7 +449,7 @@ def test_triple_exact_match_retrieval_supports_metadata_subject_relation_query()
         )
     )
 
-    packet_out, _ = TripleExactMatchRetrieval(top_k=2, layer="profile").run(
+    packet_out, _ = TripleMemoryRetrieval(top_k=2, layer="profile").run(
         Packet(
             query=Query(
                 text="unused",
@@ -467,14 +467,15 @@ def test_triple_exact_match_retrieval_supports_metadata_subject_relation_query()
 
     assert packet_out.retrieved is not None
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
-    assert packet_out.retrieved.scores[0]["strategy"] == "triple_exact_match"
+    assert packet_out.retrieved.scores[0]["strategy"] == "triple_memory_exact"
     assert packet_out.retrieved.scores[0]["matched_triples"] == [("Alice", "likes", "coffee")]
     assert packet_out.retrieved.trace["query_mode"] == "subject_relation"
     assert packet_out.retrieved.trace["query_source"] == "metadata.triple_query"
+    assert packet_out.retrieved.trace["retrieval_mode"] == "exact"
 
 
-def test_triple_exact_match_retrieval_supports_text_relation_object_query_and_graph_triples() -> None:
-    from memprimitive.baselines import TripleExactMatchRetrieval
+def test_triple_memory_retrieval_supports_text_relation_object_query_and_graph_triples() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
 
     store = MemoryStore(
         topology=StoreTopology.from_layers(
@@ -492,7 +493,7 @@ def test_triple_exact_match_retrieval_supports_text_relation_object_query_and_gr
         )
     )
 
-    packet_out, _ = TripleExactMatchRetrieval(top_k=1, layer="knowledge_graph").run(
+    packet_out, _ = TripleMemoryRetrieval(top_k=1, layer="knowledge_graph").run(
         Packet(query=Query(text=" >> likes >> tea ")),
         store,
     )
@@ -508,8 +509,120 @@ def test_triple_exact_match_retrieval_supports_text_relation_object_query_and_gr
     }
 
 
-def test_triple_exact_match_retrieval_source_retrieved_limits_candidates() -> None:
-    from memprimitive.baselines import TripleExactMatchRetrieval
+def test_triple_memory_retrieval_supports_single_slot_relation_query() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="profile",
+            text="Alice likes tea.",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"triples": [("Alice", "likes", "tea")]}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="profile",
+            text="Bob likes coffee.",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"representation": {"triples": [("Bob", "likes", "coffee")]}},
+        )
+    )
+
+    packet_out, _ = TripleMemoryRetrieval(top_k=2, layer="profile").run(
+        Packet(query=Query(text="* >> likes >> *")),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+    assert packet_out.retrieved.trace["query_mode"] == "relation"
+    assert packet_out.retrieved.trace["retrieval_mode"] == "exact"
+
+
+def test_triple_memory_retrieval_supports_subject_object_query_without_relation() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="profile",
+            text="Alice likes tea.",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"triples": [("Alice", "likes", "tea")]}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="profile",
+            text="Alice drinks tea.",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"representation": {"triples": [("Alice", "drinks", "tea")]}},
+        )
+    )
+
+    packet_out, _ = TripleMemoryRetrieval(top_k=2, layer="profile").run(
+        Packet(query=Query(text="Alice >> * >> tea")),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+    assert packet_out.retrieved.trace["query_mode"] == "subject_object"
+    assert packet_out.retrieved.trace["retrieval_mode"] == "exact"
+
+
+def test_triple_memory_retrieval_falls_back_to_fuzzy_threshold_matching() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="profile",
+            text="Washington D.C. is the capital of the United States.",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"representation": {"triples": [("Washington D.C.", "capital of", "United States")]}},
+        )
+    )
+
+    retriever = TripleMemoryRetrieval(
+        top_k=1,
+        layer="profile",
+        candidate_similarity_threshold=0.7,
+        final_similarity_threshold=0.8,
+    )
+    embedding_map = {
+        "usa": [1.0, 0.0],
+        "united states": [1.0, 0.0],
+        "capital of": [0.0, 1.0],
+    }
+    retriever._embed_text = lambda text: embedding_map.get(text.strip().casefold(), [0.0, 0.0])  # type: ignore[method-assign]
+
+    packet_out, _ = retriever.run(
+        Packet(query=Query(text="* >> capital of >> USA")),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.retrieved.scores[0]["strategy"] == "triple_memory_fuzzy"
+    assert packet_out.retrieved.trace["retrieval_mode"] == "fuzzy"
+    assert packet_out.retrieved.trace["fallback_used"] is True
+
+
+def test_triple_memory_retrieval_source_retrieved_limits_candidates() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
 
     store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
     candidate = MemoryRecord(
@@ -531,7 +644,7 @@ def test_triple_exact_match_retrieval_source_retrieved_limits_candidates() -> No
     for record in (candidate, outside_match):
         store.append(record)
 
-    packet_out, _ = TripleExactMatchRetrieval(top_k=2, source="retrieved").run(
+    packet_out, _ = TripleMemoryRetrieval(top_k=2, source="retrieved").run(
         Packet(
             query=Query(text="Alice >> likes >> tea"),
             retrieved=RetrievedSet(items=[candidate], scores=[]),
@@ -545,11 +658,11 @@ def test_triple_exact_match_retrieval_source_retrieved_limits_candidates() -> No
     assert packet_out.retrieved.trace["candidate_count"] == 1
 
 
-def test_triple_exact_match_retrieval_rejects_unstructured_query_text() -> None:
-    from memprimitive.baselines import TripleExactMatchRetrieval
+def test_triple_memory_retrieval_rejects_unstructured_query_text() -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
 
     with pytest.raises(ValueError, match="structured triple query"):
-        TripleExactMatchRetrieval().run(Packet(query=Query(text="Alice likes tea")), MemoryStore())
+        TripleMemoryRetrieval().run(Packet(query=Query(text="Alice likes tea")), MemoryStore())
 
 
 def test_retrieval_does_not_mutate_store() -> None:
