@@ -7,6 +7,7 @@ from memprimitive.example.classics.amem_memory import (
     ingest_note,
     recall_notes,
 )
+from memprimitive.utils._template import ensure_prompt_plan
 from memprimitive.utils import _runtime
 
 from baselines_test_helpers import _FakeAMEMRuntime
@@ -23,7 +24,8 @@ def test_amem_classics_builder_uses_existing_a_mem_baselines() -> None:
 
     assert isinstance(representation, tuple)
     assert representation[0].spec.name == "semantic_field_enrichment_representation"
-    assert representation[1].spec.name == "retrieval_oriented_embedding_representation"
+    assert representation[1].spec.name == "configurable_embedding_representation"
+    assert "{{ unit.metadata.amem.content }}" in str(ensure_prompt_plan(representation[1].embedding_text).template)
 
     assert write_pipeline.organization.spec.name == "graph_append_organization"
     assert isinstance(memory_evolution, tuple)

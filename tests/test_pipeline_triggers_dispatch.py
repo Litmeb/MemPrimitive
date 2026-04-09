@@ -39,7 +39,7 @@ from memprimitive.baselines import (
     PromptContextReadout,
     RecencyRetrieval,
     ReflectionGenerationEvolution,
-    RetrievalOrientedEmbeddingRepresentation,
+    ConfigurableEmbeddingRepresentation,
     SemanticFieldEnrichmentRepresentation,
     StoreAllTrigger,
     TagRetrieval,
@@ -925,7 +925,7 @@ def test_store_check_accepts_cross_pipeline_shared_store_contract_production() -
 
     MemoryPipeline(
         store=store,
-        representation=(SemanticFieldEnrichmentRepresentation(), RetrievalOrientedEmbeddingRepresentation()),
+        representation=(SemanticFieldEnrichmentRepresentation(), ConfigurableEmbeddingRepresentation()),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
     )
     MemoryPipeline(

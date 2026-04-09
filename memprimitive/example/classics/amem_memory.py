@@ -38,15 +38,16 @@ if __package__ is None:
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
     AlwaysTrigger,
+    ConfigurableEmbeddingRepresentation,
     EmbeddingSimilarityRetrieval,
     GraphAppendOrganization,
-    NoteRenderReadout,
-    PassThroughUnitFormation,
-    RetrievalOrientedEmbeddingRepresentation,
-    SemanticFieldEnrichmentRepresentation,
     LinkStrengtheningEvolution,
     NeighborContextUpdateEvolution,
+    NoteRenderReadout,
+    PassThroughUnitFormation,
+    SemanticFieldEnrichmentRepresentation,
 )
+from memprimitive.utils._template import text_prompt
 from memprimitive.utils._runtime import get_runtime
 
 
@@ -73,7 +74,14 @@ def build_amem_memory_system(
         unit_formation=PassThroughUnitFormation(),
         representation=(
             SemanticFieldEnrichmentRepresentation(note_namespace=note_namespace),
-            RetrievalOrientedEmbeddingRepresentation(note_namespace=note_namespace),
+            ConfigurableEmbeddingRepresentation(
+                embedding_text=text_prompt(
+                    f"{{{{ unit.metadata.{note_namespace}.content }}}} | "
+                    f"context: {{{{ unit.metadata.{note_namespace}.context }}}} | "
+                    f"keywords: {{{{ unit.metadata.{note_namespace}.keywords | join(', ') }}}} | "
+                    f"tags: {{{{ unit.metadata.{note_namespace}.tags | join(', ') }}}}"
+                )
+            ),
         ),
         write_trigger=AlwaysTrigger(),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),

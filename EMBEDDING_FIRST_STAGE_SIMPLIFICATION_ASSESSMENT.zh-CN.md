@@ -169,7 +169,7 @@
 
 相关代码：
 
-- [`memprimitive/baselines/representation.py#L1029`](d:\Git\MemPrimitive-MemEngineDemo\MemPrimitive\memprimitive\baselines\representation.py#L1029) `RetrievalOrientedEmbeddingRepresentation`
+- [`memprimitive/baselines/representation.py#L1029`](d:\Git\MemPrimitive-MemEngineDemo\MemPrimitive\memprimitive\baselines\representation.py#L1029) `ConfigurableEmbeddingRepresentation`
 - [`memprimitive/utils/_amem_family.py#L196`](d:\Git\MemPrimitive-MemEngineDemo\MemPrimitive\memprimitive\utils\_amem_family.py#L196) `rewrite_record_from_note_payload()`
 - [`memprimitive/utils/_amem_family.py#L211`](d:\Git\MemPrimitive-MemEngineDemo\MemPrimitive\memprimitive\utils\_amem_family.py#L211)
 
