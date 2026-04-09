@@ -30,7 +30,7 @@ def test_amem_classics_builder_uses_existing_a_mem_baselines() -> None:
     assert memory_evolution[0].spec.name == "link_strengthening_evolution"
     assert memory_evolution[1].spec.name == "neighbor_context_update_evolution"
 
-    assert recall_pipeline.retrieval.spec.name == "vector_graph_seed_and_expand_retrieval"
+    assert recall_pipeline.retrieval.spec.name == "embedding_similarity_retrieval"
     assert recall_pipeline.readout.spec.name == "note_render_readout"
 
 

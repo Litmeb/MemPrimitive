@@ -12,7 +12,7 @@ For A-MEM, the core loop we want to preserve is:
 3. append it into a graph-capable note store,
 4. use nearby notes to strengthen semantic links,
 5. optionally rewrite neighbor note context/tags, and
-6. answer future queries by vector seeding plus one-hop graph expansion.
+6. answer future queries by embedding-similarity top-k retrieval.
 
 That loop is exactly the level of fidelity this file is trying to demonstrate.
 The result is a mechanism-level A-MEM reconstruction expressed entirely with
@@ -21,8 +21,9 @@ existing baseline modules.
 Important alignment note: the paper text suggests neighbor evolution may update
 context, keywords, and tags, while the released repos are more concretely
 implemented around context/tag updates and graph linking. This example follows
-the easier, repo-consistent path because it is both more clearly specified in
-code and already covered by current primitives.
+the repo-consistent write/evolution path, but keeps recall aligned to the paper
+itself: plain embedding retrieval over notes rather than graph-neighbor
+expansion.
 """
 
 from __future__ import annotations
@@ -37,15 +38,16 @@ if __package__ is None:
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
     AlwaysTrigger,
+    EmbeddingSimilarityRetrieval,
     GraphAppendOrganization,
     NoteRenderReadout,
     PassThroughUnitFormation,
     RetrievalOrientedEmbeddingRepresentation,
     SemanticFieldEnrichmentRepresentation,
-    VectorGraphSeedAndExpandRetrieval,
     LinkStrengtheningEvolution,
     NeighborContextUpdateEvolution,
 )
+from memprimitive.utils._runtime import get_runtime
 
 
 def build_amem_memory_system(
@@ -92,13 +94,9 @@ def build_amem_memory_system(
     )
 
     recall_pipeline = MemoryPipeline(
-        retrieval=VectorGraphSeedAndExpandRetrieval(
+        retrieval=EmbeddingSimilarityRetrieval(
             top_k=recall_top_k,
             layer="knowledge_graph",
-            candidate_k=candidate_k,
-            neighbor_expansion_k=neighbor_expansion_k,
-            note_namespace=note_namespace,
-            query_expand_with_llm=True,
         ),
         readout=NoteRenderReadout(note_namespace=note_namespace),
         store=store,
@@ -133,7 +131,12 @@ def ingest_note(
 def recall_notes(system: dict[str, object], *, user_query: str) -> str:
     recall_pipeline = system["recall_pipeline"]
     assert isinstance(recall_pipeline, MemoryPipeline)
-    return recall_pipeline.recall(Query(text=user_query)).text
+    return recall_pipeline.recall(
+        Query(
+            text=user_query,
+            embedding=list(get_runtime().embed(user_query)),
+        )
+    ).text
 
 
 def main() -> None:
