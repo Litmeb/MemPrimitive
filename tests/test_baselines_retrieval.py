@@ -1325,6 +1325,15 @@ def test_removed_trigger_family_symbols_are_not_registered() -> None:
         "OutcomeConditionedEvolutionTrigger",
         "NewWriteEvolutionTrigger",
         "NeighborExistsEvolutionTrigger",
+        "GraphNeighborAppendEvolution",
+        "BulletListReadout",
+        "GroupedByLayerReadout",
+        "GraphEntityAppendOrganization",
+        "TagRetrieval",
+        "ConditionalLayerOrganization",
+        "LineSplitUnitFormation",
+        "WindowedUnitFormation",
+        "MetadataHintUnitFormation",
     }
 
     assert registered_baseline_class_names().isdisjoint(removed)

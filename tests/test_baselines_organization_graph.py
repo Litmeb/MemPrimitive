@@ -38,51 +38,6 @@ def test_sentence_split_unit_formation_splits_sentences_and_preserves_provenance
     assert all("provenance" in unit.metadata for unit in packet_out.units)
 
 
-def test_line_split_unit_formation_filters_empty_lines() -> None:
-    from memprimitive.baselines import LineSplitUnitFormation
-
-    packet_out, _ = LineSplitUnitFormation().run(
-        Packet(observation=Observation(text="alpha\n\n beta \n", source="notes")),
-        MemoryStore(),
-    )
-
-    assert packet_out.units is not None
-    assert [unit.text for unit in packet_out.units] == ["alpha", "beta"]
-
-
-def test_windowed_unit_formation_creates_overlapping_windows() -> None:
-    from memprimitive.baselines import WindowedUnitFormation
-
-    packet_out, _ = WindowedUnitFormation(window_size=5, stride=3).run(
-        Packet(observation=Observation(text="abcdefghij", source="notes")),
-        MemoryStore(),
-    )
-
-    assert packet_out.units is not None
-    assert [unit.text for unit in packet_out.units] == ["abcde", "defgh", "ghij"]
-    assert packet_out.units[1].metadata["window_index"] == 1
-
-
-def test_metadata_hint_unit_formation_prefers_hint_and_can_set_unit_type() -> None:
-    from memprimitive.baselines import MetadataHintUnitFormation
-
-    packet_out, _ = MetadataHintUnitFormation().run(
-        Packet(
-            observation=Observation(
-                text="fallback",
-                source="notes",
-                metadata={"units": [{"text": "Alice likes tea", "unit_type": "fact"}]},
-            )
-        ),
-        MemoryStore(),
-    )
-
-    assert packet_out.units is not None
-    assert [unit.text for unit in packet_out.units] == ["Alice likes tea"]
-    assert packet_out.units[0].unit_type == "fact"
-    assert packet_out.trace["unit_formation"]["mode"] == "metadata"
-
-
 def test_representation_supports_new_elements_and_persists_them_into_record_metadata() -> None:
     from memprimitive.baselines import AppendOrganization, AlwaysTrigger, BasicRepresentation, PassThroughUnitFormation
 
@@ -101,36 +56,6 @@ def test_representation_supports_new_elements_and_persists_them_into_record_meta
     assert "keywords" in rep
     assert "time_anchor" in rep
     assert rep["source_type"] == "notes"
-
-
-def test_conditional_layer_organization_routes_entity_rich_units_to_semantic() -> None:
-    from memprimitive.baselines import AlwaysTrigger, ConditionalLayerOrganization, LLMRepresentation, PassThroughUnitFormation
-
-    class SeededEntityRepresentation(LLMRepresentation):
-        def _llm_json(self, *, user: str) -> Any:
-            return ["Alice", "tea"]
-
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [
-                StoreLayerSpec(name="working"),
-                StoreLayerSpec(name="semantic", theme="semantic", indices=("entity", "keyword")),
-            ]
-        )
-    )
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Alice likes tea.", source="dialogue")),
-        store,
-    )
-    packet, store = SeededEntityRepresentation(field="entities", prompt="Extract entities.").run(packet, store)
-    packet, store = AlwaysTrigger().run(packet, store)
-    packet, store = ConditionalLayerOrganization(
-        default_layer="working",
-        rules=({"has_entity": True, "target_layer": "semantic"},),
-    ).run(packet, store)
-
-    assert packet.placements[0].target_layer == "semantic"
-    assert store.count("semantic") == 1
 
 
 def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadata() -> None:
@@ -190,6 +115,10 @@ def test_graph_append_organization_preserves_standard_record_embedding_shape() -
                     "representation": {
                         **represented.metadata["representation"],
                         "embedding": {"dim": 3},
+                        "entity_embeddings": {
+                            "Alice": [1.0, 0.0, 0.0],
+                            "tea": [0.0, 1.0, 0.0],
+                        },
                     },
                 },
             )
@@ -285,8 +214,8 @@ def test_graph_append_organization_separate_mode_requires_separate_layer() -> No
         GraphAppendOrganization(target_layer="knowledge_graph", separate=True).run(packet, store)
 
 
-def test_graph_entity_append_organization_writes_one_record_per_entity() -> None:
-    from memprimitive.baselines import AlwaysTrigger, GraphEntityAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+def test_graph_entity_deduplication_append_organization_writes_one_record_per_entity_when_unmatched() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphEntityDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
 
     class SeededTripleRepresentation(TripleRepresentation):
         def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
@@ -301,6 +230,10 @@ def test_graph_entity_append_organization_writes_one_record_per_entity() -> None
                     "representation": {
                         **represented.metadata["representation"],
                         "embedding": {"dim": 3},
+                        "entity_embeddings": {
+                            "Alice": [1.0, 0.0, 0.0],
+                            "tea": [0.0, 1.0, 0.0],
+                        },
                     },
                 },
             )
@@ -313,11 +246,15 @@ def test_graph_entity_append_organization_writes_one_record_per_entity() -> None
     )
     packet, store = SeededTripleRepresentation().run(packet, store)
     packet, store = AlwaysTrigger().run(packet, store)
-    packet, store = GraphEntityAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+    packet, store = GraphEntityDeduplicationAppendOrganization(
+        target_layer="knowledge_graph",
+        threshold=0.95,
+    ).run(packet, store)
 
     records = store.iter_records("knowledge_graph")
     assert [record.text for record in records] == ["Alice", "tea"]
-    assert all(record.embedding == [1.0, 2.0, 3.0] for record in records)
+    embedding_by_text = {record.text: record.embedding for record in records}
+    assert embedding_by_text == {"Alice": [1.0, 0.0, 0.0], "tea": [0.0, 1.0, 0.0]}
     assert all(record.metadata["representation"]["embedding"] == {"dim": 3} for record in records)
     assert all(record.metadata["graph"]["entities"] == ["Alice", "tea"] for record in records)
     assert all(record.metadata["graph"]["triples"] == [("Alice", "likes", "tea")] for record in records)
@@ -326,16 +263,30 @@ def test_graph_entity_append_organization_writes_one_record_per_entity() -> None
     assert packet.trace["organization"]["written_unit_ids"] == [packet.units[0].unit_id, packet.units[0].unit_id]
     assert packet.trace["organization"]["records_with_embedding"] == 2
     assert packet.trace["organization"]["skipped_unit_count"] == 0
+    assert [effect["effect_type"] for effect in packet.trace["organization"]["effects"]] == ["append", "append"]
 
 
-def test_graph_entity_append_organization_separate_mode_writes_source_and_entity_layers() -> None:
-    from memprimitive.baselines import AlwaysTrigger, GraphEntityAppendOrganization, PassThroughUnitFormation, TripleRepresentation
+def test_graph_entity_deduplication_append_organization_separate_mode_writes_source_and_entity_layers() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphEntityDeduplicationAppendOrganization, PassThroughUnitFormation, TripleRepresentation
 
     class SeededTripleRepresentation(TripleRepresentation):
         def _represent_unit(self, unit: MemoryUnit) -> tuple[MemoryUnit, dict[str, Any]]:
             triples = [("Alice", "likes", "tea")]
             entities = ["Alice", "tea"]
             represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
+            represented = replace(
+                represented,
+                metadata={
+                    **represented.metadata,
+                    "representation": {
+                        **represented.metadata["representation"],
+                        "entity_embeddings": {
+                            "Alice": [1.0, 0.0, 0.0],
+                            "tea": [0.0, 1.0, 0.0],
+                        },
+                    },
+                },
+            )
             return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
 
     store = MemoryStore(
@@ -352,8 +303,9 @@ def test_graph_entity_append_organization_separate_mode_writes_source_and_entity
     )
     packet, store = SeededTripleRepresentation().run(packet, store)
     packet, store = AlwaysTrigger().run(packet, store)
-    packet, store = GraphEntityAppendOrganization(
+    packet, store = GraphEntityDeduplicationAppendOrganization(
         target_layer="knowledge_graph",
+        threshold=0.95,
         separate=True,
         separate_layer="source_notes",
     ).run(packet, store)
@@ -374,8 +326,8 @@ def test_graph_entity_append_organization_separate_mode_writes_source_and_entity
     assert packet.trace["organization"]["entity_written_record_ids"] == [record.record_id for record in entity_records]
 
 
-def test_graph_entity_append_organization_skips_units_without_entities() -> None:
-    from memprimitive.baselines import AlwaysTrigger, GraphEntityAppendOrganization, PassThroughUnitFormation
+def test_graph_entity_deduplication_append_organization_skips_units_without_entities() -> None:
+    from memprimitive.baselines import AlwaysTrigger, GraphEntityDeduplicationAppendOrganization, PassThroughUnitFormation
 
     store = _graph_store()
     packet, store = PassThroughUnitFormation().run(
@@ -401,12 +353,16 @@ def test_graph_entity_append_organization_skips_units_without_entities() -> None
         ],
     )
     packet, store = AlwaysTrigger().run(packet, store)
-    packet, store = GraphEntityAppendOrganization(target_layer="knowledge_graph").run(packet, store)
+    packet, store = GraphEntityDeduplicationAppendOrganization(
+        target_layer="knowledge_graph",
+        threshold=0.95,
+    ).run(packet, store)
 
     assert store.count("knowledge_graph") == 0
     assert packet.trace["organization"]["written_record_ids"] == []
     assert packet.trace["organization"]["entity_written_record_ids"] == []
     assert packet.trace["organization"]["skipped_unit_count"] == 1
+    assert packet.trace["organization"]["effects"] == [{"unit_id": packet.units[0].unit_id, "effect_type": "skipped_no_entities"}]
 
 
 def test_graph_deduplication_append_organization_merges_top1_match_and_dedupes_relation_destination_pairs() -> None:
@@ -1113,8 +1069,8 @@ def test_expand_retrieved_graph_neighbors_returns_empty_when_no_seeds() -> None:
     assert packet_out.retrieved.trace["seed_record_ids"] == []
 
 
-def test_graph_neighbor_append_evolution_only_modifies_graph_layer() -> None:
-    from memprimitive.baselines import GraphNeighborAppendEvolution
+def test_graph_link_evolution_only_modifies_graph_layer() -> None:
+    from memprimitive.baselines import GraphLinkEvolution
 
     store = _graph_store()
     store.append(
@@ -1151,7 +1107,7 @@ def test_graph_neighbor_append_evolution_only_modifies_graph_layer() -> None:
         decisions=[True],
     )
 
-    packet_out, store = GraphNeighborAppendEvolution(target_layer="knowledge_graph", neighbor_limit=1).run(packet, store)
+    packet_out, store = GraphLinkEvolution(target_layer="knowledge_graph", neighbor_limit=1).run(packet, store)
 
     updated_graph_records = store.iter_records("knowledge_graph")
     updated_incoming = [record for record in updated_graph_records if record.record_id == "rec-2"][0]

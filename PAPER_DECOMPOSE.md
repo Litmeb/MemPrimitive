@@ -32,7 +32,7 @@ HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启
 - MemPrimitive 现有哪些模块可直接复用
   - `PassThroughUnitFormation`：如果上游已经把输入准备为单 passage observation，可直接表达“一条输入对应一个写入单元”。
 - 哪些模块只能部分复用
-  - `SentenceSplitUnitFormation`、`LineSplitUnitFormation`、`WindowedUnitFormation`：它们能做切分，但 HippoRAG 论文核心并不依赖这些切分策略。
+  - `SentenceSplitUnitFormation`、`SentenceSplitUnitFormation`、`SentenceSplitUnitFormation`：它们能做切分，但 HippoRAG 论文核心并不依赖这些切分策略。
 - 当前缺失什么能力
   - 无关键缺口。该 slot 不是 HippoRAG 的机制瓶颈。
 - 你的判断依据是什么
@@ -125,7 +125,7 @@ HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启
 - 哪些模块只能部分复用
   - `GraphLinkEvolution`
     - 能在 graph layer 里补 link，但当前假设是 record-to-record 邻接，不是 entity-node embedding 相似驱动的节点级 augmentation。
-  - `GraphNeighborAppendEvolution`
+  - `GraphLinkEvolution`
     - 只是 `GraphLinkEvolution` 的兼容包装，能力边界相同。
 - 当前缺失什么能力
   - 缺少“基于节点 embedding 相似度阈值批量建立 synonymy edges”的显式演化模块。
@@ -171,8 +171,8 @@ HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启
   - 把 top-ranked passages 返回给 reader/QA 模块；readout 本身不是论文创新点。
 - MemPrimitive 现有哪些模块可直接复用
   - `ConcatenateReadout`
-  - `BulletListReadout`
-  - `GroupedByLayerReadout`
+  - `ConcatenateReadout`
+  - `TemplateReadout`
   - 这些都足以把检索出的 passages 线性整理给下游。
 - 哪些模块只能部分复用
   - `GraphReadout`
@@ -269,8 +269,8 @@ AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 wor
     - 如果把每步 observation 作为一个 `Observation` 输入，则可直接表达“一步 observation -> 一个 memory unit”。
 - 哪些模块只能部分复用
   - `SentenceSplitUnitFormation`
-  - `LineSplitUnitFormation`
-  - `WindowedUnitFormation`
+  - `SentenceSplitUnitFormation`
+  - `SentenceSplitUnitFormation`
     - 这些模块能做切分，但 AriGraph 的核心写入粒度不是 observation 内分句，而是 step-level observation。
 - 当前缺失什么能力
   - 无关键缺口。该 slot 不是 AriGraph 的机制瓶颈。
@@ -368,7 +368,7 @@ AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 wor
 - 哪些模块只能部分复用
   - `GraphLinkEvolution`
     - 能对 graph layer 做额外图写回，但偏向补 link，不支持“根据新 observation 删除/替换过时 semantic facts”。
-  - `GraphNeighborAppendEvolution`
+  - `GraphLinkEvolution`
     - 只是 `GraphLinkEvolution` 的兼容包装，能力边界相同。
 - 当前缺失什么能力
   - 缺少“基于新 observation triplets，对相关旧 semantic edges 做冲突检测与删除”的 memory evolution primitive。
@@ -417,8 +417,8 @@ AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 wor
   - 把 relevant semantic memories 与 relevant episodic memories 放入 working memory，供 planning 和 decision making 使用。
 - MemPrimitive 现有哪些模块可直接复用
   - `ConcatenateReadout`
-  - `BulletListReadout`
-  - `GroupedByLayerReadout`
+  - `ConcatenateReadout`
+  - `TemplateReadout`
     - 这些模块都可以承担“把检索出的文本化记忆拼接给下游”的职责。
 - 哪些模块只能部分复用
   - `GraphReadout`
@@ -509,8 +509,8 @@ HiAgent 关注的不是跨 trial 长期记忆，而是单次任务尝试中的 w
     - 如果把每一步 observation 视为一次 ingest，或把 action 一并编码进 observation 文本/metadata，则足以承载“每步产生一个新的 working-memory 增量”这一最小写入单位。
 - 哪些模块只能部分复用
   - `SentenceSplitUnitFormation`
-  - `LineSplitUnitFormation`
-  - `WindowedUnitFormation`
+  - `SentenceSplitUnitFormation`
+  - `SentenceSplitUnitFormation`
     - 它们能做切分，但 HiAgent 的关键粒度不是句子或窗口，而是交互 step 与 subgoal chunk。
 - 当前缺失什么能力
   - 无关键缺口。HiAgent 的主要创新不在 unit formation。
@@ -567,7 +567,7 @@ HiAgent 关注的不是跨 trial 长期记忆，而是单次任务尝试中的 w
 - 哪些模块只能部分复用
   - `AppendOrganization`
     - 能顺序写入记录，但不能表达“当前 chunk 保留细节、历史 chunk 默认只暴露 summary”的层级 chunk 组织。
-  - `ConditionalLayerOrganization`
+  - `AppendOrganization`
     - 可以按规则分层，但缺少 subgoal chunk 边界、subgoal id、当前/历史状态切换等控制逻辑。
     - 能发 placement，但不能独立完成 HiAgent 的 chunk 组织。
 - 当前缺失什么能力
@@ -663,7 +663,7 @@ HiAgent 关注的不是跨 trial 长期记忆，而是单次任务尝试中的 w
 - 哪些模块只能部分复用
   - `ConcatenateReadout`
     - 能做纯文本拼接，但不能显式保留层级 working-memory 结构。
-  - `GroupedByLayerReadout`
+  - `TemplateReadout`
     - 轮廓上最接近“按层显示”，但仍不能表达 subgoal 编号、summary-vs-detail 切换、按需恢复旧 chunk 等格式。
   - `PromptContextReadout`
     - 有“拼 prompt context”的方向，但当前更偏 Reflexion/readout 语义，不是 HiAgent 的层级工作记忆呈现。
@@ -762,7 +762,7 @@ Mem0 论文主体的核心不是“把整段对话直接塞进向量库”，而
 - 哪些模块只能部分复用
   - `PassThroughUnitFormation`
     - 如果上游已经把“消息对 + 必要上下文”预先打包成一个 `Observation`，可以承载 Mem0 的最小处理单元。
-  - `MetadataHintUnitFormation`
+  - `PassThroughUnitFormation`
     - 可以从 metadata hints 中构造 unit，但它并不是为“对话双消息单元”设计的。
 - 当前缺失什么能力
   - 缺少面向 conversation turn-pair 的原生 unit formation。
@@ -902,8 +902,8 @@ Mem0 论文主体的核心不是“把整段对话直接塞进向量库”，而
   - graph 版会额外返回关系上下文。
 - MemPrimitive 现有哪些模块可直接复用
   - `ConcatenateReadout`
-  - `BulletListReadout`
-  - `GroupedByLayerReadout`
+  - `ConcatenateReadout`
+  - `TemplateReadout`
 - 哪些模块只能部分复用
   - `GraphReadout`
     - 对 graph 版调试可用，但不是 Mem0 默认的结果形态。
@@ -997,7 +997,7 @@ LightMem 的 memory 主机制不是“更复杂的召回器”，而是把长期
 - 哪些模块只能部分复用
   - `PassThroughUnitFormation`
     - 如果上游已经把一次 user/assistant 交互预先打包成一个 `Observation`，可以承载“turn 级输入单元”这一最小外观。
-  - `MetadataHintUnitFormation`
+  - `PassThroughUnitFormation`
     - 也可以靠上游 hints 人工构造多单元，但这不是 LightMem 原生的 turn ingestion 语义。
 - 当前缺失什么能力
   - 缺少显式的“对话 turn / turn-pair 形成单元”能力边界。
@@ -1058,7 +1058,7 @@ LightMem 的 memory 主机制不是“更复杂的召回器”，而是把长期
 - 哪些模块只能部分复用
   - `AppendOrganization`
     - 只能表达“把条目写到某层”，不能表达层间缓冲与 topic segment 结构。
-  - `ConditionalLayerOrganization`
+  - `AppendOrganization`
     - 可做简单分层路由，但不能表达“先在 sensory/STM 暂存，后批量提升到 LTM”的生命周期。
 - 当前缺失什么能力
   - 缺少显式的分层 buffer organization primitive。
@@ -1139,8 +1139,8 @@ LightMem 的 memory 主机制不是“更复杂的召回器”，而是把长期
   - readout 不是论文创新点。
 - MemPrimitive 现有哪些模块可直接复用
   - `ConcatenateReadout`
-  - `BulletListReadout`
-  - `GroupedByLayerReadout`
+  - `ConcatenateReadout`
+  - `TemplateReadout`
 - 哪些模块只能部分复用
   - `JSONReadout`
     - 只是在需要结构化下游接口时可选，不是论文必要。
@@ -1247,9 +1247,9 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
   - `PassThroughUnitFormation`
     - 如果上游已经把一段对话上下文打包成单个 `Observation`，可以勉强承载 MIRIX 的输入外观。
 - 哪些模块只能部分复用
-  - `MetadataHintUnitFormation`
+  - `PassThroughUnitFormation`
     - 可借助 hints 人工补上会话边界或来源标记，但它不原生表达“累积交互包”这一输入语义。
-  - `WindowedUnitFormation`
+  - `SentenceSplitUnitFormation`
     - 只能做局部窗口切片，不能稳定表达 MIRIX 那种面向 memory-router 的交互打包边界。
 - 当前缺失什么能力
   - 缺少显式的“conversation bundle / interaction chunk”形成 primitive。
@@ -1316,7 +1316,7 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
 - MemPrimitive 现有哪些模块可直接复用
   - 无可直接完整复用模块。
 - 哪些模块只能部分复用
-  - `ConditionalLayerOrganization`
+  - `AppendOrganization`
     - 可近似表达“按类别分层”，但无法表达 MIRIX 这种 heterogeneous stores with distinct schemas 的组织方式。
   - `AppendOrganization`
     - 只能承载单一 record append，不足以表示 block memory 与 typed stores 并存。
@@ -1415,7 +1415,7 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
 - MemPrimitive 现有哪些模块可直接复用
   - 无可直接完整复用模块。
 - 哪些模块只能部分复用
-  - `GroupedByLayerReadout`
+  - `TemplateReadout`
     - 可近似表达“分组呈现”，但组的语义只是 layer，不是 MIRIX 的 typed memory families。
   - `PromptContextReadout`
     - 可承载最终 prompt 注入外观，但不自带 MIRIX 那种 recent/relevant split 与敏感信息抑制。

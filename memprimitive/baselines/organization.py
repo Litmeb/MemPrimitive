@@ -212,78 +212,6 @@ def _merge_graph_triples(
     return list(merged.values())
 
 
-class ConditionalLayerOrganization(OrganizationModule):
-    """Route units to layers based on tags/entities/unit metadata, then append.
-
-    Constructor: ``default_layer`` must be declared in topology or creatable by
-    the store. ``rules`` is an ordered tuple of dict rules using one of
-    ``has_entity``, ``unit_type``, ``tag_contains``, or ``metadata_key`` to pick
-    a ``target_layer``.
-
-    ``run`` requires ``packet.units`` and ``packet.decisions`` with equal length.
-    Emits aligned placements and commits normal append-only writes to the chosen
-    target layers.
-    """
-
-    spec = ModuleSpec(
-        name="conditional_layer_organization",
-        slot="organization",
-        input_requirements=("units", "decisions"),
-        output_guarantees=("placements",),
-        side_effects=("modify_store", "append_records"),
-    )
-
-    def __init__(self, *, default_layer: str = "default", rules: tuple[dict[str, Any], ...] = ()) -> None:
-        self.default_layer = default_layer
-        self.rules = rules
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.units is None:
-            raise ValueError("ConditionalLayerOrganization requires packet.units.")
-        if packet.decisions is None:
-            raise ValueError("ConditionalLayerOrganization requires packet.decisions.")
-        if len(packet.units) != len(packet.decisions):
-            raise ValueError("ConditionalLayerOrganization requires decisions aligned with units.")
-
-        placements = [
-            Placement(unit_id=unit.unit_id, target_layer=self._target_layer_for_unit(unit))
-            for unit in packet.units
-        ]
-        written_record_ids, written_unit_ids, skipped_units = _append_records_for_placements(packet, store, placements)
-
-        trace = copy_trace(packet)
-        trace["organization"] = {
-            "module": self.spec.name,
-            "default_layer": self.default_layer,
-            "placements": [
-                {"unit_id": placement.unit_id, "target_layer": placement.target_layer}
-                for placement in placements
-            ],
-            "written_record_ids": written_record_ids,
-            "written_unit_ids": written_unit_ids,
-            "skipped_unit_count": skipped_units,
-        }
-        return replace(packet, placements=placements, trace=trace), store
-
-    def _target_layer_for_unit(self, unit) -> str:
-        for rule in self.rules:
-            target_layer = str(rule.get("target_layer", "")).strip()
-            if not target_layer:
-                continue
-            if rule.get("has_entity") is True and unit.entities:
-                return target_layer
-            if "unit_type" in rule and str(rule["unit_type"]).strip() == unit.unit_type:
-                return target_layer
-            if "tag_contains" in rule and str(rule["tag_contains"]).strip():
-                needle = str(rule["tag_contains"]).casefold()
-                if any(needle in str(tag).casefold() for tag in unit.tags):
-                    return target_layer
-            if "metadata_key" in rule and str(rule["metadata_key"]).strip():
-                if rule["metadata_key"] in unit.metadata:
-                    return target_layer
-        return self.default_layer
-
-
 class GraphAppendOrganization(OrganizationModule):
     """Append units into a graph-shaped layer while annotating graph metadata.
 
@@ -419,157 +347,8 @@ class GraphAppendOrganization(OrganizationModule):
         return written_record_ids, written_unit_ids, skipped_units, source_written_record_ids
 
 
-class GraphEntityAppendOrganization(GraphAppendOrganization):
-    """Append one graph record per extracted entity instead of one per raw unit."""
-
-    spec = ModuleSpec(
-        name="graph_entity_append_organization",
-        slot="organization",
-        input_requirements=("units", "decisions"),
-        output_guarantees=("placements",),
-        store_requirements=("shape:Graph", "index:graph"),
-        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
-        side_effects=("modify_store", "append_records"),
-    )
-    requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
-    produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT, RECORD_NOTE_PAYLOAD_CONTRACT})
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.units is None:
-            raise ValueError("GraphEntityAppendOrganization requires packet.units.")
-        if packet.decisions is None:
-            raise ValueError("GraphEntityAppendOrganization requires packet.decisions.")
-        if len(packet.units) != len(packet.decisions):
-            raise ValueError("GraphEntityAppendOrganization requires decisions aligned with units.")
-        if store.layer_shape(self.target_layer) != "Graph":
-            raise ValueError(f"GraphEntityAppendOrganization requires target layer {self.target_layer!r} to be Graph.")
-        if self.separate and not self.separate_layer:
-            raise ValueError("GraphEntityAppendOrganization requires separate_layer when separate=True.")
-
-        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
-        source_written_record_ids: list[str] = []
-        if self.separate:
-            written_record_ids, written_unit_ids, skipped_units, source_written_record_ids = self._append_separate_records(
-                packet,
-                store,
-                placements,
-            )
-        else:
-            written_record_ids, written_unit_ids, skipped_units = self._append_entity_records(packet, store, placements)
-
-        trace = copy_trace(packet)
-        trace["organization"] = {
-            "module": self.spec.name,
-            "target_layer": self.target_layer,
-            "separate": self.separate,
-            "separate_layer": self.separate_layer,
-            "fanout_mode": "per_entity",
-            "writes_embedding_from_record_field": True,
-            "records_with_embedding": sum(
-                1
-                for record_id in written_record_ids
-                for record in store.iter_records(self.target_layer)
-                if record.record_id == record_id and record.embedding is not None
-            ),
-            "written_record_ids": written_record_ids,
-            "source_written_record_ids": source_written_record_ids,
-            "entity_written_record_ids": written_record_ids,
-            "written_unit_ids": written_unit_ids,
-            "skipped_unit_count": skipped_units,
-            "graph_metadata_schema": (
-                "graph.layer",
-                "graph.shape",
-                "graph.entities",
-                "graph.triples",
-                "graph.links",
-                "graph.node_count",
-                "graph.link_count",
-                "graph.last_linked_at",
-                "graph.link_history",
-            ),
-        }
-        return replace(packet, placements=placements, trace=trace), store
-
-    @staticmethod
-    def _entity_texts(unit) -> list[str]:
-        return list(dict.fromkeys(str(entity).strip() for entity in unit.entities if str(entity).strip()))
-
-    def _append_entity_records(
-        self,
-        packet: Packet,
-        store: MemoryStore,
-        placements: list[Placement],
-    ) -> tuple[list[str], list[str], int]:
-        written_record_ids: list[str] = []
-        written_unit_ids: list[str] = []
-        skipped_units = 0
-        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
-            if not decision:
-                skipped_units += 1
-                continue
-            entity_texts = self._entity_texts(unit)
-            if not entity_texts:
-                skipped_units += 1
-                continue
-            for entity_text in entity_texts:
-                sequence_id = store.next_sequence_id()
-                record = _record_from_unit_with_text(
-                    unit,
-                    layer=placement.target_layer,
-                    sequence_id=sequence_id,
-                    text=entity_text,
-                )
-                record.metadata.update(self._graph_metadata(unit, placement))
-                store.append(record)
-                written_record_ids.append(record.record_id)
-                written_unit_ids.append(unit.unit_id)
-        return written_record_ids, written_unit_ids, skipped_units
-
-    def _append_separate_records(
-        self,
-        packet: Packet,
-        store: MemoryStore,
-        placements: list[Placement],
-    ) -> tuple[list[str], list[str], int, list[str]]:
-        written_record_ids: list[str] = []
-        written_unit_ids: list[str] = []
-        source_written_record_ids: list[str] = []
-        skipped_units = 0
-        for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
-            if not decision:
-                skipped_units += 1
-                continue
-            entity_texts = self._entity_texts(unit)
-            if not entity_texts:
-                skipped_units += 1
-                continue
-
-            source_sequence_id = store.next_sequence_id()
-            source_record = MemoryRecord.from_unit(unit=unit, layer=self.separate_layer, sequence_id=source_sequence_id)
-            store.append(source_record)
-            source_written_record_ids.append(source_record.record_id)
-
-            for entity_text in entity_texts:
-                entity_sequence_id = store.next_sequence_id()
-                entity_record = _record_from_unit_with_text(
-                    unit,
-                    layer=placement.target_layer,
-                    sequence_id=entity_sequence_id,
-                    text=entity_text,
-                )
-                entity_record.metadata.update(self._graph_metadata(unit, placement))
-                entity_record.metadata.update(
-                    build_extracted_triple_metadata(
-                        source_layer=self.separate_layer,
-                        target_layer=placement.target_layer,
-                        source_record=source_record,
-                        triples=list(entity_record.metadata["graph"]["triples"]),
-                    )
-                )
-                store.append(entity_record)
-                written_record_ids.append(entity_record.record_id)
-                written_unit_ids.append(unit.unit_id)
-        return written_record_ids, written_unit_ids, skipped_units, source_written_record_ids
+def _entity_texts(unit) -> list[str]:
+    return list(dict.fromkeys(str(entity).strip() for entity in unit.entities if str(entity).strip()))
 
 
 class GraphDeduplicationAppendOrganization(OrganizationModule):
@@ -819,7 +598,7 @@ class GraphEntityDeduplicationAppendOrganization(GraphDeduplicationAppendOrganiz
                 effects.append({"unit_id": unit.unit_id, "effect_type": "skipped"})
                 continue
 
-            entity_texts = GraphEntityAppendOrganization._entity_texts(unit)
+            entity_texts = _entity_texts(unit)
             if not entity_texts:
                 skipped_units += 1
                 effects.append({"unit_id": unit.unit_id, "effect_type": "skipped_no_entities"})
@@ -1360,9 +1139,7 @@ class LLMFunctionCallOrganization(OrganizationModule):
 BASELINE_SLOT: Final[str] = "organization"
 BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
-    ConditionalLayerOrganization,
     GraphAppendOrganization,
-    GraphEntityAppendOrganization,
     GraphDeduplicationAppendOrganization,
     GraphEntityDeduplicationAppendOrganization,
     HierarchicalOrganization,

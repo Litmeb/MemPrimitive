@@ -40,8 +40,8 @@ from memprimitive.baselines import (
     AppendOrganization,
     BasicRepresentation,
     BoundaryEventTrigger,
+    ConcatenateReadout,
     EmbeddingSimilarityRetrieval,
-    GroupedByLayerReadout,
     HierarchicalEvolution,
     LayerAwareRetrieval,
     NeverTrigger,
@@ -116,7 +116,7 @@ def main() -> None:
             top_k=4,
             top_k_by_layer={"session_summary": 4, "episodic": 4},
         ),
-        readout=GroupedByLayerReadout(),
+        readout=ConcatenateReadout(separator="\n\n"),
         store=store,
     )
 
@@ -165,7 +165,7 @@ def main() -> None:
     pprint(retrieval_packet.trace["retrieval"])
     print()
 
-    print("grouped readout:")
+    print("readout:")
     print(readout.text)
     print("source record ids:", readout.source_ids)
 

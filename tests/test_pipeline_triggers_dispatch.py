@@ -19,7 +19,6 @@ from memprimitive.baselines import (
     BasicRepresentation,
     BoundaryEventTrigger,
     ConcatenateReadout,
-    BulletListReadout,
     EmbeddingSimilarityRetrieval,
     EntityRetrieval,
     GraphAppendOrganization,
@@ -35,7 +34,6 @@ from memprimitive.baselines import (
     RecencyRetrieval,
     ConfigurableEmbeddingRepresentation,
     StoreAllTrigger,
-    TagRetrieval,
     TripleRepresentation,
     VectorGraphSeedAndExpandRetrieval,
 )
@@ -465,7 +463,7 @@ def test_memory_pipeline_accepts_iterable_slot_modules_and_runs_them_in_order() 
             retriever_by_layer={"knowledge_graph": EntityRetrieval(top_k=2)},
             top_k=3,
         ),
-        readout=(ConcatenateReadout(separator="\n\n"), BulletListReadout()),
+        readout=(ConcatenateReadout(separator="\n\n"), ConcatenateReadout()),
         store=store,
     )
 
@@ -474,7 +472,7 @@ def test_memory_pipeline_accepts_iterable_slot_modules_and_runs_them_in_order() 
 
     assert store.count("working") == 1
     assert store.count("knowledge_graph") == 1
-    assert readout.text.startswith("- ")
+    assert "Alice likes tea." in readout.text
 
 
 def test_memory_pipeline_accepts_iterable_llm_representation_modules() -> None:
@@ -553,11 +551,11 @@ def test_dispatch_readout_returns_primary_branch_but_records_all_children() -> N
     pipeline = create_baseline_pipeline(top_k=2)
     pipeline.store = store
     pipeline.ingest(Observation(text="Alice likes tea.", source="dialogue"))
-    pipeline.readout = DispatchReadout((ConcatenateReadout(), BulletListReadout()), primary_index=1)
+    pipeline.readout = DispatchReadout((ConcatenateReadout(), ConcatenateReadout()), primary_index=1)
 
     readout = pipeline.recall(Query(text="Alice"))
 
-    assert readout.text.startswith("- ")
+    assert "Alice likes tea." in readout.text
 
 
 def test_pipeline_serial_write_triggers_can_preserve_decisions_and_fill_store_selection() -> None:
@@ -836,8 +834,8 @@ _OBVIOUSLY_INVALID_SINGLE_SLOT_PIPELINES = (
         id="entity-retrieval-without-entity-producer",
     ),
     pytest.param(
-        {"retrieval": TagRetrieval(top_k=2)},
-        id="tag-retrieval-without-tags-or-tag-index",
+        {"retrieval": EntityRetrieval(top_k=2)},
+        id="entity-retrieval-without-entities",
     ),
     pytest.param(
         {"organization": GraphAppendOrganization()},
@@ -890,7 +888,7 @@ _OBVIOUSLY_INVALID_COMPOSITE_PIPELINES = (
         {
             "retrieval": LayerAwareRetrieval(
                 default_retriever=EmbeddingSimilarityRetrieval(top_k=2),
-                retriever_by_layer={"default": TagRetrieval(top_k=2)},
+                retriever_by_layer={"default": EntityRetrieval(top_k=2)},
                 top_k=2,
             ),
         },

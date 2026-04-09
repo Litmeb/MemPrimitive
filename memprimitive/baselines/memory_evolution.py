@@ -526,34 +526,6 @@ class GraphLinkEvolution(MemoryEvolutionModule):
         return replace(packet, trace=trace), store
 
 
-class GraphNeighborAppendEvolution(GraphLinkEvolution):
-    """Backward-compatible graph link append baseline built on ``GraphLinkEvolution``.
-
-    Constructor: same as the earlier baseline variant. It preserves the old
-    class name and trace module id while delegating the actual graph-dependent
-    candidate selection and safe rewrite logic to ``GraphLinkEvolution``.
-    """
-
-    spec = ModuleSpec(
-        name="graph_neighbor_append_evolution",
-        slot="memory_evolution",
-        input_requirements=("units", "placements", "decisions"),
-        output_guarantees=("trace.memory_evolution.effects",),
-        store_requirements=("index:graph", "shape:Graph"),
-        layer_requirements=("target_layer_exists", "target_layer_shape:Graph", "target_layer_index:graph"),
-        side_effects=("modify_store", "rewrite_records"),
-    )
-
-    def __init__(self, *, target_layer: str = "knowledge_graph", neighbor_limit: int = 2, bidirectional: bool = True) -> None:
-        super().__init__(
-            target_layer=target_layer,
-            neighbor_limit=neighbor_limit,
-            bidirectional=bidirectional,
-            min_score=0.1,
-            rewrite_neighbor_metadata=False,
-        )
-
-
 class GraphNeighborContextTraceEvolution(MemoryEvolutionModule):
     """Trace linked-neighbor context and optionally write a conservative summary.
 
@@ -1002,7 +974,6 @@ BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     LayerMoveEvolution,
     GraphLinkEvolution,
     GraphNeighborContextTraceEvolution,
-    GraphNeighborAppendEvolution,
     HierarchicalEvolution,
     LLMFunctionCallEvolution,
 )

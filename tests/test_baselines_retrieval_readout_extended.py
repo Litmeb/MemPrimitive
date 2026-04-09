@@ -235,32 +235,6 @@ def test_bm25_retrieval_source_retrieved_only_scores_candidate_subset() -> None:
     assert packet_out.retrieved.trace["candidate_count"] == 2
 
 
-def test_tag_retrieval_prefers_matching_tags() -> None:
-    from memprimitive.baselines import AlwaysTrigger, AppendOrganization, LLMRepresentation, PassThroughUnitFormation, TagRetrieval
-
-    class SeededTagRepresentation(LLMRepresentation):
-        _TAGS_BY_TEXT = {
-            "Alice likes tea": ["preference", "tea"],
-            "Alice studies graph memory": ["graph", "memory"],
-            "Bob likes coffee": ["preference", "coffee"],
-        }
-
-        def _llm_json(self, *, user: str) -> Any:
-            payload = json.loads(user)
-            return list(self._TAGS_BY_TEXT[payload["unit"]["text"]])
-
-    store = MemoryStore()
-    for text in ("Alice likes tea", "Alice studies graph memory", "Bob likes coffee"):
-        packet, store = PassThroughUnitFormation().run(Packet(observation=Observation(text=text, source="notes")), store)
-        packet, store = SeededTagRepresentation(field="tags", prompt="Extract tags.").run(packet, store)
-        packet, store = AlwaysTrigger().run(packet, store)
-        _, store = AppendOrganization().run(packet, store)
-
-    packet_out, _ = TagRetrieval(top_k=1).run(Packet(query=Query(text="graph")), store)
-
-    assert packet_out.retrieved.items[0].text == "Alice studies graph memory"
-
-
 def test_entity_retrieval_prefers_entity_overlap() -> None:
     from memprimitive.baselines import AlwaysTrigger, AppendOrganization, EntityRetrieval, LLMRepresentation, PassThroughUnitFormation
 
@@ -316,18 +290,6 @@ def test_layer_aware_retrieval_supports_per_layer_top_k_and_merge_weights() -> N
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
 
 
-def test_bullet_list_readout_formats_bullets() -> None:
-    from memprimitive.baselines import BulletListReadout
-
-    store = MemoryStore()
-    packet, store = _stored_pipeline_packet("Alice likes tea.", store)
-    retrieved = RetrievedSet(items=store.iter_records(), scores=[])
-
-    packet_out, _ = BulletListReadout().run(Packet(retrieved=retrieved), store)
-
-    assert packet_out.readout.text.startswith("- Alice likes tea.")
-
-
 def test_buffer_retrieval_returns_latest_window_in_chronological_order() -> None:
     from memprimitive.baselines import BufferRetrieval
 
@@ -350,21 +312,6 @@ def test_buffer_retrieval_returns_latest_window_in_chronological_order() -> None
 
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-3", "rec-4"]
     assert packet_out.retrieved.trace["candidate_count"] == 4
-
-
-def test_grouped_by_layer_readout_groups_items() -> None:
-    from memprimitive.baselines import GroupedByLayerReadout
-
-    store = MemoryStore(
-        topology=StoreTopology.from_layers([StoreLayerSpec(name="working"), StoreLayerSpec(name="semantic")])
-    )
-    store.append(MemoryRecord(record_id="rec-1", unit_id="u1", layer="working", text="working", timestamp="2026-01-01T00:00:00+00:00"))
-    store.append(MemoryRecord(record_id="rec-2", unit_id="u2", layer="semantic", text="semantic", timestamp="2026-01-01T00:00:01+00:00"))
-
-    packet_out, _ = GroupedByLayerReadout().run(Packet(retrieved=RetrievedSet(items=store.iter_records(), scores=[])), store)
-
-    assert "[working]" in packet_out.readout.text
-    assert packet_out.readout.metadata["group_counts"] == {"working": 1, "semantic": 1}
 
 
 def test_prompt_context_readout_switches_between_strategies() -> None:

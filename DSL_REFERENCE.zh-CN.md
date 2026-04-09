@@ -46,9 +46,6 @@ unit_formation
 | --- | --- | --- |
 | `PassThroughUnitFormation` (`pass_through_unit_formation`) | 无额外参数 | 不切分输入；一条 observation 直接变成一个 unit。 |
 | `SentenceSplitUnitFormation` (`sentence_split_unit_formation`) | 无额外参数 | 按句子边界切分成长短更合适的 unit。 |
-| `LineSplitUnitFormation` (`line_split_unit_formation`) | 无额外参数 | 按非空行切分，适合日志、逐行笔记。 |
-| `WindowedUnitFormation` (`windowed_unit_formation`) | `window_size=120`, `stride=80` | 把长文本切成可重叠窗口。 |
-| `MetadataHintUnitFormation` (`metadata_hint_unit_formation`) | 无额外参数 | 如果 `observation.metadata["units"]` 已给出 unit hints，就直接按 hints 物化。 |
 
 ## `representation`
 
@@ -95,9 +92,7 @@ unit_formation
 | Module | 构造参数 | 效果 |
 | --- | --- | --- |
 | `AppendOrganization` (`append_organization`) | `target_layer="default"` | 直接 append 到固定 layer。 |
-| `ConditionalLayerOrganization` (`conditional_layer_organization`) | `default_layer="default"`, `rules=()` | 按 tags、entities、metadata 等规则路由到不同 layer。 |
 | `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 向图层追加记录，并维护 graph metadata；保留 unit 上已有的 note payload 等 metadata，因而也可承接 A-MEM 风格的 note graph 写入；`separate=True` 时原文本与 triple 记录可分层落库。 |
-| `GraphEntityAppendOrganization` (`graph_entity_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 保持 `GraphAppendOrganization` 的 graph metadata / provenance 约定，但把一个 unit 展开成多条 graph record，每条 `record.text` 是一个 entity；若当前 unit 没有 entity，则跳过该 unit。 |
 | `GraphDeduplicationAppendOrganization` (`graph_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 向图层写入前先与同 layer 现有 graph records 做 embedding top-1 相似度匹配；若 `similarity > threshold`，则原地合并节点并更新 text / embedding / triples，否则正常 append；`separate=True` 时 source 文本仍可单独落到 side layer。 |
 | `GraphEntityDeduplicationAppendOrganization` (`graph_entity_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 保持 `GraphDeduplicationAppendOrganization` 的阈值去重与 provenance 语义，但按 entity 独立执行 merge-or-append：每个 entity 用自己的 entity embedding 与现有 graph records 比较，相似度超过阈值时合并到命中节点，否则追加一个新的 entity 节点；缺少该 entity embedding 时只跳过该 entity。 |
 | `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 对选中的 source-layer records 做抽象聚合，再通过子 `MemoryPipeline.ingest()` 写入高层记忆。 |
@@ -135,7 +130,6 @@ unit_formation
 | `SummaryRewriteEvolution` (`summary_rewrite_evolution`) | `target_layer="default"` | 为激活内容生成摘要并写入目标层。 |
 | `LayerMoveEvolution` (`layer_move_evolution`) | `target_layer="default"` | 把激活记录复制/迁移到另一层。 |
 | `GraphLinkEvolution` (`graph_link_evolution`) | `target_layer="knowledge_graph"`, `neighbor_limit=2`, `bidirectional=True`, `min_score=0.1`, `rewrite_neighbor_metadata=False` | 在图层记录间建立或更新 links。 |
-| `GraphNeighborAppendEvolution` (`graph_neighbor_append_evolution`) | `target_layer="knowledge_graph"`, `neighbor_limit=2`, `bidirectional=True` | 图邻居追加式兼容封装。 |
 | `GraphNeighborContextTraceEvolution` (`graph_neighbor_context_trace_evolution`) | `target_layer="knowledge_graph"`, `rewrite_metadata=False` | 跟踪图邻居上下文，并可保守回写 metadata。 |
 | `HierarchicalEvolution` (`hierarchical_evolution`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 基于 `packet.decisions_store` 或 source-layer 扫描，做高层抽象和分层持久化。 |
 | `LLMFunctionCallEvolution` (`llm_function_call_evolution`) | `prompt`, `tools`, `source_layer=None`, `target_layer=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM tool call 对已有 records 做新增、更新、删除等演化操作。 |
@@ -165,7 +159,6 @@ unit_formation
 | `RecencyRetrieval` (`recency_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按时间新近性检索。 |
 | `KeywordCountRetrieval` (`keyword_count_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按 token 命中数排序。 |
 | `EmbeddingSimilarityRetrieval` (`embedding_similarity_retrieval`) | `top_k=3`, `layer=None`, `embedding_model="sentence-transformers/all-MiniLM-L6-v2"`, `source="store"` | 按 embedding 相似度检索。 |
-| `TagRetrieval` (`tag_retrieval`) | `top_k=3`, `layer=None` | 按 query 与 tags 的重叠度检索。 |
 | `EntityRetrieval` (`entity_retrieval`) | `top_k=3`, `layer=None` | 按 query 与 entities 的重叠度检索。 |
 | `BM25Retrieval` (`bm25_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 对文本和关键词做 BM25 排序。 |
 | `GraphNeighborRetrieval` (`graph_neighbor_retrieval`) | `top_k=3`, `layer="knowledge_graph"`, `include_seed_records=False` | 从 seed 记录出发扩展图邻居。 |
@@ -182,8 +175,6 @@ unit_formation
 | Module | 构造参数 | 效果 |
 | --- | --- | --- |
 | `ConcatenateReadout` (`concatenate_readout`) | `separator="\n"` | 直接拼接 retrieval items。 |
-| `BulletListReadout` (`bullet_list_readout`) | 无额外参数 | 渲染为 bullet list。 |
-| `GroupedByLayerReadout` (`grouped_by_layer_readout`) | 无额外参数 | 按 layer 分组展示。 |
 | `JSONReadout` (`json_readout`) | 无额外参数 | 输出 JSON 字符串。 |
 | `GraphReadout` (`graph_readout`) | `include_links=True` | 展示图记录及 links。 |
 | `PromptContextReadout` (`prompt_context_readout`) | `memory_layer="reflections"`, `default_strategy="reflexion"`, `top_k=3` | 把 recall 结果整理成 prompt context。 |

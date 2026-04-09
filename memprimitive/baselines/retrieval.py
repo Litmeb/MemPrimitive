@@ -16,10 +16,8 @@ from ..contracts import (
     RECORD_NOTE_PAYLOAD_CONTRACT,
     TOPOLOGY_GRAPH_LAYER_CONTRACT,
     TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT,
-    TOPOLOGY_TAG_INDEX_CONTRACT,
     UNIT_EMBEDDING_CONTRACT,
     UNIT_ENTITIES_CONTRACT,
-    UNIT_TAGS_CONTRACT,
     normalize_contracts,
 )
 from ..core import MemoryStore, ModuleSpec, Packet, Query, RetrievedSet
@@ -899,63 +897,6 @@ class EmbeddingSimilarityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         if left_norm == 0.0 or right_norm == 0.0:
             return 0.0
         return numerator / (left_norm * right_norm)
-
-
-class TagRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
-    """Rank records by overlap between query tokens and representation tags."""
-
-    spec = ModuleSpec(
-        name="tag_retrieval",
-        slot="retrieval",
-        input_requirements=("query.text",),
-        output_guarantees=("retrieved.items", "retrieved.scores"),
-    )
-    requires_contracts = frozenset({UNIT_TAGS_CONTRACT, TOPOLOGY_TAG_INDEX_CONTRACT})
-
-    def __init__(self, top_k: int = 3, layer: str | None = None) -> None:
-        if top_k <= 0:
-            raise ValueError("TagRetrieval requires top_k > 0.")
-        self.top_k = top_k
-        self.layer = layer
-
-    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.query is None:
-            raise ValueError("TagRetrieval requires packet.query.")
-
-        tokens = _query_tokens(packet.query.text)
-        all_records = list(reversed(store.iter_records(self.layer)))
-        scored = []
-        for order_index, record in enumerate(all_records):
-            tags = {str(tag).casefold() for tag in _representation(record).get("tags", [])}
-            overlap = len(tokens & tags)
-            scored.append((overlap, order_index, record))
-
-        if any(overlap > 0 for overlap, _, _ in scored):
-            scored = [item for item in scored if item[0] > 0]
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        selected = scored[: self.top_k]
-        items = [record for _, _, record in selected]
-        scores = [
-            {
-                "record_id": record.record_id,
-                "rank": rank,
-                "score": float(overlap),
-                "strategy": "tag_overlap",
-            }
-            for rank, (overlap, _, record) in enumerate(selected, start=1)
-        ]
-        retrieved = RetrievedSet(
-            items=items,
-            scores=scores,
-            trace={
-                "module": self.spec.name,
-                "top_k": self.top_k,
-                "candidate_count": len(all_records),
-            },
-        )
-        trace = copy_trace(packet)
-        trace["retrieval"] = retrieved.trace
-        return replace(packet, retrieved=retrieved, trace=trace), store
 
 
 class EntityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
@@ -2082,7 +2023,6 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     RecencyRetrieval,
     KeywordCountRetrieval,
     EmbeddingSimilarityRetrieval,
-    TagRetrieval,
     EntityRetrieval,
     TripleMemoryRetrieval,
     BM25Retrieval,

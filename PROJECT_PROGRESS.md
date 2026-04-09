@@ -38,6 +38,12 @@ Avoid re-documenting these in detail unless something materially changes.
 ## Important Recent Progress
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
+- The public baseline surface has been intentionally tightened again: `GraphNeighborAppendEvolution`, `BulletListReadout`, `GroupedByLayerReadout`, `GraphEntityAppendOrganization`, `TagRetrieval`, `ConditionalLayerOrganization`, `LineSplitUnitFormation`, `WindowedUnitFormation`, and `MetadataHintUnitFormation` are now removed rather than kept as extra baseline variants.
+- The intended replacements are now explicit in code/tests/docs rather than preserved as compatibility aliases:
+  - graph neighbor append compatibility -> `GraphLinkEvolution`
+  - simple special-case readouts -> `ConcatenateReadout` or `TemplateReadout`
+  - per-entity graph writes -> `GraphEntityDeduplicationAppendOrganization` where entity-level fanout/dedup is still needed, otherwise `GraphAppendOrganization`
+  - tag-overlap retrieval -> other existing retrieval families such as `KeywordCountRetrieval`, `EntityRetrieval`, `EmbeddingSimilarityRetrieval`, or `LayerAwareRetrieval`
 - PromptPlan-driven tool visibility is now implemented for `LLMFunctionCallOrganization` / `LLMFunctionCallEvolution`: prompt-side recall branches can report retrieved record provenance, select which recall branches contribute to `visible_records`, and expose that visibility in trace metadata.
 - PromptPlan labeled sub-recall now degrades cleanly on per-label empty recall-query overrides: an override that renders to `""` records `disabled_reason="empty_rendered_recall_query"` in prompt/readout metadata instead of failing `Query(text=...)` validation.
 - Integration smoke coverage for real LLM / embedding baselines exists in `tests/test_smoke_real_model_modules.py` and can exercise the main LLM-backed baseline families when runtime credentials are configured.

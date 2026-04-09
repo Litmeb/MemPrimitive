@@ -10,7 +10,7 @@
   - 把增量到来的 user/assistant 一轮交互稳定组织成一个 turn-level memory unit，并保留 speaker 对齐、turn 边界、时间戳与后续 buffer 计数所需字段。
 - 为什么现有模块不够
   - `PassThroughUnitFormation` 只能承载上游已经打包好的文本。
-  - `MetadataHintUnitFormation` 可以靠 hints 人工构造单元，但没有 LightMem 所需的对话 turn 语义，也不和 buffer 容量机制自然对接。
+  - `PassThroughUnitFormation` 可以靠 hints 人工构造单元，但没有 LightMem 所需的对话 turn 语义，也不和 buffer 容量机制自然对接。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。很多 conversational memory 方法都需要把“单条消息”提升为“单轮交互”作为真实写入单元。
 
@@ -22,7 +22,7 @@
   - 把一段待处理的交互上下文稳定封装成 `conversation bundle / interaction chunk`，显式保留消息列表、参与者、时间范围、附件/资源引用、来源 agent 等信息，供后续 memory-type 路由与 typed extraction 使用。
 - 为什么现有模块不够
   - `PassThroughUnitFormation` 只能承载上游已打包好的文本。
-  - `WindowedUnitFormation` 只能做窗口切分。
+  - `SentenceSplitUnitFormation` 只能做窗口切分。
   - 当前没有模块把“多轮交互包”作为一等 unit contract 暴露出来，因此无法忠实承载 MIRIX 这类先做 memory-type routing 再做 typed extraction 的写入链路。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。凡是 conversational / multi-agent memory 系统，都可能先对一段交互包做路由和抽取，而不是逐句直接写库。
@@ -177,7 +177,7 @@
   - 把 working memory 组织成“当前 subgoal 的详细 action-observation chunk + 已完成 subgoal 的归档 chunk”两层结构，并稳定维护 subgoal id、chunk 边界、当前/历史状态。
 - 为什么现有模块不够
   - `AppendOrganization` 只能顺序追加；
-  - `ConditionalLayerOrganization` 只能按规则分层；
+  - `AppendOrganization` 只能按规则分层；
   - 它们都不能自然表达 HiAgent 所需的“按 subgoal 切 chunk，并让当前 chunk 与历史 chunk 使用不同保真度”的层级 working-memory 组织。
 - 这是为 HiAgent 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。凡是“计划-执行-压缩-必要时回看”的 agent working-memory 系统都可能复用。
@@ -202,7 +202,7 @@
   - 显式组织 sensory buffer、topic-aware STM、LTM 三层结构，支持条目先进入短期缓冲，再以批处理方式提升到长期记忆。
 - 为什么现有模块不够
   - `AppendOrganization` 只能直接落层。
-  - `ConditionalLayerOrganization` 只能做静态路由，不能表达“先缓冲、后提升”的生命周期。
+  - `AppendOrganization` 只能做静态路由，不能表达“先缓冲、后提升”的生命周期。
   - 当前没有一个模块能把 LightMem 的三层结构视为一个整体组织原语。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。很多 memory 系统都有 cache/working/LTM 分层，只是 LightMem 把这一点做得更明确。
@@ -226,7 +226,7 @@
 - 要补的能力是什么
   - 把带 `memory_type` 的 typed payload 分发到异构 memory stores，允许不同 store 拥有不同 schema、不同主键/更新策略、不同过滤维度与不同检索字段。
 - 为什么现有模块不够
-  - `AppendOrganization` 与 `ConditionalLayerOrganization` 都默认在同构记录空间里做追加或路由。
+  - `AppendOrganization` 与 `AppendOrganization` 都默认在同构记录空间里做追加或路由。
   - MIRIX 不是“同一 record 换个 layer”，而是 block memory、event memory、concept memory、resource memory、sensitive vault 等并存。
   - 当前没有模块把“异构 store family”视为组织层的一等对象。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive
@@ -340,7 +340,7 @@
 - 要补的能力是什么
   - 基于当前 observation 提取出的新 triplets，对相关旧 semantic edges 做冲突检测、过时事实识别与删除，然后把 semantic memory 修订到最新状态。
 - 为什么现有模块不够
-  - 当前 `GraphLinkEvolution` / `GraphNeighborAppendEvolution` 都偏向新增或改写上下文，不覆盖 AriGraph 关键的“删除式事实修订”。
+  - 当前 `GraphLinkEvolution` / `GraphLinkEvolution` 都偏向新增或改写上下文，不覆盖 AriGraph 关键的“删除式事实修订”。
 - 这是为 AriGraph 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。任何持续交互、世界状态会变化的 graph memory 都可能需要局部事实修订，而不只是 append。
 
@@ -552,7 +552,7 @@
 - 要补的能力是什么
   - 把“历史 subgoal 的 summary、当前 subgoal 的详细轨迹、按需恢复的旧 subgoal 细节”组装成稳定 prompt 上下文，并显式保留 subgoal 编号与层级关系。
 - 为什么现有模块不够
-  - `ConcatenateReadout`、`BulletListReadout`、`GroupedByLayerReadout` 只能做通用拼接；
+  - `ConcatenateReadout`、`ConcatenateReadout`、`TemplateReadout` 只能做通用拼接；
   - `PromptContextReadout` 当前偏向 Reflexion 场景；
   - 它们都不能直接表达 HiAgent 的层级 working-memory 呈现格式。
 - 这是为 HiAgent 特化，还是可抽象为通用 primitive
@@ -565,7 +565,7 @@
 - 要补的能力是什么
   - 把多 store retrieval results 按 memory type 组装为稳定 prompt 片段，支持 typed section headers、字段裁剪、可选 item ids 与每类记忆的展示模板。
 - 为什么现有模块不够
-  - `GroupedByLayerReadout` 只会按 layer 分组。
+  - `TemplateReadout` 只会按 layer 分组。
   - `PromptContextReadout` 只提供通用 prompt 注入外观。
   - MIRIX 需要的是显式的 typed-memory prompt assembly，而不是普通文本拼接。
 - 这是为 MIRIX 特化，还是可抽象为通用 primitive

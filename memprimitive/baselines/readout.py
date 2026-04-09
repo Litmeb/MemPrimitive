@@ -77,61 +77,6 @@ class ConcatenateReadout(ReadoutModule):
         return replace(packet, readout=readout, trace=trace), store
 
 
-class BulletListReadout(ReadoutModule):
-    """Render retrieval items as one bullet per line."""
-
-    spec = ModuleSpec(
-        name="bullet_list_readout",
-        slot="readout",
-        input_requirements=("retrieved.items",),
-        output_guarantees=("readout.text", "readout.source_ids"),
-    )
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.retrieved is None:
-            raise ValueError("BulletListReadout requires packet.retrieved.")
-        items = packet.retrieved.items
-        source_ids = [record.record_id for record in items]
-        text = "\n".join(f"- {record.text}" for record in items)
-        readout = Readout(text=text, source_ids=source_ids, metadata={"item_count": len(items), "format": "bullet"})
-        trace = copy_trace(packet)
-        trace["readout"] = {"module": self.spec.name, "source_ids": source_ids}
-        return replace(packet, readout=readout, trace=trace), store
-
-
-class GroupedByLayerReadout(ReadoutModule):
-    """Render retrieval items grouped by their source layer."""
-
-    spec = ModuleSpec(
-        name="grouped_by_layer_readout",
-        slot="readout",
-        input_requirements=("retrieved.items",),
-        output_guarantees=("readout.text", "readout.source_ids"),
-    )
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.retrieved is None:
-            raise ValueError("GroupedByLayerReadout requires packet.retrieved.")
-        items = packet.retrieved.items
-        source_ids = [record.record_id for record in items]
-        groups: dict[str, list[str]] = {}
-        for record in items:
-            groups.setdefault(record.layer, []).append(record.text)
-        chunks = [f"[{layer}]\n" + "\n".join(texts) for layer, texts in groups.items()]
-        readout = Readout(
-            text="\n\n".join(chunks),
-            source_ids=source_ids,
-            metadata={
-                "item_count": len(items),
-                "group_counts": {layer: len(texts) for layer, texts in groups.items()},
-                "format": "grouped_by_layer",
-            },
-        )
-        trace = copy_trace(packet)
-        trace["readout"] = {"module": self.spec.name, "source_ids": source_ids}
-        return replace(packet, readout=readout, trace=trace), store
-
-
 class JSONReadout(ReadoutModule):
     """Render retrieval items into a JSON string for downstream tools/agents."""
 
@@ -665,8 +610,6 @@ class TemplateReadout(ReadoutModule):
 BASELINE_SLOT: Final[str] = "readout"
 BASELINE_CLASSES: Final[tuple[type[ReadoutModule], ...]] = (
     ConcatenateReadout,
-    BulletListReadout,
-    GroupedByLayerReadout,
     JSONReadout,
     GraphReadout,
     GraphRelationReadout,

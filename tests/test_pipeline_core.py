@@ -16,7 +16,6 @@ from memprimitive.baselines import (
     BasicRepresentation,
     BoundaryEventTrigger,
     ConcatenateReadout,
-    BulletListReadout,
     EmbeddingSimilarityRetrieval,
     HierarchicalEvolution,
     LayerAwareRetrieval,
@@ -409,7 +408,7 @@ def test_hierarchical_session_summary_pipeline_merges_global_top_k(monkeypatch: 
             top_k=3,
             top_k_by_layer={"session_summary": 3, "episodic": 3},
         ),
-        readout=BulletListReadout(),
+        readout=ConcatenateReadout(),
         store=store,
     )
 

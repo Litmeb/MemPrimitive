@@ -233,14 +233,14 @@ class GraphEdge:
 优先重写：
 
 - `GraphAppendOrganization`
-- `GraphEntityAppendOrganization`
+- `GraphEntityDeduplicationAppendOrganization`
 - `GraphDeduplicationAppendOrganization`
 - `GraphEntityDeduplicationAppendOrganization`
 
 新的语义建议是：
 
 - `GraphAppendOrganization` 写入 node / edge，而不是写 graph-shaped record。
-- `GraphEntityAppendOrganization` 以 entity 为 node 主体，source observation 作为 provenance，不再一条实体一个伪 record。
+- `GraphEntityDeduplicationAppendOrganization` 以 entity 为 node 主体，source observation 作为 provenance，不再一条实体一个伪 record。
 - `GraphDeduplicationAppendOrganization` 做的是 node merge / node resolve，而不是 record replace。
 - triple 不应只存在于 node metadata；应尽量转成 relation edge。
 
@@ -272,7 +272,7 @@ class GraphEdge:
 优先重写：
 
 - `GraphLinkEvolution`
-- `GraphNeighborAppendEvolution`
+- `GraphLinkEvolution`
 - `GraphNeighborContextTraceEvolution`
 - LLM graph tools 相关执行器
 

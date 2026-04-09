@@ -905,10 +905,6 @@ def test_graph_deduplication_append_organization_is_registered_in_baseline_expor
     assert "GraphDeduplicationAppendOrganization" in registered_baseline_class_names()
 
 
-def test_graph_entity_append_organization_is_registered_in_baseline_exports() -> None:
-    assert "GraphEntityAppendOrganization" in registered_baseline_class_names()
-
-
 def test_graph_entity_deduplication_append_organization_is_registered_in_baseline_exports() -> None:
     assert "GraphEntityDeduplicationAppendOrganization" in registered_baseline_class_names()
 
