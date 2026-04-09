@@ -101,6 +101,22 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Important paper/repo mismatch: the paper text says evolved neighbors may update context, keywords, and tags, but the released repos mostly implement context/tag updates only. The current framework matches the repo-side behavior more naturally; keyword rewrite should be treated as optional fidelity stretch, not a blocker.
 - Retrieval alignment is also better with the repo interpretation: seed by embedding similarity, then expand by stored links / neighbors. Query keyword generation can be expressed with existing retrieval-query rewrite machinery rather than a new primitive.
 
+### Reflexion
+
+- Paper + upstream repo review now suggests the current framework can reproduce the Reflexion memory module without adding new primitives, as long as scope stays limited to memory and prompt-context injection rather than the full agent loop.
+- The easiest alignment target is the released repo, which implements memory more simply than the paper's broad framing: failed trials generate short natural-language reflections, those reflections are stored in an episodic text buffer, and later trials prepend either the last trial, the reflection buffer, or both.
+- The current framework already has a near-direct slot mapping:
+  - ephemeral trial routing without normal persistence -> `PlacementWithoutAppendOrganization`
+  - failure-conditioned reflection write -> `ReflectionGenerationEvolution`
+  - bounded episodic reflection buffer read -> `BufferRetrieval`
+  - prompt construction for `base` / `last_trial` / `reflexion` / `last_trial_and_reflexion` -> `PromptContextReadout`
+- Important paper/repo mismatch: the paper describes a generic verbal reinforcement framework with episodic memory, but the public repo implementations are mostly plain append-only text memory plus prompt templating, sometimes with a recent-3 truncation rule. The current framework matches this repo-side interpretation better than a more ambitious generalized-learning reading.
+- Remaining work for a faithful reconstruction is mainly example-level orchestration:
+  - define the failure / feedback payload passed in `Observation.metadata`
+  - decide whether to keep the current trial trace outside the store or persist it in a separate trial layer
+  - wire the downstream agent prompt to consume `readout.text`
+- New primitive work is only needed if future goals expand beyond the repo-consistent Reflexion memory slice, such as trial-indexed multi-task memory partitioning, richer evaluator provenance, or tighter coupling between evaluation outcome and recall selection.
+
 ### Other Boundary Papers
 
 - `HippoRAG`: still highlights graph retrieval / propagation gaps.
