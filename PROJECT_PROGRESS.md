@@ -39,6 +39,7 @@ Avoid re-documenting these in detail unless something materially changes.
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
 - PromptPlan-driven tool visibility is now implemented for `LLMFunctionCallOrganization` / `LLMFunctionCallEvolution`: prompt-side recall branches can report retrieved record provenance, select which recall branches contribute to `visible_records`, and expose that visibility in trace metadata.
+- PromptPlan labeled sub-recall now degrades cleanly on per-label empty recall-query overrides: an override that renders to `""` records `disabled_reason="empty_rendered_recall_query"` in prompt/readout metadata instead of failing `Query(text=...)` validation.
 - Integration smoke coverage for real LLM / embedding baselines exists in `tests/test_smoke_real_model_modules.py` and can exercise the main LLM-backed baseline families when runtime credentials are configured.
 - Embedding first-stage downshift is now implemented: ordinary record-level text embeddings can be declared per layer in `StoreLayerSpec.settings["embedding"]`, and `MemoryStore.append()` / `replace_record()` now auto-generate or refresh `record.embedding` for those layers.
 - The implemented policy boundary is intentionally narrow: stage 1 only handles `mode="text"` with refresh on semantic text change. Entity embeddings, note-payload-derived embeddings, query embeddings, and the broader `UNIT_EMBEDDING_CONTRACT` redesign are still deliberately left in their existing specialized paths.
@@ -98,8 +99,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - The clean mapping is now clearer:
   - note construction -> multiple `LLMRepresentation` fields (`context` / `keywords` / `tags` / `category` / `attributes`) + `ConfigurableEmbeddingRepresentation`
   - append note into graph memory -> `GraphAppendOrganization`
-  - link generation -> `LinkStrengtheningEvolution`
-  - neighbor memory rewrite -> `NeighborContextUpdateEvolution`
+  - post-write note evolution -> bounded `LLMFunctionCallEvolution` with A-MEM-specific tools
   - retrieval -> `VectorGraphSeedAndExpandRetrieval`
 - The main remaining work is example-level wiring and prompt/readout shaping, not baseline-family coverage.
 - That example-level wiring now exists in `memprimitive/example/classics/amem_memory.py`, so A-MEM should no longer be treated only as a capability hypothesis. The current status is: executable mechanism-level reconstruction exists; remaining gaps are fidelity/prompt tuning questions rather than missing framework coverage.
@@ -108,6 +108,17 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Important paper/repo mismatch: the paper text says evolved neighbors may update context, keywords, and tags, but the released repos mostly implement context/tag updates only. The current framework matches the repo-side behavior more naturally; keyword rewrite should be treated as optional fidelity stretch, not a blocker.
 - Retrieval alignment is also better with the repo interpretation: seed by embedding similarity, then expand by stored links / neighbors. Query keyword generation can be expressed with existing retrieval-query rewrite machinery rather than a new primitive.
 - A new concrete design direction is now documented in `AMEM_FUNCTION_CALL_EVOLUTION_CONTRACT.md`: the current two-step A-MEM evolution can be collapsed into one `LLMFunctionCallEvolution` if execution uses a hard visible-record boundary plus two A-MEM-specific tools, one for current-record link strengthening and one for neighbor-only context/tag updates. This path is now the preferred repo-consistent refactor target.
+- That refactor target is now implemented in the executable A-MEM path. `memprimitive/example/classics/amem_memory.py` now uses one bounded `LLMFunctionCallEvolution` with two A-MEM-specific tools:
+  - `AMEM_STRENGTHEN_LINKS` for current-note `graph.links` plus optional current-note `tags`
+  - `AMEM_UPDATE_NEIGHBOR` for neighbor-note `context` / `tags` only
+- The old standalone A-MEM evolution baselines have now been removed from the baseline surface, tests, and docs so the function-call path is the only supported implementation route.
+- Important repo-consistency correction: A-MEM evolution now treats field mutation asymmetrically, matching the released implementation rather than the older baseline rewrite path:
+  - new/current note: update `links`, `tags`
+  - neighbor note: update `context`, `tags`
+  - neighbor evolution no longer rewrites `content`, `keywords`, or embeddings
+- The A-MEM function-call evolution visible-set path is now back on embedding-similarity recall rather than a temporary recency fallback. Prompt-plan sub-recall can now pass a full `Query` object (including embedding) into child retrieval pipelines, so evolution-side candidate visibility can reuse the current note embedding directly.
+- Backward-compatibility is preserved at the helper boundary: prompt/sub-recall utilities now accept full `Query` objects for embedding-aware child retrieval, but the old `query_text=...` call shape still works unchanged for existing callers such as mid-decoding memory-read tools.
+- `LLMFunctionCallEvolution` itself is also now usable for this ingest-time/current-record pattern because it can select evolution targets from aligned `packet.units` / `packet.placements` / `packet.decisions`, not only from `decisions_store` or whole-layer scans.
 
 ### Reflexion
 

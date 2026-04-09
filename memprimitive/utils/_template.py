@@ -18,7 +18,7 @@ PromptTemplate = str
 TemplateMode = Literal["simple", "structured"]
 MetadataMode = Literal["prompt", "readout"]
 ContextBuilder = Callable[[Packet, MemoryStore], dict[str, Any]]
-RecallQueryBuilder = Callable[[Packet, MemoryStore, dict[str, Any]], str]
+RecallQueryBuilder = Callable[[Packet, MemoryStore, dict[str, Any]], str | Query]
 PromptPlanContextPostprocessor = Callable[[dict[str, Any], dict[str, Any], MemoryStore], dict[str, Any] | None]
 PRIMARY_RECALL_LABEL = "__primary__"
 
@@ -475,17 +475,25 @@ def resolve_single_recalled_prompt(
         return "", metadata, store
 
     metadata["enabled"] = True
-    recall_query = render_recall_query(recall_query_builder, packet, store, context)
-    metadata["rendered_recall_query"] = recall_query
-    metadata["rendered_recall_query_preview"] = recall_query[:200]
-    if not recall_query.strip():
+    recall_query_value = render_recall_query(recall_query_builder, packet, store, context)
+    if isinstance(recall_query_value, Query):
+        recall_query_text = recall_query_value.text
+        recall_query_embedding_dim = len(recall_query_value.embedding or [])
+    else:
+        recall_query_text = str(recall_query_value or "")
+        recall_query_embedding_dim = 0
+    metadata["rendered_recall_query"] = recall_query_text
+    metadata["rendered_recall_query_preview"] = recall_query_text[:200]
+    metadata["rendered_recall_query_embedding_dim"] = recall_query_embedding_dim
+    if not recall_query_text.strip():
         metadata["disabled_reason"] = "empty_rendered_recall_query"
         return "", metadata, store
+    recall_query = recall_query_value if isinstance(recall_query_value, Query) else Query(text=recall_query_text)
 
     readout, updated_store = run_prompt_plan_sub_recall(
         recall_plan,
         store=store,
-        query_text=recall_query,
+        query=recall_query,
         retrieve_pipeline=sub_recall_pipeline,
     )
     recalled_prompt = readout.text.strip() if readout.text else ""
@@ -574,20 +582,32 @@ def render_recall_query(
     packet: Packet,
     store: MemoryStore,
     context: dict[str, Any],
-) -> str:
-    return str(recall_query_builder(packet, store, context) or "")
+) -> str | Query:
+    value = recall_query_builder(packet, store, context)
+    if isinstance(value, Query):
+        return value
+    return str(value or "")
 
 
 def run_child_recall_pipeline(
     *,
     store: MemoryStore,
-    query_text: str,
+    query: Query | None = None,
+    query_text: str | None = None,
     retrieve_pipeline,
     fallback_readout_plan: PromptPlan | str | None = None,
 ) -> tuple[Readout, MemoryStore]:
     from ..pipeline import _iter_slot_modules
 
-    packet = Packet(query=Query(text=query_text), trace={"sub_recall_started": True})
+    if query is None:
+        normalized_query_text = str(query_text or "")
+        query = Query(text=normalized_query_text)
+    elif query_text is not None:
+        normalized_query_text = str(query_text)
+        if normalized_query_text != query.text:
+            raise ValueError("run_child_recall_pipeline received conflicting query and query_text values.")
+
+    packet = Packet(query=query, trace={"sub_recall_started": True})
     current_store = store
     for module in _iter_slot_modules(retrieve_pipeline.retrieval):
         packet, current_store = module.run(packet, current_store)
@@ -622,11 +642,13 @@ def run_prompt_plan_sub_recall(
     plan: PromptPlan,
     *,
     store: MemoryStore,
-    query_text: str,
+    query: Query | None = None,
+    query_text: str | None = None,
     retrieve_pipeline,
 ) -> tuple[Readout, MemoryStore]:
     return run_child_recall_pipeline(
         store=store,
+        query=query,
         query_text=query_text,
         retrieve_pipeline=retrieve_pipeline,
         fallback_readout_plan=plan,

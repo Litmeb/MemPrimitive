@@ -341,7 +341,7 @@
 - 要补的能力是什么
   - 基于当前 observation 提取出的新 triplets，对相关旧 semantic edges 做冲突检测、过时事实识别与删除，然后把 semantic memory 修订到最新状态。
 - 为什么现有模块不够
-  - 当前 `GraphLinkEvolution` / `GraphNeighborAppendEvolution` / `NeighborContextUpdateEvolution` 都偏向新增或改写上下文，不覆盖 AriGraph 关键的“删除式事实修订”。
+  - 当前 `GraphLinkEvolution` / `GraphNeighborAppendEvolution` 都偏向新增或改写上下文，不覆盖 AriGraph 关键的“删除式事实修订”。
 - 这是为 AriGraph 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。任何持续交互、世界状态会变化的 graph memory 都可能需要局部事实修订，而不只是 append。
 
@@ -389,7 +389,6 @@
   - 对新进入的关系 triplets 检测与既有图关系的冲突，并把过时关系标记为失效而不是简单追加或硬删除。
 - 为什么现有模块不够
   - `GraphLinkEvolution` 偏向新增链接；
-  - `NeighborContextUpdateEvolution` 偏向重写邻居上下文；
   - 当前没有一个明确表达“冲突关系失效化 / temporal invalidation”的图维护 primitive。
 - 这是为 Mem0 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。凡是需要保留时间一致性或历史状态的图记忆系统都可能需要这种 invalidation 机制。

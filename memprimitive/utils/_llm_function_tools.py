@@ -26,6 +26,8 @@ class WriteToolSpec:
     description: str
     parameters_json_schema: dict[str, Any]
     executor: Callable[["WriteToolCallContext", dict[str, Any]], "WriteToolResult"]
+    requires_contracts: tuple[str, ...] = ()
+    produces_contracts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_name = str(self.name).strip()
@@ -43,6 +45,7 @@ class WriteToolCallContext:
     store: MemoryStore
     module_slot: Literal["organization", "memory_evolution"]
     default_target_layer: str | None
+    selected_records: list[MemoryRecord]
     visible_records: list[MemoryRecord]
 
 
@@ -365,7 +368,14 @@ def _accumulate_effect_ids(state: ToolExecutionState, effects: list[dict[str, An
             continue
         if action == "add" and record_id not in state.written_record_ids:
             state.written_record_ids.append(record_id)
-        elif action in {"update", "graph_add_link", "graph_update_link", "graph_delete_link"} and record_id not in state.updated_record_ids:
+        elif action in {
+            "update",
+            "graph_add_link",
+            "graph_update_link",
+            "graph_delete_link",
+            "amem_strengthen_links",
+            "amem_update_neighbor",
+        } and record_id not in state.updated_record_ids:
             state.updated_record_ids.append(record_id)
         elif action == "delete" and record_id not in state.deleted_record_ids:
             state.deleted_record_ids.append(record_id)
@@ -702,8 +712,19 @@ def write_tool_specs_require_graph_contracts(specs: tuple[WriteToolSpec, ...]) -
             "GRAPH_UPDATE_LINK",
             "GRAPH_DELETE_LINK",
         }
+        or any("graph" in str(contract) for contract in spec.requires_contracts)
+        or any("graph" in str(contract) for contract in spec.produces_contracts)
         for spec in specs
     )
+
+
+def aggregate_write_tool_contracts(specs: tuple[WriteToolSpec, ...]) -> tuple[frozenset[str], frozenset[str]]:
+    required: set[str] = set()
+    produced: set[str] = set()
+    for spec in specs:
+        required.update(str(contract).strip() for contract in spec.requires_contracts if str(contract).strip())
+        produced.update(str(contract).strip() for contract in spec.produces_contracts if str(contract).strip())
+    return frozenset(required), frozenset(produced)
 
 
 def _require_graph_layer(store: MemoryStore, layer: str, *, tool_name: str) -> None:

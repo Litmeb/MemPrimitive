@@ -31,10 +31,8 @@ from memprimitive.baselines import (
     HierarchicalEvolution,
     LayerAwareRetrieval,
     LLMJudgeTrigger,
-    LinkStrengtheningEvolution,
     LLMRepresentation,
     NeverTrigger,
-    NeighborContextUpdateEvolution,
     PassThroughUnitFormation,
     PromptContextReadout,
     RecencyRetrieval,
@@ -1014,14 +1012,6 @@ _OBVIOUSLY_INVALID_SINGLE_SLOT_PIPELINES = (
     pytest.param(
         {"memory_evolution": GraphNeighborContextTraceEvolution(target_layer="knowledge_graph")},
         id="graph-neighbor-context-without-graph-topology",
-    ),
-    pytest.param(
-        {"memory_evolution": LinkStrengtheningEvolution(target_layer="knowledge_graph")},
-        id="link-strengthening-without-note-records-or-graph-vector-topology",
-    ),
-    pytest.param(
-        {"memory_evolution": NeighborContextUpdateEvolution(target_layer="knowledge_graph")},
-        id="neighbor-context-update-without-linked-note-records",
     ),
     pytest.param(
         {"retrieval": GraphNeighborRetrieval(layer="knowledge_graph")},

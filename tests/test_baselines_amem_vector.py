@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 import pytest
 
 from memprimitive.core import (
@@ -19,6 +20,7 @@ from baselines_test_helpers import (
     _FakeAMEMRuntime,
     _WrapperShapeAMEMRuntime,
     _graph_vector_store,
+    _invoke_runtime_tool,
     _seed_layer,
 )
 
@@ -370,9 +372,12 @@ def test_vector_graph_seed_and_expand_retrieval_system_prompt_template_supports_
     assert prompt_trace["recall_prompt"]["rendered_recall_query"] == "context for Alice"
 
 
-def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_amem_function_call_tools_write_back_repo_consistent_fields_without_reembedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from memprimitive.utils import _runtime
-    from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
+    from memprimitive.utils._amem_family import build_amem_evolution_tools
+    from memprimitive.utils._llm_function_tools import ToolExecutionState, WriteToolCallContext, build_runtime_tools
 
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
     store = _graph_vector_store()
@@ -429,25 +434,63 @@ def test_link_strengthening_and_neighbor_update_write_back_graph_and_note_metada
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
         decisions=[True],
     )
+    current = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-2")
+    neighbor = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-1")
+    tools = tuple(build_amem_evolution_tools(target_layer="knowledge_graph", note_namespace="amem"))
+    state = ToolExecutionState()
+    context = WriteToolCallContext(
+        packet=packet,
+        store=store,
+        module_slot="memory_evolution",
+        default_target_layer="knowledge_graph",
+        selected_records=[current],
+        visible_records=[current, neighbor],
+    )
+    runtime_tools = build_runtime_tools(
+        tools,
+        context=context,
+        state=state,
+        strict_tools=True,
+    )
 
-    packet, store = LinkStrengtheningEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
-    packet, store = NeighborContextUpdateEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
+    _invoke_runtime_tool(
+        runtime_tools[0],
+        {
+            "record_id": "rec-2",
+            "neighbor_record_ids": ["rec-1", "rec-1"],
+            "tags": ["focus", "tea", "bridge", "focus"],
+        },
+    )
+    _invoke_runtime_tool(
+        runtime_tools[1],
+        {
+            "record_id": "rec-1",
+            "context": "Alice's tea habit is now understood as a focus-supporting routine.",
+            "tags": ["preference", "habit", "focus", "habit"],
+        },
+    )
 
     current = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-2")
     neighbor = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-1")
     assert current.metadata["graph"]["links"] == ["rec-1"]
+    assert current.metadata["amem"]["tags"] == ["focus", "tea", "bridge"]
+    assert current.metadata["amem"]["content"] == "Tea routines improve focus."
+    assert current.metadata["amem"]["keywords"] == ["tea", "focus", "routine"]
+    assert current.embedding == second_embedding
     assert neighbor.metadata["amem"]["context"] == "Alice's tea habit is now understood as a focus-supporting routine."
     assert neighbor.metadata["amem"]["tags"] == ["preference", "habit", "focus"]
+    assert neighbor.metadata["amem"]["content"] == "Alice likes tea."
+    assert neighbor.metadata["amem"]["keywords"] == ["alice", "tea", "routine"]
+    assert neighbor.metadata["graph"]["links"] == []
+    assert neighbor.embedding == first_embedding
+    assert [effect["action"] for effect in state.effects] == ["amem_strengthen_links", "amem_update_neighbor"]
 
 
-def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
-    from memprimitive.utils import _runtime
-    from memprimitive.baselines import LinkStrengtheningEvolution, NeighborContextUpdateEvolution
+def test_amem_function_call_tools_enforce_current_and_visible_record_boundaries() -> None:
+    from memprimitive.utils._amem_family import build_amem_evolution_tools
+    from memprimitive.utils._llm_function_tools import ToolExecutionState, WriteToolCallContext, build_runtime_tools
 
-    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _WrapperShapeAMEMRuntime())
     store = _graph_vector_store()
-    first_embedding = _runtime._DEFAULT_RUNTIME.embed("content: Alice likes tea.")
-    second_embedding = _runtime._DEFAULT_RUNTIME.embed("content: Tea routines improve focus.")
     store.append(
         MemoryRecord(
             record_id="rec-1",
@@ -455,7 +498,6 @@ def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.Monk
             layer="knowledge_graph",
             text="Alice likes tea.",
             timestamp="2026-03-27T00:00:00+00:00",
-            embedding=first_embedding,
             metadata={
                 "amem": {
                     "content": "Alice likes tea.",
@@ -478,7 +520,6 @@ def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.Monk
             layer="knowledge_graph",
             text="Tea routines improve focus.",
             timestamp="2026-03-27T00:00:01+00:00",
-            embedding=second_embedding,
             metadata={
                 "amem": {
                     "content": "Tea routines improve focus.",
@@ -494,18 +535,113 @@ def test_amem_evolution_repairs_list_shaped_llm_outputs(monkeypatch: pytest.Monk
             },
         )
     )
+    store.append(
+        MemoryRecord(
+            record_id="rec-3",
+            unit_id="unit-3",
+            layer="knowledge_graph",
+            text="Hidden neighbor.",
+            timestamp="2026-03-27T00:00:02+00:00",
+            metadata={
+                "amem": {
+                    "content": "Hidden neighbor.",
+                    "note_text": "Hidden neighbor.",
+                    "context": "Hidden context.",
+                    "keywords": ["hidden"],
+                    "tags": ["hidden"],
+                    "category": "insight",
+                    "attributes": {},
+                },
+                "graph": {"entities": ["Hidden"], "links": []},
+            },
+        )
+    )
     packet = Packet(
-        units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2", embedding=second_embedding)],
+        units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2")],
         placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
         decisions=[True],
     )
-
-    packet, store = LinkStrengtheningEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
-    packet, store = NeighborContextUpdateEvolution(target_layer="knowledge_graph", note_namespace="amem").run(packet, store)
-
     current = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-2")
     neighbor = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-1")
-    assert current.metadata["graph"]["links"] == ["rec-1"]
-    assert neighbor.metadata["amem"]["context"] == "Alice's tea habit is now understood as a focus-supporting routine."
+    runtime_tools = build_runtime_tools(
+        tuple(build_amem_evolution_tools(target_layer="knowledge_graph", note_namespace="amem")),
+        context=WriteToolCallContext(
+            packet=packet,
+            store=store,
+            module_slot="memory_evolution",
+            default_target_layer="knowledge_graph",
+            selected_records=[current],
+            visible_records=[current, neighbor],
+        ),
+        state=ToolExecutionState(),
+        strict_tools=True,
+    )
+
+    with pytest.raises(ValueError, match="must not include the current record_id"):
+        _invoke_runtime_tool(
+            runtime_tools[0],
+            {"record_id": "rec-2", "neighbor_record_ids": ["rec-2"]},
+        )
+    with pytest.raises(KeyError, match="Record 'rec-3' is not in the current evolution candidate set."):
+        _invoke_runtime_tool(
+            runtime_tools[0],
+            {"record_id": "rec-2", "neighbor_record_ids": ["rec-3"]},
+        )
+    with pytest.raises(ValueError, match="cannot modify the current selected record"):
+        _invoke_runtime_tool(runtime_tools[1], {"record_id": "rec-2", "context": "bad"})
+
+    _invoke_runtime_tool(runtime_tools[1], {"record_id": "rec-1", "tags": ["preference", "habit", "focus"]})
+    neighbor = next(record for record in store.iter_records("knowledge_graph") if record.record_id == "rec-1")
+    assert neighbor.metadata["amem"]["context"] == "Alice's tea habit supports her daily routine."
     assert neighbor.metadata["amem"]["tags"] == ["preference", "habit", "focus"]
+
+
+def test_llm_function_call_evolution_selects_current_amem_record_from_packet_decisions() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+    from memprimitive.utils._amem_family import build_amem_evolution_tools
+
+    store = _graph_vector_store()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes tea.",
+            timestamp="2026-03-27T00:00:00+00:00",
+            metadata={"amem": {"content": "Alice likes tea.", "note_text": "Alice likes tea.", "context": "Tea habit.", "keywords": ["alice", "tea"], "tags": ["habit"], "category": "profile", "attributes": {}}, "graph": {"links": []}},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="knowledge_graph",
+            text="Tea routines improve focus.",
+            timestamp="2026-03-27T00:00:01+00:00",
+            metadata={"amem": {"content": "Tea routines improve focus.", "note_text": "Tea routines improve focus.", "context": "Focus note.", "keywords": ["tea", "focus"], "tags": ["focus"], "category": "insight", "attributes": {}}, "graph": {"links": []}},
+        )
+    )
+    packet = Packet(
+        units=[MemoryUnit(text="Tea routines improve focus.", unit_id="unit-2")],
+        placements=[Placement(unit_id="unit-2", target_layer="knowledge_graph")],
+        decisions=[True],
+    )
+    module = LLMFunctionCallEvolution(
+        prompt="Update {{ selected_records.0.record_id }}",
+        tools=build_amem_evolution_tools(target_layer="knowledge_graph", note_namespace="amem"),
+        source_layer="knowledge_graph",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert rendered_prompt == "Update rec-2"
+        assert context["selected_record_ids"] == ["rec-2"]
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "neighbor_record_ids": []})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions"
+    assert packet_out.trace["memory_evolution"]["selected_record_ids"] == ["rec-2"]
+    assert packet_out.trace["memory_evolution"]["updated_record_ids"] == ["rec-2"]
 

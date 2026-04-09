@@ -14,8 +14,7 @@ Coverage map (one pass per public module that calls into LLM or embedding):
 - **organization**: ``GraphDeduplicationAppendOrganization``,
   ``GraphEntityDeduplicationAppendOrganization``, ``LLMFunctionCallOrganization``
 - **trigger**: ``LLMJudgeTrigger``
-- **memory_evolution**: ``LinkStrengtheningEvolution``,
-  ``NeighborContextUpdateEvolution``, ``LLMFunctionCallEvolution``,
+- **memory_evolution**: ``LLMFunctionCallEvolution``,
   ``HierarchicalEvolution`` (generate), ``HierarchicalOrganization`` (generate)
 - **readout**: ``MidDecodingMemoryReadout``
 """
@@ -388,57 +387,6 @@ def test_smoke_llm_judge_trigger(require_real_runtime: None) -> None:
     out, _ = trigger.run(packet, MemoryStore())
     assert out.trace["write_trigger"]["module"] == "llm_judge_write_trigger"
     assert out.decisions == [True]
-
-
-@pytest.mark.integration
-def test_smoke_link_strengthening_evolution(require_real_runtime: None) -> None:
-    from memprimitive.baselines import LinkStrengtheningEvolution
-    from memprimitive.utils._runtime import get_runtime
-
-    rt = get_runtime()
-    emb_x = list(rt.embed("link smoke current note"))
-    emb_y = list(rt.embed("link smoke neighbor note"))
-    store = _graph_vector_store()
-    store.append(_note_record(record_id="rec-cur", unit_id="u-smoke", text="current note", embedding=emb_x))
-    store.append(_note_record(record_id="rec-nb", unit_id="u-other", text="neighbor note", embedding=emb_y))
-
-    unit = MemoryUnit(text="current note", unit_id="u-smoke")
-    packet = Packet(
-        units=[unit],
-        placements=[Placement(unit_id="u-smoke", target_layer="knowledge_graph")],
-        decisions=[True],
-    )
-    out, _ = LinkStrengtheningEvolution(
-        target_layer="knowledge_graph",
-        candidate_k=2,
-        max_links_per_record=2,
-    ).run(packet, store)
-    assert out.trace["memory_evolution"]["module"] == "link_strengthening_evolution"
-
-
-@pytest.mark.integration
-def test_smoke_neighbor_context_update_evolution(require_real_runtime: None) -> None:
-    from memprimitive.baselines import NeighborContextUpdateEvolution
-    from memprimitive.utils._runtime import get_runtime
-
-    rt = get_runtime()
-    emb_a = list(rt.embed("neighbor ctx smoke a"))
-    emb_b = list(rt.embed("neighbor ctx smoke b"))
-    store = _graph_vector_store()
-    r_a = _note_record(record_id="rec-a", unit_id="u-a", text="note a", embedding=emb_a)
-    r_b = _note_record(record_id="rec-b", unit_id="u-b", text="note b", embedding=emb_b)
-    store.append(r_a)
-    store.append(r_b)
-    store.add_graph_links("knowledge_graph", "rec-a", ["rec-b"])
-
-    unit = MemoryUnit(text="note a", unit_id="u-a")
-    packet = Packet(
-        units=[unit],
-        placements=[Placement(unit_id="u-a", target_layer="knowledge_graph")],
-        decisions=[True],
-    )
-    out, _ = NeighborContextUpdateEvolution(target_layer="knowledge_graph", candidate_k=2).run(packet, store)
-    assert out.trace["memory_evolution"]["module"] == "neighbor_context_update_evolution"
 
 
 @pytest.mark.integration

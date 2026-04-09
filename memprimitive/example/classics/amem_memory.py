@@ -10,8 +10,8 @@ For A-MEM, the core loop we want to preserve is:
 1. turn a new interaction into one enriched memory note,
 2. embed that note for similarity-based retrieval,
 3. append it into a graph-capable note store,
-4. use nearby notes to strengthen semantic links,
-5. optionally rewrite neighbor note context/tags, and
+4. expose the current note plus nearby candidates to one bounded function-call controller,
+5. strengthen current-note links and optionally rewrite neighbor context/tags via A-MEM-specific tools, and
 6. answer future queries by embedding-similarity top-k retrieval.
 
 That loop is exactly the level of fidelity this file is trying to demonstrate.
@@ -41,13 +41,13 @@ from memprimitive.baselines import (
     ConfigurableEmbeddingRepresentation,
     EmbeddingSimilarityRetrieval,
     GraphAppendOrganization,
+    LLMFunctionCallEvolution,
     LLMRepresentation,
-    LinkStrengtheningEvolution,
-    NeighborContextUpdateEvolution,
     NoteRenderReadout,
     PassThroughUnitFormation,
 )
-from memprimitive.utils._template import text_prompt
+from memprimitive.utils._amem_family import build_amem_evolution_tools
+from memprimitive.utils._template import PRIMARY_RECALL_LABEL, structured_prompt, text_prompt
 from memprimitive.utils._runtime import get_runtime
 
 
@@ -116,16 +116,83 @@ def build_amem_memory_system(
         write_trigger=AlwaysTrigger(),
         organization=GraphAppendOrganization(target_layer="knowledge_graph"),
         evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
-        memory_evolution=(
-            LinkStrengtheningEvolution(
+        memory_evolution=LLMFunctionCallEvolution(
+            source_layer="knowledge_graph",
+            target_layer="knowledge_graph",
+            tools=build_amem_evolution_tools(
                 target_layer="knowledge_graph",
-                candidate_k=candidate_k,
                 note_namespace=note_namespace,
             ),
-            NeighborContextUpdateEvolution(
-                target_layer="knowledge_graph",
-                candidate_k=candidate_k,
-                note_namespace=note_namespace,
+            prompt=structured_prompt(
+                {
+                    "blocks": [
+                        {
+                            "id": "task",
+                            "title": "Task",
+                            "template": (
+                                "You are the A-MEM evolution controller for one newly written note.\n"
+                                "Only tool calls may change memory.\n"
+                                "The current note is the selected record.\n"
+                                "Use AMEM_STRENGTHEN_LINKS zero or one time for the current note.\n"
+                                "Use AMEM_UPDATE_NEIGHBOR zero or more times for visible neighbors that need reinterpretation.\n"
+                                "For A-MEM repo consistency:\n"
+                                "- current note may update links and tags\n"
+                                "- neighbor notes may update only context and tags\n"
+                                "- never change content or keywords on neighbors\n"
+                                "- if no update is needed, make no tool call"
+                            ),
+                        },
+                        {
+                            "id": "current_note",
+                            "title": "Current Note",
+                            "template": (
+                                "record_id={{ selected_records.0.record_id }}\n"
+                                "text={{ selected_records.0.text }}\n"
+                                "context={{ selected_records.0.metadata.representation.context }}\n"
+                                "tags={{ selected_records.0.metadata.representation.tags }}"
+                            ),
+                        },
+                        {
+                            "id": "retrieved_candidates",
+                            "title": "Retrieved Candidate Notes",
+                            "template": "{{ recalled_prompt }}",
+                        },
+                        {
+                            "id": "visible_records",
+                            "title": "Visible Records",
+                            "condition": "visible_records | length",
+                            "repeat_over": "visible_records",
+                            "item_template": (
+                                "- record_id={{ item.record_id }} | text={{ item.text }} | "
+                                "context={{ item.metadata.representation.context }} | "
+                                "tags={{ item.metadata.representation.tags }} | links={{ item.metadata.graph.links }}"
+                            ),
+                            "separator": "\n",
+                        },
+                        {
+                            "id": "available_tools",
+                            "title": "Available Tools",
+                            "repeat_over": "tools",
+                            "item_template": "- {{ item.name }}",
+                            "separator": "\n",
+                        },
+                    ]
+                },
+                recall_plan=text_prompt("{{ recalled_prompt }}"),
+                sub_recall_pipeline=MemoryPipeline(
+                    retrieval=EmbeddingSimilarityRetrieval(top_k=candidate_k + 1, layer="knowledge_graph"),
+                    readout=NoteRenderReadout(note_namespace=note_namespace),
+                    store=store,
+                ),
+                recall_query_builder=(
+                    lambda packet, current_store, context: Query(
+                        text=str(context["selected_records"][0]["text"]),
+                        embedding=list(context["selected_records"][0].get("embedding", [])),
+                    )
+                    if context.get("selected_records")
+                    else Query(text="")
+                ),
+                visible_record_recall_labels=(PRIMARY_RECALL_LABEL,),
             ),
         ),
         store=store,
