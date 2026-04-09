@@ -124,16 +124,16 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 - Paper + upstream repo review now suggests the current framework can reproduce the Reflexion memory module without adding new primitives, as long as scope stays limited to memory and prompt-context injection rather than the full agent loop.
 - The easiest alignment target is the released repo, which implements memory more simply than the paper's broad framing: failed trials generate short natural-language reflections, those reflections are stored in an episodic text buffer, and later trials prepend either the last trial, the reflection buffer, or both.
-- The current framework already has a near-direct slot mapping:
-  - ephemeral trial routing without normal persistence -> `PlacementWithoutAppendOrganization`
-  - failure-conditioned reflection write -> `ReflectionGenerationEvolution`
+- The implementation path is now more general than the earlier dedicated-helper sketch:
+  - raw failed-trial persistence -> `AppendOrganization` into `trial_buffer`
+  - reflection extraction from newly written failed trajectories -> `HierarchicalEvolution(extract_mode="generate", selection_mode="latest_active_units")`
   - bounded episodic reflection buffer read -> `BufferRetrieval`
   - prompt construction for `base` / `last_trial` / `reflexion` / `last_trial_and_reflexion` -> `PromptContextReadout`
+- `HierarchicalEvolution` now has two generic extensions that make this clean:
+  - `record_text_field` lets generated payloads keep structured fields while using one field such as `reflection` as the stored record text
+  - `retention_size` prunes the target layer to a bounded recency window, matching the repo-style small reflection buffer
 - Important paper/repo mismatch: the paper describes a generic verbal reinforcement framework with episodic memory, but the public repo implementations are mostly plain append-only text memory plus prompt templating, sometimes with a recent-3 truncation rule. The current framework matches this repo-side interpretation better than a more ambitious generalized-learning reading.
-- Remaining work for a faithful reconstruction is mainly example-level orchestration:
-  - define the failure / feedback payload passed in `Observation.metadata`
-  - decide whether to keep the current trial trace outside the store or persist it in a separate trial layer
-  - wire the downstream agent prompt to consume `readout.text`
+- The memory-only orchestration now exists in `memprimitive/example/classics/reflexion_memory.py` and is covered by deterministic tests in `tests/test_classics_reflexion.py`.
 - New primitive work is only needed if future goals expand beyond the repo-consistent Reflexion memory slice, such as trial-indexed multi-task memory partitioning, richer evaluator provenance, or tighter coupling between evaluation outcome and recall selection.
 
 ### Other Boundary Papers

@@ -597,6 +597,52 @@ def test_hierarchical_evolution_generate_mode_supports_recalled_prompt_from_curr
     assert store.iter_records("semantic")[0].text == "custom::summary::sess-1::2"
 
 
+def test_hierarchical_evolution_generate_mode_can_select_latest_active_units_and_prune_target_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memprimitive.baselines import HierarchicalEvolution
+    from memprimitive.utils import _runtime
+
+    fake_runtime = _FakeHierarchicalRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [StoreLayerSpec(name="default"), StoreLayerSpec(name="semantic", theme="semantic")]
+        )
+    )
+    for idx in range(1, 4):
+        packet, store = _stored_pipeline_packet(f"incoming note {idx}", store)
+        packet = Packet(
+            units=packet.units,
+            placements=packet.placements,
+            decisions=[True],
+            trace=packet.trace,
+        )
+        packet_out, store = HierarchicalEvolution(
+            source_layer="default",
+            extract_mode="generate",
+            extract_fields=("summary", "doc_id"),
+            record_text_field="summary",
+            target_layer="semantic",
+            selection_mode="latest_active_units",
+            retention_size=2,
+        ).run(packet, store)
+
+    assert packet_out.trace["memory_evolution"]["decision_source"] == "latest_active_units"
+    assert packet_out.trace["memory_evolution"]["record_text_field"] == "summary"
+    assert packet_out.trace["memory_evolution"]["retention_size"] == 2
+    assert packet_out.trace["memory_evolution"]["pruned_record_ids"] == ["rec-2"]
+    assert [record.text for record in store.iter_records("semantic")] == [
+        "generated::summary::all::1",
+        "generated::summary::all::1",
+    ]
+    assert [record.metadata["hierarchical"]["field_payload"]["doc_id"] for record in store.iter_records("semantic")] == [
+        "generated::doc_id::all::1",
+        "generated::doc_id::all::1",
+    ]
+
+
 def test_hierarchical_constructors_require_exactly_one_target_or_pipeline() -> None:
     from memprimitive.baselines import HierarchicalEvolution
     from memprimitive.pipeline import create_baseline_pipeline
