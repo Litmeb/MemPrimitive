@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
-from ..core import MemoryRecord, Observation
+from ..core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Packet
+from ..interfaces import TriggerModule
 from ..pipeline import MemoryPipeline
 from ._example_dialogue import (
     build_dialogue_pair_messages,
@@ -12,6 +13,7 @@ from ._example_dialogue import (
 )
 from ._llm_function_tools import WriteToolCallContext, WriteToolResult, WriteToolSpec
 from ._runtime import get_runtime
+from ._trace import copy_trace
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -21,6 +23,43 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     if left_norm == 0.0 or right_norm == 0.0:
         return 0.0
     return numerator / (left_norm * right_norm)
+
+
+class PromptRecallSelectionTrigger(TriggerModule):
+    """Use prompt-plan recall as the effective candidate selector for evolution."""
+
+    spec = ModuleSpec(
+        name="prompt_recall_selection_evolution_trigger",
+        slot="evolution_trigger",
+        input_requirements=("units", "placements"),
+        output_guarantees=("decisions", "decisions_store"),
+    )
+
+    def __init__(self, *, layer_names: tuple[str, ...]) -> None:
+        normalized = tuple(str(layer).strip() for layer in layer_names if str(layer).strip())
+        if not normalized:
+            raise ValueError("PromptRecallSelectionTrigger requires at least one non-empty layer name.")
+        self.layer_names = normalized
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        units = list(packet.units or [])
+        decisions_store = {
+            layer_name: {
+                "decision": True,
+                "record_ids": [],
+                "selector": {"kind": "prompt_recall_visible_only", "source": self.spec.name},
+            }
+            for layer_name in self.layer_names
+        }
+        trace = copy_trace(packet)
+        trace["evolution_trigger"] = {
+            "module": self.spec.name,
+            "layer_names": list(self.layer_names),
+            "decision_mode": "broadcast",
+            "decisions_store_layers": list(self.layer_names),
+            "decisions_store_counts": {layer_name: 0 for layer_name in self.layer_names},
+        }
+        return replace(packet, decisions=[True] * len(units), decisions_store=decisions_store, trace=trace), store
 
 
 def per_fact_profile_recall(

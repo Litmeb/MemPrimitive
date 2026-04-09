@@ -630,10 +630,14 @@ class TemplateReadout(ReadoutModule):
                 template=plan.template,
                 context_builder=plan.context_builder,
                 recall_plan=plan.recall_plan,
+                labeled_recall_plans=plan.labeled_recall_plans,
                 recall_query_builder=plan.recall_query_builder,
+                labeled_recall_query_builders=plan.labeled_recall_query_builders,
                 missing_value=self.missing_value,
                 metadata_mode="readout",
                 sub_recall_pipeline=plan.sub_recall_pipeline,
+                labeled_sub_recall_pipelines=plan.labeled_sub_recall_pipelines,
+                visible_record_recall_labels=plan.visible_record_recall_labels,
             )
         text, metadata, store = render_prompt_plan(
             plan,

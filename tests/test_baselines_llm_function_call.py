@@ -539,6 +539,55 @@ def test_llm_function_call_organization_graph_link_tool_rejects_non_graph_layer(
         module.run(packet, store)
 
 
+def test_llm_function_call_organization_records_prompt_recall_visible_scope() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMFunctionCallOrganization, PassThroughUnitFormation, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import structured_prompt, text_prompt
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="default"), StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "default", ["general note"])
+    _seed_layer(store, "profile", ["recalled profile"])
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="trigger recall-scoped update", source="notes")),
+        store,
+    )
+    packet = replace(packet, decisions=[True])
+    recall_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    module = LLMFunctionCallOrganization(
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {"id": "task", "title": "Task", "template": "Update the recalled profile memory if needed."},
+                    {"id": "recalled", "title": "Recalled", "template": "{{ candidate }}"},
+                ]
+            },
+            labeled_recall_plans={"candidate": text_prompt("{{ candidate }}")},
+            labeled_sub_recall_pipelines={"candidate": recall_pipeline},
+            labeled_recall_query_builders={"candidate": lambda packet, store, context: "profile lookup"},
+            visible_record_recall_labels=("candidate",),
+        ),
+        tools=["UPDATE"],
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert "recalled profile" in rendered_prompt
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "updated recalled profile"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    assert store.iter_records("profile")[0].text == "updated recalled profile"
+    per_unit = packet_out.trace["organization"]["per_unit"][0]
+    assert per_unit["retrieved_record_ids_by_label"] == {"candidate": ["rec-2"]}
+    assert per_unit["visible_record_ids_by_label"] == {"candidate": ["rec-2"]}
+    assert per_unit["visible_record_source"] == "store_plus_prompt_recall"
+
+
 def test_llm_function_call_evolution_graph_add_link_rejects_record_outside_selected_records() -> None:
     from memprimitive.baselines import LLMFunctionCallEvolution
 
@@ -582,6 +631,282 @@ def test_llm_function_call_evolution_graph_add_link_rejects_record_outside_selec
             Packet(decisions_store={"knowledge_graph": {"record_ids": ["rec-1"]}}),
             store,
         )
+
+
+def test_llm_function_call_evolution_update_allows_prompt_recalled_record_outside_selected_records() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMFunctionCallEvolution, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import structured_prompt, text_prompt
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="selected"), StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "selected", ["selected record"])
+    _seed_layer(store, "profile", ["recalled profile"])
+    recall_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    module = LLMFunctionCallEvolution(
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {"id": "task", "title": "Task", "template": "Use the recalled candidate when needed."},
+                    {"id": "candidate", "title": "Candidate", "template": "{{ candidate }}"},
+                ]
+            },
+            labeled_recall_plans={"candidate": text_prompt("{{ candidate }}")},
+            labeled_sub_recall_pipelines={"candidate": recall_pipeline},
+            labeled_recall_query_builders={"candidate": lambda packet, store, context: "profile recall"},
+            visible_record_recall_labels=("candidate",),
+        ),
+        tools=["UPDATE"],
+        source_layer="selected",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert "recalled profile" in rendered_prompt
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "updated via prompt recall"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(decisions_store={"selected": {"record_ids": ["rec-1"]}}), store)
+
+    assert store.iter_records("profile")[0].text == "updated via prompt recall"
+    assert packet_out.trace["memory_evolution"]["selected_record_ids"] == ["rec-1"]
+    assert packet_out.trace["memory_evolution"]["visible_record_ids"] == ["rec-1", "rec-2"]
+    assert packet_out.trace["memory_evolution"]["visible_record_source"] == "selected_records_plus_prompt_recall"
+
+
+def test_llm_function_call_evolution_delete_allows_prompt_recalled_record_outside_selected_records() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMFunctionCallEvolution, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import structured_prompt, text_prompt
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="selected"), StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "selected", ["selected record"])
+    _seed_layer(store, "profile", ["delete recalled profile"])
+    recall_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="profile"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    module = LLMFunctionCallEvolution(
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {"id": "task", "title": "Task", "template": "Delete the recalled candidate if needed."},
+                    {"id": "candidate", "title": "Candidate", "template": "{{ candidate }}"},
+                ]
+            },
+            labeled_recall_plans={"candidate": text_prompt("{{ candidate }}")},
+            labeled_sub_recall_pipelines={"candidate": recall_pipeline},
+            labeled_recall_query_builders={"candidate": lambda packet, store, context: "profile recall"},
+            visible_record_recall_labels=("candidate",),
+        ),
+        tools=["DELETE"],
+        source_layer="selected",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        assert "delete recalled profile" in rendered_prompt
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "reason": "prompt recalled candidate"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(decisions_store={"selected": {"record_ids": ["rec-1"]}}), store)
+
+    assert store.iter_records("profile") == []
+    assert packet_out.trace["memory_evolution"]["deleted_record_ids"] == ["rec-2"]
+
+
+def test_llm_function_call_evolution_prompt_recall_default_visibility_includes_primary_and_labeled_branches() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMFunctionCallEvolution, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import PRIMARY_RECALL_LABEL, structured_prompt, text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="profile"),
+                StoreLayerSpec(name="primary_layer"),
+                StoreLayerSpec(name="alpha_layer"),
+                StoreLayerSpec(name="beta_layer"),
+            ]
+        )
+    )
+    _seed_layer(store, "primary_layer", ["primary visible"])
+    _seed_layer(store, "alpha_layer", ["alpha visible"])
+    _seed_layer(store, "beta_layer", ["beta visible"])
+    primary_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="primary_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    alpha_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="alpha_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    beta_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="beta_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    module = LLMFunctionCallEvolution(
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {"id": "task", "title": "Task", "template": "All recalled branches should be visible."},
+                    {"id": "primary", "title": "Primary", "template": "{{ recalled_prompt }}"},
+                    {"id": "alpha", "title": "Alpha", "template": "{{ alpha }}"},
+                    {"id": "beta", "title": "Beta", "template": "{{ beta }}"},
+                ]
+            },
+            recall_plan=text_prompt("{{ recalled_prompt }}"),
+            recall_query_builder=lambda packet, store, context: "primary",
+            sub_recall_pipeline=primary_pipeline,
+            labeled_recall_plans={"alpha": text_prompt("{{ alpha }}"), "beta": text_prompt("{{ beta }}")},
+            labeled_sub_recall_pipelines={"alpha": alpha_pipeline, "beta": beta_pipeline},
+            labeled_recall_query_builders={
+                "alpha": lambda packet, store, context: "alpha",
+                "beta": lambda packet, store, context: "beta",
+            },
+        ),
+        tools=["UPDATE"],
+        source_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "alpha updated"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(decisions_store={"profile": {"record_ids": []}}), store)
+
+    assert store.iter_records("alpha_layer")[0].text == "alpha updated"
+    assert packet_out.trace["memory_evolution"]["visible_record_ids"] == ["rec-1", "rec-2", "rec-3"]
+    assert packet_out.trace["memory_evolution"]["prompt_trace"]["retrieved_record_ids_by_label"] == {
+        PRIMARY_RECALL_LABEL: ["rec-1"],
+        "alpha": ["rec-2"],
+        "beta": ["rec-3"],
+    }
+
+
+def test_llm_function_call_evolution_prompt_recall_visibility_can_exclude_primary_and_other_labels() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMFunctionCallEvolution, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import structured_prompt, text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="profile"),
+                StoreLayerSpec(name="primary_layer"),
+                StoreLayerSpec(name="alpha_layer"),
+                StoreLayerSpec(name="beta_layer"),
+            ]
+        )
+    )
+    _seed_layer(store, "primary_layer", ["primary hidden"])
+    _seed_layer(store, "alpha_layer", ["alpha hidden"])
+    _seed_layer(store, "beta_layer", ["beta visible"])
+    primary_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="primary_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    alpha_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="alpha_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    beta_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="beta_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    module = LLMFunctionCallEvolution(
+        prompt=text_prompt(
+            "Use only beta recall for visibility.",
+            recall_plan=text_prompt("{{ recalled_prompt }}"),
+            recall_query_builder=lambda packet, store, context: "primary",
+            sub_recall_pipeline=primary_pipeline,
+            labeled_recall_plans={"alpha": text_prompt("{{ alpha }}"), "beta": text_prompt("{{ beta }}")},
+            labeled_sub_recall_pipelines={"alpha": alpha_pipeline, "beta": beta_pipeline},
+            labeled_recall_query_builders={
+                "alpha": lambda packet, store, context: "alpha",
+                "beta": lambda packet, store, context: "beta",
+            },
+            visible_record_recall_labels=("beta",),
+        ),
+        tools=["UPDATE"],
+        source_layer="profile",
+        strict_tools=True,
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "text": "should fail"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(KeyError, match="Record 'rec-1' is not in the current evolution candidate set."):
+        module.run(Packet(decisions_store={"profile": {"record_ids": []}}), store)
+
+
+def test_llm_function_call_evolution_prompt_recall_visibility_can_include_primary_only() -> None:
+    from memprimitive.baselines import ConcatenateReadout, LLMFunctionCallEvolution, RecencyRetrieval
+    from memprimitive.pipeline import MemoryPipeline
+    from memprimitive.utils._template import PRIMARY_RECALL_LABEL, structured_prompt, text_prompt
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="profile"),
+                StoreLayerSpec(name="primary_layer"),
+                StoreLayerSpec(name="beta_layer"),
+            ]
+        )
+    )
+    _seed_layer(store, "primary_layer", ["primary visible"])
+    _seed_layer(store, "beta_layer", ["beta hidden"])
+    primary_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="primary_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    beta_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="beta_layer"),
+        readout=ConcatenateReadout(),
+        store=store,
+    )
+    module = LLMFunctionCallEvolution(
+        prompt=text_prompt(
+            "Use only primary recall for visibility.",
+            recall_plan=text_prompt("{{ recalled_prompt }}"),
+            recall_query_builder=lambda packet, store, context: "primary",
+            sub_recall_pipeline=primary_pipeline,
+            labeled_recall_plans={"beta": text_prompt("{{ beta }}")},
+            labeled_sub_recall_pipelines={"beta": beta_pipeline},
+            labeled_recall_query_builders={"beta": lambda packet, store, context: "beta"},
+            visible_record_recall_labels=(PRIMARY_RECALL_LABEL,),
+        ),
+        tools=["UPDATE"],
+        source_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "text": "primary updated"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(Packet(decisions_store={"profile": {"record_ids": []}}), store)
+
+    assert store.iter_records("primary_layer")[0].text == "primary updated"
+    assert packet_out.trace["memory_evolution"]["visible_record_ids"] == ["rec-1"]
+    assert packet_out.trace["memory_evolution"]["prompt_trace"]["visible_record_ids_by_label"] == {
+        PRIMARY_RECALL_LABEL: ["rec-1"]
+    }
 
 
 def test_llm_function_call_evolution_graph_update_link_replaces_links() -> None:

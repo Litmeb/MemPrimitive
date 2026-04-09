@@ -41,9 +41,22 @@ from ..utils._template import (
     project_record_for_template,
     project_unit_for_template,
     render_prompt_plan,
+    resolve_records_from_prompt_metadata,
 )
 from ..utils._reflexion_family import DEFAULT_TRIAL_LAYER
 from ..utils._trace import copy_trace
+
+
+def _merge_visible_records(*record_groups: list[MemoryRecord]) -> list[MemoryRecord]:
+    merged: list[MemoryRecord] = []
+    seen: set[str] = set()
+    for records in record_groups:
+        for record in records:
+            if record.record_id in seen:
+                continue
+            seen.add(record.record_id)
+            merged.append(record)
+    return merged
 
 
 class AppendOrganization(OrganizationModule):
@@ -1204,6 +1217,7 @@ class LLMFunctionCallOrganization(OrganizationModule):
         placements = [Placement(unit_id=unit.unit_id, target_layer=placement_layer) for unit in packet.units]
         per_unit_trace: list[dict[str, Any]] = []
         aggregate_state = ToolExecutionState()
+        aggregate_visible_record_ids: list[str] = []
 
         for unit, decision, placement in zip(packet.units, packet.decisions, placements, strict=True):
             unit_packet = replace(packet, units=[unit], decisions=[decision], placements=[placement])
@@ -1241,6 +1255,9 @@ class LLMFunctionCallOrganization(OrganizationModule):
                     "effects": list(call_state.effects),
                 }
             )
+            for record_id in prompt_trace.get("visible_record_ids", []):
+                if record_id not in aggregate_visible_record_ids:
+                    aggregate_visible_record_ids.append(record_id)
 
         trace = copy_trace(packet)
         trace["organization"] = {
@@ -1252,6 +1269,8 @@ class LLMFunctionCallOrganization(OrganizationModule):
             "written_record_ids": list(aggregate_state.written_record_ids),
             "updated_record_ids": list(aggregate_state.updated_record_ids),
             "deleted_record_ids": list(aggregate_state.deleted_record_ids),
+            "visible_record_ids": aggregate_visible_record_ids,
+            "visible_record_source": "store_plus_prompt_recall" if aggregate_visible_record_ids else "store_scan",
             "effects": list(aggregate_state.effects),
             "tool_calls": list(aggregate_state.tool_calls),
         }
@@ -1264,12 +1283,13 @@ class LLMFunctionCallOrganization(OrganizationModule):
         placement: Placement,
     ) -> tuple[str, dict[str, Any], ToolExecutionState, MemoryStore]:
         unit = packet.units[0]
+        visible_records_holder = {"records": list(store.iter_records())}
         context = WriteToolCallContext(
             packet=packet,
             store=store,
             module_slot="organization",
             default_target_layer=self.target_layer or placement.target_layer,
-            visible_records=list(store.iter_records()),
+            visible_records=list(visible_records_holder["records"]),
         )
         state = ToolExecutionState()
         runtime_tools = build_runtime_tools(
@@ -1288,15 +1308,29 @@ class LLMFunctionCallOrganization(OrganizationModule):
                     "default_target_layer": self.target_layer or placement.target_layer,
                     "visible_records": [
                         project_record_for_template(record)
-                        for record in context.visible_records
+                        for record in visible_records_holder["records"]
                     ],
                 },
             ),
             packet=packet,
             store=store,
+            post_recall_context_builder=lambda prompt_context, prompt_metadata, current_store: (
+                self._apply_prompt_visible_records(
+                    prompt_context=prompt_context,
+                    prompt_metadata=prompt_metadata,
+                    store=current_store,
+                    base_visible_records=list(current_store.iter_records()),
+                    visible_records_holder=visible_records_holder,
+                )
+            ),
         )
         context.store = store
-        context.visible_records = list(store.iter_records())
+        context.visible_records = list(visible_records_holder["records"])
+        visible_record_ids = [record.record_id for record in visible_records_holder["records"]]
+        prompt_trace["visible_record_ids"] = visible_record_ids
+        prompt_trace["visible_record_source"] = (
+            "store_plus_prompt_recall" if prompt_trace.get("visible_record_ids_by_label") else "store_scan"
+        )
         self._run_agent(
             rendered_prompt=rendered_prompt,
             tools=runtime_tools,
@@ -1305,6 +1339,22 @@ class LLMFunctionCallOrganization(OrganizationModule):
         if not state.tool_calls and not self.allow_no_tool_call:
             raise ValueError("LLMFunctionCallOrganization requires at least one successful or attempted tool call.")
         return rendered_prompt, prompt_trace, state, context.store
+
+    @staticmethod
+    def _apply_prompt_visible_records(
+        *,
+        prompt_context: dict[str, Any],
+        prompt_metadata: dict[str, Any],
+        store: MemoryStore,
+        base_visible_records: list[MemoryRecord],
+        visible_records_holder: dict[str, list[MemoryRecord]],
+    ) -> dict[str, Any]:
+        prompt_visible_records = resolve_records_from_prompt_metadata(store, prompt_metadata)
+        merged_records = _merge_visible_records(base_visible_records, prompt_visible_records)
+        visible_records_holder["records"] = merged_records
+        return {
+            "visible_records": [project_record_for_template(record) for record in merged_records],
+        }
 
     def _run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
         runtime = Runtime(

@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import ClassVar, Final
 
-from .core import MemoryRecord, MemoryStore, Observation, Packet, Query, Readout
+from .core import MemoryStore, Observation, Packet, Query, Readout
 from .interfaces import (
     MemoryEvolutionModule,
     OrganizationModule,
@@ -53,6 +53,12 @@ def _materialize_slot_value(module_or_modules):
     if isinstance(module_or_modules, Iterable) and not isinstance(module_or_modules, (str, bytes)):
         return _iter_slot_modules(module_or_modules)
     return module_or_modules
+
+
+def _resolve_slot_value(module_or_modules, default_module: PrimitiveModule):
+    return _materialize_slot_value(
+        module_or_modules if module_or_modules is not None else default_module
+    )
 
 
 def _iter_nested_modules(module_or_modules) -> tuple[PrimitiveModule, ...]:
@@ -111,28 +117,25 @@ class MemoryPipeline:
         readout: ReadoutModule | Iterable[ReadoutModule] | None = None,
         store: MemoryStore | None = None,
     ) -> None:
-        self.unit_formation = _materialize_slot_value(
-            unit_formation if unit_formation is not None else _default_unit_formation()
+        from .baselines import (
+            AlwaysTrigger,
+            AppendOnlyEvolution,
+            AppendOrganization,
+            BasicRepresentation,
+            ConcatenateReadout,
+            NeverTrigger,
+            PassThroughUnitFormation,
+            RecencyRetrieval,
         )
-        self.representation = _materialize_slot_value(
-            representation if representation is not None else _default_representation()
-        )
-        self.write_trigger = _materialize_slot_value(
-            write_trigger if write_trigger is not None else _default_write_trigger()
-        )
-        self.organization = _materialize_slot_value(
-            organization if organization is not None else _default_organization()
-        )
-        self.evolution_trigger = _materialize_slot_value(
-            evolution_trigger if evolution_trigger is not None else _default_evolution_trigger()
-        )
-        self.memory_evolution = _materialize_slot_value(
-            memory_evolution if memory_evolution is not None else _default_memory_evolution()
-        )
-        self.retrieval = _materialize_slot_value(
-            retrieval if retrieval is not None else _default_retrieval()
-        )
-        self.readout = _materialize_slot_value(readout if readout is not None else _default_readout())
+
+        self.unit_formation = _resolve_slot_value(unit_formation, PassThroughUnitFormation())
+        self.representation = _resolve_slot_value(representation, BasicRepresentation())
+        self.write_trigger = _resolve_slot_value(write_trigger, AlwaysTrigger())
+        self.organization = _resolve_slot_value(organization, AppendOrganization())
+        self.evolution_trigger = _resolve_slot_value(evolution_trigger, NeverTrigger())
+        self.memory_evolution = _resolve_slot_value(memory_evolution, AppendOnlyEvolution())
+        self.retrieval = _resolve_slot_value(retrieval, RecencyRetrieval())
+        self.readout = _resolve_slot_value(readout, ConcatenateReadout())
         self.store = store if store is not None else MemoryStore()
         self._validate_composition()
         self._register_store_contracts()
@@ -254,61 +257,6 @@ class FreeMemoryPipeline:
 
 def create_baseline_pipeline(*, top_k: int = 3) -> MemoryPipeline:
     """Convenience factory for the fully baseline-configured pipeline."""
-    return MemoryPipeline(
-        unit_formation=_default_unit_formation(),
-        representation=_default_representation(),
-        write_trigger=_default_write_trigger(),
-        organization=_default_organization(),
-        evolution_trigger=_default_evolution_trigger(),
-        memory_evolution=_default_memory_evolution(),
-        retrieval=_default_retrieval(top_k=top_k),
-        readout=_default_readout(),
-    )
-
-
-def _default_unit_formation() -> UnitFormationModule:
-    from .baselines import PassThroughUnitFormation
-
-    return PassThroughUnitFormation()
-
-
-def _default_representation() -> RepresentationModule:
-    from .baselines import BasicRepresentation
-
-    return BasicRepresentation()
-
-
-def _default_write_trigger() -> TriggerModule:
-    from .baselines import AlwaysTrigger
-
-    return AlwaysTrigger()
-
-
-def _default_organization() -> OrganizationModule:
-    from .baselines import AppendOrganization
-
-    return AppendOrganization()
-
-
-def _default_evolution_trigger() -> TriggerModule:
-    from .baselines import NeverTrigger
-
-    return NeverTrigger()
-
-
-def _default_memory_evolution() -> MemoryEvolutionModule:
-    from .baselines import AppendOnlyEvolution
-
-    return AppendOnlyEvolution()
-
-
-def _default_retrieval(*, top_k: int = 3) -> RetrievalModule:
     from .baselines import RecencyRetrieval
 
-    return RecencyRetrieval(top_k=top_k)
-
-
-def _default_readout() -> ReadoutModule:
-    from .baselines import ConcatenateReadout
-
-    return ConcatenateReadout()
+    return MemoryPipeline(retrieval=RecencyRetrieval(top_k=top_k))

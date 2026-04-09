@@ -19,6 +19,8 @@ TemplateMode = Literal["simple", "structured"]
 MetadataMode = Literal["prompt", "readout"]
 ContextBuilder = Callable[[Packet, MemoryStore], dict[str, Any]]
 RecallQueryBuilder = Callable[[Packet, MemoryStore, dict[str, Any]], str]
+PromptPlanContextPostprocessor = Callable[[dict[str, Any], dict[str, Any], MemoryStore], dict[str, Any] | None]
+PRIMARY_RECALL_LABEL = "__primary__"
 
 
 def looks_like_template(text: str) -> bool:
@@ -42,6 +44,7 @@ class PromptPlan:
     metadata_mode: MetadataMode = "prompt"
     sub_recall_pipeline: Any | None = None
     labeled_sub_recall_pipelines: dict[str, Any] | None = None
+    visible_record_recall_labels: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -79,6 +82,7 @@ def text_prompt(
     metadata_mode: MetadataMode = "prompt",
     sub_recall_pipeline: Any | None = None,
     labeled_sub_recall_pipelines: dict[str, Any] | None = None,
+    visible_record_recall_labels: tuple[str, ...] | None = None,
 ) -> PromptPlan:
     return PromptPlan(
         mode="simple",
@@ -92,6 +96,7 @@ def text_prompt(
         metadata_mode=metadata_mode,
         sub_recall_pipeline=sub_recall_pipeline,
         labeled_sub_recall_pipelines=labeled_sub_recall_pipelines,
+        visible_record_recall_labels=visible_record_recall_labels,
     )
 
 
@@ -107,6 +112,7 @@ def structured_prompt(
     metadata_mode: MetadataMode = "readout",
     sub_recall_pipeline: Any | None = None,
     labeled_sub_recall_pipelines: dict[str, Any] | None = None,
+    visible_record_recall_labels: tuple[str, ...] | None = None,
 ) -> PromptPlan:
     return PromptPlan(
         mode="structured",
@@ -120,6 +126,7 @@ def structured_prompt(
         metadata_mode=metadata_mode,
         sub_recall_pipeline=sub_recall_pipeline,
         labeled_sub_recall_pipelines=labeled_sub_recall_pipelines,
+        visible_record_recall_labels=visible_record_recall_labels,
     )
 
 
@@ -254,6 +261,7 @@ def render_prompt_plan(
     packet: Packet,
     store: MemoryStore,
     runtime_now_factory: Callable[[], str] | None = None,
+    post_recall_context_builder: PromptPlanContextPostprocessor | None = None,
 ) -> tuple[str, dict[str, Any], MemoryStore]:
     prompt_plan = ensure_prompt_plan(plan)
     now = runtime_now_factory() if runtime_now_factory is not None else utc_now_iso()
@@ -269,8 +277,17 @@ def render_prompt_plan(
         store=store,
         context=context,
     )
+    recall_visibility_metadata = summarize_prompt_plan_recall(
+        prompt_plan,
+        recall_metadata=recall_metadata,
+        labeled_recall_metadata=labeled_recall_metadata,
+    )
     context["recalled_prompt"] = recalled_prompt
     context.update(labeled_recalled_prompts)
+    if post_recall_context_builder is not None:
+        extra_context = post_recall_context_builder(context, recall_visibility_metadata, updated_store)
+        if extra_context is not None:
+            context.update(extra_context)
 
     if prompt_plan.metadata_mode == "readout":
         return _render_readout_plan(
@@ -278,6 +295,7 @@ def render_prompt_plan(
             context=context,
             recall_metadata=recall_metadata,
             labeled_recall_metadata=labeled_recall_metadata,
+            recall_visibility_metadata=recall_visibility_metadata,
             store=updated_store,
         )
     return _render_prompt_mode_plan(
@@ -285,6 +303,7 @@ def render_prompt_plan(
         context=context,
         recall_metadata=recall_metadata,
         labeled_recall_metadata=labeled_recall_metadata,
+        recall_visibility_metadata=recall_visibility_metadata,
         store=updated_store,
     )
 
@@ -295,6 +314,7 @@ def _render_prompt_mode_plan(
     context: dict[str, Any],
     recall_metadata: dict[str, Any],
     labeled_recall_metadata: dict[str, dict[str, Any]],
+    recall_visibility_metadata: dict[str, Any],
     store: MemoryStore,
 ) -> tuple[str, dict[str, Any], MemoryStore]:
     if plan.mode == "structured":
@@ -323,6 +343,7 @@ def _render_prompt_mode_plan(
             },
             "labeled_recall_prompts": dict(labeled_recall_metadata),
             "context_summary": sorted(context.keys()),
+            **recall_visibility_metadata,
         }
     )
     return rendered, metadata, store
@@ -334,6 +355,7 @@ def _render_readout_plan(
     context: dict[str, Any],
     recall_metadata: dict[str, Any],
     labeled_recall_metadata: dict[str, dict[str, Any]],
+    recall_visibility_metadata: dict[str, Any],
     store: MemoryStore,
 ) -> tuple[str, dict[str, Any], MemoryStore]:
     from ._template_readout import ReadoutResolutionState, metadata_from_state, render_structured_template
@@ -365,6 +387,7 @@ def _render_readout_plan(
                 label: str(context.get(label, ""))[:200] for label in labeled_recall_metadata
             },
             "labeled_recall_prompts": dict(labeled_recall_metadata),
+            **recall_visibility_metadata,
         }
     )
     return rendered, metadata, store
@@ -385,6 +408,8 @@ def build_empty_recall_metadata(*, disabled_reason: str | None = None) -> dict[s
         "recalled_prompt_preview": "",
         "readout_source_ids": [],
         "readout_metadata": {},
+        "retrieved_record_ids": [],
+        "retrieved_record_count": 0,
     }
     if disabled_reason is not None:
         metadata["disabled_reason"] = disabled_reason
@@ -469,7 +494,79 @@ def resolve_single_recalled_prompt(
     metadata["recalled_prompt_preview"] = recalled_prompt[:200]
     metadata["readout_source_ids"] = list(readout.source_ids)
     metadata["readout_metadata"] = dict(readout.metadata)
+    metadata["retrieved_record_ids"] = list(readout.source_ids)
+    metadata["retrieved_record_count"] = len(readout.source_ids)
     return recalled_prompt, metadata, updated_store
+
+
+def summarize_prompt_plan_recall(
+    plan: PromptPlan,
+    *,
+    recall_metadata: dict[str, Any],
+    labeled_recall_metadata: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    retrieved_record_ids_by_label: dict[str, list[str]] = {}
+    branch_order: list[str] = []
+
+    primary_ids = _normalize_record_id_list(recall_metadata.get("retrieved_record_ids", []))
+    if primary_ids:
+        retrieved_record_ids_by_label[PRIMARY_RECALL_LABEL] = primary_ids
+    branch_order.append(PRIMARY_RECALL_LABEL)
+
+    for label, metadata in labeled_recall_metadata.items():
+        normalized_label = str(label).strip()
+        if not normalized_label:
+            continue
+        branch_order.append(normalized_label)
+        retrieved_ids = _normalize_record_id_list(metadata.get("retrieved_record_ids", []))
+        if retrieved_ids:
+            retrieved_record_ids_by_label[normalized_label] = retrieved_ids
+
+    retrieved_record_ids = _stable_unique(
+        record_id
+        for label in branch_order
+        for record_id in retrieved_record_ids_by_label.get(label, [])
+    )
+    visible_labels = (
+        list(branch_order)
+        if plan.visible_record_recall_labels is None
+        else [str(label).strip() for label in plan.visible_record_recall_labels if str(label).strip()]
+    )
+    visible_record_ids_by_label = {
+        label: list(retrieved_record_ids_by_label.get(label, []))
+        for label in visible_labels
+        if label in retrieved_record_ids_by_label
+    }
+    visible_record_ids = _stable_unique(
+        record_id
+        for label in visible_labels
+        for record_id in retrieved_record_ids_by_label.get(label, [])
+    )
+    return {
+        "retrieved_record_ids": retrieved_record_ids,
+        "retrieved_record_ids_by_label": retrieved_record_ids_by_label,
+        "visible_record_ids": visible_record_ids,
+        "visible_record_ids_by_label": visible_record_ids_by_label,
+    }
+
+
+def resolve_records_from_prompt_metadata(
+    store: MemoryStore,
+    prompt_metadata: dict[str, Any],
+    *,
+    field_name: str = "visible_record_ids",
+) -> list[MemoryRecord]:
+    record_ids = _normalize_record_id_list(prompt_metadata.get(field_name, []))
+    if not record_ids:
+        return []
+    by_id = {record.record_id: record for record in store.iter_records()}
+    return [by_id[record_id] for record_id in record_ids if record_id in by_id]
+
+
+def _normalize_record_id_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [normalized for item in value if (normalized := str(item).strip())]
 
 
 def render_recall_query(
