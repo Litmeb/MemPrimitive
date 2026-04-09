@@ -100,7 +100,6 @@ unit_formation
 | `GraphEntityAppendOrganization` (`graph_entity_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 保持 `GraphAppendOrganization` 的 graph metadata / provenance 约定，但把一个 unit 展开成多条 graph record，每条 `record.text` 是一个 entity；若当前 unit 没有 entity，则跳过该 unit。 |
 | `GraphDeduplicationAppendOrganization` (`graph_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 向图层写入前先与同 layer 现有 graph records 做 embedding top-1 相似度匹配；若 `similarity > threshold`，则原地合并节点并更新 text / embedding / triples，否则正常 append；`separate=True` 时 source 文本仍可单独落到 side layer。 |
 | `GraphEntityDeduplicationAppendOrganization` (`graph_entity_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 保持 `GraphDeduplicationAppendOrganization` 的阈值去重与 provenance 语义，但按 entity 独立执行 merge-or-append：每个 entity 用自己的 entity embedding 与现有 graph records 比较，相似度超过阈值时合并到命中节点，否则追加一个新的 entity 节点；缺少该 entity embedding 时只跳过该 entity。 |
-| `PlacementWithoutAppendOrganization` (`placement_without_append_organization`) | `target_layer="trial_buffer"` | 只给出 placement，不实际 append。 |
 | `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 对选中的 source-layer records 做抽象聚合，再通过子 `MemoryPipeline.ingest()` 写入高层记忆。 |
 | `LLMFunctionCallOrganization` (`llm_function_call_organization`) | `prompt`, `tools`, `target_layer=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM tool call 在 organization 阶段执行 `add / update / delete` 等写操作。 |
 
@@ -138,7 +137,6 @@ unit_formation
 | `GraphLinkEvolution` (`graph_link_evolution`) | `target_layer="knowledge_graph"`, `neighbor_limit=2`, `bidirectional=True`, `min_score=0.1`, `rewrite_neighbor_metadata=False` | 在图层记录间建立或更新 links。 |
 | `GraphNeighborAppendEvolution` (`graph_neighbor_append_evolution`) | `target_layer="knowledge_graph"`, `neighbor_limit=2`, `bidirectional=True` | 图邻居追加式兼容封装。 |
 | `GraphNeighborContextTraceEvolution` (`graph_neighbor_context_trace_evolution`) | `target_layer="knowledge_graph"`, `rewrite_metadata=False` | 跟踪图邻居上下文，并可保守回写 metadata。 |
-| `ReflectionGenerationEvolution` (`reflection_generation_evolution`) | `target_layer="reflections"`, `memory_size=3`, `window_size=None`, `reflection_generator=None`, `prompt_builder=None` | 生成 reflection / strategy note。 |
 | `HierarchicalEvolution` (`hierarchical_evolution`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 基于 `packet.decisions_store` 或 source-layer 扫描，做高层抽象和分层持久化。 |
 | `LLMFunctionCallEvolution` (`llm_function_call_evolution`) | `prompt`, `tools`, `source_layer=None`, `target_layer=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM tool call 对已有 records 做新增、更新、删除等演化操作。 |
 

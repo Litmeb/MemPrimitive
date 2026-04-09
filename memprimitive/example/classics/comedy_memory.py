@@ -43,7 +43,6 @@ from memprimitive.baselines import (
     HierarchicalOrganization,
     NeverTrigger,
     PeriodicMaintenanceTrigger,
-    PlacementWithoutAppendOrganization,
     RecencyRetrieval,
     StoreAllTrigger,
 )
@@ -85,7 +84,7 @@ def build_comedy_memory_system(*, compress_every_n: int = 2) -> dict[str, object
     compressive_memory_pipeline = MemoryPipeline(
         representation=BasicRepresentation(elements=("text",)),
         write_trigger=NeverTrigger(slot="write_trigger"),
-        organization=PlacementWithoutAppendOrganization(target_layer="compressive_memory"),
+        organization=AppendOrganization(target_layer="compressive_memory"),
         evolution_trigger=PeriodicMaintenanceTrigger(
             every_n=compress_every_n,
             trigger=StoreAllTrigger(slot="evolution_trigger"),

@@ -44,7 +44,6 @@ from ..utils._template import (
     render_prompt_plan,
     resolve_records_from_prompt_metadata,
 )
-from ..utils._reflexion_family import DEFAULT_TRIAL_LAYER
 from ..utils._trace import copy_trace
 
 
@@ -1016,50 +1015,6 @@ class GraphEntityDeduplicationAppendOrganization(GraphDeduplicationAppendOrganiz
         )
 
 
-class PlacementWithoutAppendOrganization(OrganizationModule):
-    """Emit placements without persisting the current units into the store.
-
-    Constructor: ``target_layer`` must be a non-empty layer name. This module is
-    useful when the packet needs a placement contract for downstream evolution,
-    but the current trial/buffer contents themselves should remain ephemeral.
-
-    ``run`` requires ``packet.units`` and ``packet.decisions`` with equal length.
-    It emits aligned ``Placement`` objects and records the routing decision in
-    trace, but intentionally does not append any ``MemoryRecord`` objects.
-    """
-
-    spec = ModuleSpec(
-        name="placement_without_append_organization",
-        slot="organization",
-        input_requirements=("units", "decisions"),
-        output_guarantees=("placements",),
-    )
-
-    def __init__(self, *, target_layer: str = DEFAULT_TRIAL_LAYER) -> None:
-        self.target_layer = target_layer
-
-    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
-        if packet.units is None:
-            raise ValueError("PlacementWithoutAppendOrganization requires packet.units.")
-        if packet.decisions is None:
-            raise ValueError("PlacementWithoutAppendOrganization requires packet.decisions.")
-        if len(packet.units) != len(packet.decisions):
-            raise ValueError("PlacementWithoutAppendOrganization requires decisions aligned with units.")
-
-        placements = [Placement(unit_id=unit.unit_id, target_layer=self.target_layer) for unit in packet.units]
-        trace = copy_trace(packet)
-        trace["organization"] = {
-            "module": self.spec.name,
-            "target_layer": self.target_layer,
-            "placement_count": len(placements),
-            "written_record_ids": [],
-            "written_unit_ids": [],
-            "skipped_unit_count": 0,
-            "append_trials": False,
-        }
-        return replace(packet, placements=placements, trace=trace), store
-
-
 class HierarchicalOrganization(OrganizationModule):
     """Aggregate selected source-layer records into higher-level target records."""
 
@@ -1410,7 +1365,6 @@ BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     GraphEntityAppendOrganization,
     GraphDeduplicationAppendOrganization,
     GraphEntityDeduplicationAppendOrganization,
-    PlacementWithoutAppendOrganization,
     HierarchicalOrganization,
     LLMFunctionCallOrganization,
 )

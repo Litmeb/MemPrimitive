@@ -677,6 +677,6 @@ def __init__(
 建议优先补这几组：
 
 1. `BoundaryEventTrigger(slot="evolution_trigger") + SummaryRewriteEvolution`
-2. `RuntimeEventTrigger(slot="evolution_trigger") + ReflectionGenerationEvolution`
+2. `RuntimeEventTrigger(slot="evolution_trigger") + HierarchicalEvolution`
 3. `ScalarRuleTrigger(slot="write_trigger") + AppendOrganization`
 4. `LLMJudgeTrigger(slot="write_trigger") + AppendOrganization`

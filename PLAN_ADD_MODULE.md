@@ -178,7 +178,6 @@
 - 为什么现有模块不够
   - `AppendOrganization` 只能顺序追加；
   - `ConditionalLayerOrganization` 只能按规则分层；
-  - `PlacementWithoutAppendOrganization` 只能发 placement；
   - 它们都不能自然表达 HiAgent 所需的“按 subgoal 切 chunk，并让当前 chunk 与历史 chunk 使用不同保真度”的层级 working-memory 组织。
 - 这是为 HiAgent 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。凡是“计划-执行-压缩-必要时回看”的 agent working-memory 系统都可能复用。
@@ -448,7 +447,6 @@
 - 要补的能力是什么
   - 从 episodic / interaction histories 中提炼更高层行为模式、偏好或生活规律，并把结果回写到 semantic 或其他更稳定的 memory store。
 - 为什么现有模块不够
-  - `ReflectionGenerationEvolution` 只能局部覆盖“生成反思文本”的外观。
   - 它不负责从一个 store 读、提炼 pattern、再写回另一个 typed store。
   - MIRIX Reflexion 的关键之一正是这种跨类型的 higher-order synthesis。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive

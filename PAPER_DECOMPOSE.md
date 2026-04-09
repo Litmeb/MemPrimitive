@@ -569,7 +569,6 @@ HiAgent 关注的不是跨 trial 长期记忆，而是单次任务尝试中的 w
     - 能顺序写入记录，但不能表达“当前 chunk 保留细节、历史 chunk 默认只暴露 summary”的层级 chunk 组织。
   - `ConditionalLayerOrganization`
     - 可以按规则分层，但缺少 subgoal chunk 边界、subgoal id、当前/历史状态切换等控制逻辑。
-  - `PlacementWithoutAppendOrganization`
     - 能发 placement，但不能独立完成 HiAgent 的 chunk 组织。
 - 当前缺失什么能力
   - 缺少显式的 subgoal-chunk organization primitive。
@@ -1321,7 +1320,6 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
     - 可近似表达“按类别分层”，但无法表达 MIRIX 这种 heterogeneous stores with distinct schemas 的组织方式。
   - `AppendOrganization`
     - 只能承载单一 record append，不足以表示 block memory 与 typed stores 并存。
-  - `PlacementWithoutAppendOrganization`
     - 可表达路由/落位外观，但没有 MIRIX 所需的实际异构存储语义。
 - 当前缺失什么能力
   - 缺少“异构多记忆库组织” primitive。
@@ -1370,7 +1368,6 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
 - 哪些模块只能部分复用
   - `SummaryRewriteEvolution`
     - 与 core block rewrite 有表面相似，但它不是 block-capacity-conditioned rewrite，也不面向 persona/human blocks。
-  - `ReflectionGenerationEvolution`
     - 对 Reflexion 式“从经历生成更高层洞见”有局部相似，但不支持跨 store dedupe 与 typed write-back。
   - `AppendOnlyEvolution`
     - 只能表达新增，无法表达 MIRIX 的 update / merge / replace / dedupe 主体。
