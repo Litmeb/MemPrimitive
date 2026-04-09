@@ -1,16 +1,23 @@
 """Mechanism-level reconstruction of Reflexion memory without the agent loop.
 
-This version intentionally avoids the dedicated Reflexion helper modules and
-instead reuses a more general pipeline pattern:
+This version intentionally avoids dedicated Reflexion-specific helper modules
+and instead reuses a more general pipeline pattern:
 
 1. append each failed trial trace into a raw trial buffer,
 2. trigger hierarchical generate-mode abstraction on that newly written trial,
-3. write the generated reflection into a bounded reflections layer, and
-4. render the retained reflections back into next-trial prompt context.
+3. inject prior retained reflections into the abstraction prompt so the next
+   reflection can condition on persistent memory as described in the paper,
+4. write the generated reflection into a bounded reflections layer, and
+5. render the retained reflections back into next-trial prompt context.
 
-The design aligns with the released Reflexion repository's simpler memory path:
-append-only textual reflections plus a small sliding window used as prompt
-context for the next attempt.
+Research-prototype scope note:
+
+- We intentionally do not solve task-local / episode-local memory partitioning
+  here. For a research prototype, the memory mechanism itself is the focus, so a
+  shared bounded reflection buffer keeps the example small and legible.
+- A paper-faithful engineering path for that remaining gap would isolate stores
+  per task or thread a `session_id`/episode key through write and recall
+  filtering. That is a wiring/infrastructure concern, not a missing primitive.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from memprimitive.baselines import (
     AppendOrganization,
     BasicRepresentation,
     BufferRetrieval,
+    ConcatenateReadout,
     HierarchicalEvolution,
     PromptContextReadout,
     ScalarRuleTrigger,
@@ -37,6 +45,7 @@ from memprimitive.utils._reflexion_family import (
     DEFAULT_REFLECTION_LAYER,
     DEFAULT_TRIAL_LAYER,
 )
+from memprimitive.utils._template import text_prompt
 
 
 DEFAULT_REFLEXION_HIERARCHICAL_PROMPT = (
@@ -45,9 +54,36 @@ DEFAULT_REFLEXION_HIERARCHICAL_PROMPT = (
     "reflection, question, last_attempt, evaluator_feedback, trial_index.\n"
     "Use the most recent failed trial in the provided records as the canonical source of question, "
     "last_attempt, evaluator_feedback, and trial_index.\n"
+    "If prior reflections are provided, use them as persistent episodic memory to avoid repeating "
+    "the same mistake while keeping the new reflection specific to the current failed trial.\n"
     "The field 'reflection' must be a concise high-level plan that starts with 'Reflection'.\n"
     "Do not include any keys beyond the requested schema."
 )
+
+
+def _build_reflection_generation_prompt(
+    *,
+    memory_size: int,
+    reflection_layer: str,
+    reflection_prompt: str,
+) -> object:
+    """Build a prompt that exposes prior retained reflections during generation."""
+
+    recall_pipeline = MemoryPipeline(
+        retrieval=BufferRetrieval(top_k=memory_size, layer=reflection_layer),
+        readout=ConcatenateReadout(separator="\n\n"),
+    )
+    return text_prompt(
+        (
+            f"{reflection_prompt}\n\n"
+            "Prior retained reflections from persistent memory:\n"
+            "{{ recalled_prompt }}\n\n"
+            "If no prior reflections are available, rely only on the current failed trial."
+        ),
+        recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
+        recall_query_builder=lambda packet, current_store, context: "__reflexion_prior_memory__",
+        sub_recall_pipeline=recall_pipeline,
+    )
 
 
 def build_reflexion_memory_system(
@@ -87,7 +123,11 @@ def build_reflexion_memory_system(
             target_layer=reflection_layer,
             selection_mode="latest_active_units",
             retention_size=memory_size,
-            prompt=reflection_prompt,
+            prompt=_build_reflection_generation_prompt(
+                memory_size=memory_size,
+                reflection_layer=reflection_layer,
+                reflection_prompt=reflection_prompt,
+            ),
         ),
         store=store,
     )
@@ -120,6 +160,7 @@ def ingest_failed_trial(
     question: str,
     last_attempt: str,
     evaluator_feedback: str,
+    trial_trace: str | None = None,
     trial_index: int = 1,
     strategy: str | None = None,
     source: str = "reasoning_trial",
@@ -127,18 +168,26 @@ def ingest_failed_trial(
     metadata: dict[str, Any] | None = None,
     is_correct: bool = False,
 ) -> Any:
-    """Append one trial and, if failed, abstract it into a reflection record."""
+    """Append one trial and, if failed, abstract it into a reflection record.
+
+    `trial_trace` is the preferred short-term memory input because the paper
+    conditions on a full trajectory. `last_attempt` is retained for
+    backward-compatible callers and falls back to the short-form text when no
+    richer trace is provided.
+    """
 
     write_pipeline = system["write_pipeline"]
     assert isinstance(write_pipeline, MemoryPipeline)
+    effective_trial_trace = trial_trace or observation_text or last_attempt
 
     payload = dict(metadata or {})
     reflexion_metadata = dict(payload.get("reflexion", {}))
     reflexion_metadata.update(
         {
             "question": question,
-            "last_attempt": last_attempt,
-            "scratchpad": last_attempt,
+            "last_attempt": effective_trial_trace,
+            "scratchpad": effective_trial_trace,
+            "trial_trace": effective_trial_trace,
             "evaluator_feedback": evaluator_feedback,
             "trial_index": trial_index,
         }
@@ -155,7 +204,7 @@ def ingest_failed_trial(
 
     return write_pipeline.ingest(
         Observation(
-            text=observation_text or last_attempt,
+            text=effective_trial_trace,
             source=source,
             metadata=payload,
         )
@@ -168,9 +217,14 @@ def recall_reflection_context(
     question: str,
     strategy: str | None = None,
     last_attempt: str | None = None,
+    trial_trace: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Readout:
-    """Render Reflexion-style prompt context for the next trial."""
+    """Render Reflexion-style prompt context for the next trial.
+
+    `trial_trace` is preferred when available so the prompt can include the full
+    prior trajectory rather than only a compressed last-attempt string.
+    """
 
     recall_pipeline = system["recall_pipeline"]
     assert isinstance(recall_pipeline, MemoryPipeline)
@@ -179,8 +233,10 @@ def recall_reflection_context(
     reflexion_metadata = dict(query_metadata.get("reflexion", {}))
     if strategy is not None:
         reflexion_metadata["strategy"] = strategy
-    if last_attempt is not None:
-        reflexion_metadata["last_attempt"] = last_attempt
+    effective_trial_trace = trial_trace or last_attempt
+    if effective_trial_trace is not None:
+        reflexion_metadata["last_attempt"] = effective_trial_trace
+        reflexion_metadata["trial_trace"] = effective_trial_trace
     if reflexion_metadata:
         query_metadata["reflexion"] = reflexion_metadata
 
@@ -193,6 +249,7 @@ def recall_reflections(
     question: str,
     strategy: str = "reflexion",
     last_attempt: str | None = None,
+    trial_trace: str | None = None,
 ) -> str:
     """Convenience wrapper that returns only the rendered prompt text."""
 
@@ -201,6 +258,7 @@ def recall_reflections(
         question=question,
         strategy=strategy,
         last_attempt=last_attempt,
+        trial_trace=trial_trace,
     ).text
 
 
