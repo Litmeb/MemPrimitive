@@ -2,12 +2,9 @@
 
 ## Goal
 
-This document defines the tool contract for collapsing A-MEM's two current evolution steps:
-
-- `LinkStrengtheningEvolution`
-- `NeighborContextUpdateEvolution`
-
-into one `LLMFunctionCallEvolution`-based controller.
+This document defines the tool contract for collapsing A-MEM's previous two-step
+graph-link strengthening plus neighbor-note update flow into one
+`LLMFunctionCallEvolution`-based controller.
 
 The target is repo-consistent A-MEM behavior, not the broadest possible paper wording. In particular:
 
@@ -51,8 +48,6 @@ The collapsed A-MEM evolution should use two custom write tools.
 
 Purpose:
 strengthen outgoing graph links on the current note and optionally patch the current note's tags.
-
-This is the function-call replacement for the current `LinkStrengtheningEvolution`.
 
 #### Allowed target
 
@@ -134,8 +129,6 @@ The executor must:
 
 Purpose:
 update one neighbor note's `context` and/or `tags` from the perspective of the current note.
-
-This is the function-call replacement for the current `NeighborContextUpdateEvolution`.
 
 #### Allowed target
 
@@ -265,19 +258,10 @@ The collapsed evolution module should satisfy the following high-level contract.
 - no immediate embedding refresh for neighbor updates
 - no unrestricted whole-layer mutation
 
-## Mapping From Old Modules
+## Mapping From The Previous Flow
 
-### Old `LinkStrengtheningEvolution`
-
-Becomes:
-
-- candidate retrieval for visible set
-- one optional `AMEM_STRENGTHEN_LINKS` call
-
-### Old `NeighborContextUpdateEvolution`
-
-Becomes:
-
+- candidate retrieval for the visible set
+- one optional `AMEM_STRENGTHEN_LINKS` call for the current note
 - zero or more `AMEM_UPDATE_NEIGHBOR` calls over visible neighbors
 
 ## Recommended Trace Fields

@@ -127,8 +127,6 @@ HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启
     - 能在 graph layer 里补 link，但当前假设是 record-to-record 邻接，不是 entity-node embedding 相似驱动的节点级 augmentation。
   - `GraphNeighborAppendEvolution`
     - 只是 `GraphLinkEvolution` 的兼容包装，能力边界相同。
-  - `LinkStrengtheningEvolution`
-    - 能做图链接强化，但设计前提是 note graph + LLM judge，不是 HippoRAG 的 retrieval-encoder synonymy edge。
 - 当前缺失什么能力
   - 缺少“基于节点 embedding 相似度阈值批量建立 synonymy edges”的显式演化模块。
   - 缺少对异构图节点级别而非 record 级别的边写回。
@@ -372,8 +370,6 @@ AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 wor
     - 能对 graph layer 做额外图写回，但偏向补 link，不支持“根据新 observation 删除/替换过时 semantic facts”。
   - `GraphNeighborAppendEvolution`
     - 只是 `GraphLinkEvolution` 的兼容包装，能力边界相同。
-  - `NeighborContextUpdateEvolution`
-    - 能重写邻居上下文，但其目标是 note graph 邻居改写，不是 AriGraph 的事实级冲突消解。
 - 当前缺失什么能力
   - 缺少“基于新 observation triplets，对相关旧 semantic edges 做冲突检测与删除”的 memory evolution primitive。
   - 缺少删除式 graph evolution，而不仅是 append/link-strengthening。

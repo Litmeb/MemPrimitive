@@ -102,6 +102,7 @@ def test_build_fixed_profile_tools_delegate_embedding_to_store_policy(monkeypatc
         store=store,
         module_slot="organization",
         default_target_layer="profile",
+        selected_records=[],
         visible_records=[],
     )
     add_tool, update_tool, _delete_tool = build_fixed_profile_tools(embed_on_add=False, embed_on_update=False)

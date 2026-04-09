@@ -29,6 +29,7 @@ from ..utils._llm_function_tools import (
     ToolExecutionState,
     WriteToolCallContext,
     WriteToolSpec,
+    aggregate_write_tool_contracts,
     build_runtime_tools,
     normalize_write_tool_specs,
     project_tool_specs_for_prompt,
@@ -1188,12 +1189,12 @@ class LLMFunctionCallOrganization(OrganizationModule):
         normalized_prompt = ensure_prompt_plan(prompt, metadata_mode="prompt")
         self.prompt = normalized_prompt
         self.tool_specs = normalize_write_tool_specs(tools, module_name=self.spec.name)
+        required_contracts, produced_contracts = aggregate_write_tool_contracts(self.tool_specs)
         if write_tool_specs_require_graph_contracts(self.tool_specs):
-            self.requires_contracts = frozenset({TOPOLOGY_GRAPH_LAYER_CONTRACT})
-            self.produces_contracts = frozenset({RECORD_GRAPH_LINKS_CONTRACT})
-        else:
-            self.requires_contracts = frozenset()
-            self.produces_contracts = frozenset()
+            required_contracts = frozenset(set(required_contracts) | {TOPOLOGY_GRAPH_LAYER_CONTRACT})
+            produced_contracts = frozenset(set(produced_contracts) | {RECORD_GRAPH_LINKS_CONTRACT})
+        self.requires_contracts = required_contracts
+        self.produces_contracts = produced_contracts
         self.target_layer = None if target_layer is None else str(target_layer).strip() or None
         self.max_turns = int(max_turns)
         if self.max_turns <= 0:
@@ -1289,6 +1290,7 @@ class LLMFunctionCallOrganization(OrganizationModule):
             store=store,
             module_slot="organization",
             default_target_layer=self.target_layer or placement.target_layer,
+            selected_records=[],
             visible_records=list(visible_records_holder["records"]),
         )
         state = ToolExecutionState()
