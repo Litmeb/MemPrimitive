@@ -23,9 +23,15 @@ def test_amem_classics_builder_uses_existing_a_mem_baselines() -> None:
     memory_evolution = write_pipeline.memory_evolution
 
     assert isinstance(representation, tuple)
-    assert representation[0].spec.name == "semantic_field_enrichment_representation"
-    assert representation[1].spec.name == "configurable_embedding_representation"
-    assert "{{ unit.metadata.amem.content }}" in str(ensure_prompt_plan(representation[1].embedding_text).template)
+    assert [module.spec.name for module in representation[:-1]] == [
+        "llm_representation",
+        "llm_representation",
+        "llm_representation",
+        "llm_representation",
+        "llm_representation",
+    ]
+    assert representation[-1].spec.name == "configurable_embedding_representation"
+    assert "{{ unit.metadata.representation.context }}" in str(ensure_prompt_plan(representation[-1].embedding_text).template)
 
     assert write_pipeline.organization.spec.name == "graph_append_organization"
     assert isinstance(memory_evolution, tuple)
@@ -37,8 +43,12 @@ def test_amem_classics_builder_uses_existing_a_mem_baselines() -> None:
 
 
 def test_amem_classics_end_to_end_ingest_and_recall(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
-    system = build_amem_memory_system(candidate_k=2, neighbor_expansion_k=1, recall_top_k=2)
+    from memprimitive.baselines import LLMRepresentation
+
+    fake_runtime = _FakeAMEMRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
+    system = build_amem_memory_system(candidate_k=2, recall_top_k=2)
     store = system["store"]
 
     ingest_note(system, text="Alice likes tea.")

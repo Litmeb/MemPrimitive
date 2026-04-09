@@ -4,7 +4,7 @@ import json
 from typing import Any
 import pytest
 
-from memprimitive.contracts import UNIT_EMBEDDING_CONTRACT, UNIT_NOTE_PAYLOAD_CONTRACT
+from memprimitive.contracts import UNIT_EMBEDDING_CONTRACT
 from memprimitive.core import (
     MemoryStore,
     Observation,
@@ -173,7 +173,6 @@ def test_configurable_embedding_representation_contracts_are_embedding_only() ->
 
     assert module.get_requires_contracts() == frozenset()
     assert module.get_produces_contracts() == frozenset({UNIT_EMBEDDING_CONTRACT})
-    assert UNIT_NOTE_PAYLOAD_CONTRACT not in module.get_produces_contracts()
 
 
 def test_triple_representation_direct_uses_real_llm(require_real_runtime: None) -> None:

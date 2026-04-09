@@ -533,7 +533,8 @@ HiAgent 关注的不是跨 trial 长期记忆，而是单次任务尝试中的 w
 - 哪些模块只能部分复用
   - `BasicRepresentation(elements=("text", "summary"))`
     - 表面上有 summary 能力，但该 summary 是对单个 unit 文本的表示增强，不是 HiAgent 这种“对一个完整 subgoal trajectory 做 subgoal-conditioned summarization”。
-  - `SemanticFieldEnrichmentRepresentation`
+  - 多个 `LLMRepresentation`（例如 `context` / `keywords` / `tags` / `category` / `attributes`）
+  - `ConfigurableEmbeddingRepresentation`
     - 可为 unit 附加结构化 note payload，但它服务的是 note-like enrichment，不是 HiAgent 的 subgoal / summarized observation 语义。
 - 当前缺失什么能力
   - 无必须单独新增到 `representation` slot 的关键能力。HiAgent 的关键 summary 更适合落在 `memory_evolution`，而不是 ingest-side representation。
@@ -1276,7 +1277,8 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
     - 可提供 `summary`、`embedding`、`keywords` 等通用增强，但不能产出 MIRIX 所需的多 schema typed memory payload。
   - `ConfigurableEmbeddingRepresentation`
     - 可覆盖“表示后附 embedding 供检索”的局部需求，但不负责把交互抽成 episodic / semantic / procedural / resource / vault 这些不同结构。
-  - `SemanticFieldEnrichmentRepresentation`
+  - 多个 `LLMRepresentation`（例如 `context` / `keywords` / `tags` / `category` / `attributes`）
+  - `ConfigurableEmbeddingRepresentation`
     - 只是在统一记录上补语义字段，不是按 memory family 分化 schema。
 - 当前缺失什么能力
   - 缺少“一次交互 -> 多种 memory schema 候选”的 typed extraction primitive。

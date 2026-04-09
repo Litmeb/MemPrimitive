@@ -41,11 +41,11 @@ from memprimitive.baselines import (
     ConfigurableEmbeddingRepresentation,
     EmbeddingSimilarityRetrieval,
     GraphAppendOrganization,
+    LLMRepresentation,
     LinkStrengtheningEvolution,
     NeighborContextUpdateEvolution,
     NoteRenderReadout,
     PassThroughUnitFormation,
-    SemanticFieldEnrichmentRepresentation,
 )
 from memprimitive.utils._template import text_prompt
 from memprimitive.utils._runtime import get_runtime
@@ -55,7 +55,6 @@ def build_amem_memory_system(
     *,
     note_namespace: str = "amem",
     candidate_k: int = 5,
-    neighbor_expansion_k: int = 3,
     recall_top_k: int = 5,
 ) -> dict[str, object]:
     topology = StoreTopology.from_layers(
@@ -73,13 +72,44 @@ def build_amem_memory_system(
     write_pipeline = MemoryPipeline(
         unit_formation=PassThroughUnitFormation(),
         representation=(
-            SemanticFieldEnrichmentRepresentation(note_namespace=note_namespace),
+            LLMRepresentation(
+                field="context",
+                prompt=(
+                    "Write one concise context sentence for this memory note. "
+                    "Preserve concrete facts and make the broader relevance explicit."
+                ),
+            ),
+            LLMRepresentation(
+                field="keywords",
+                value_type=list[str],
+                prompt="Extract 3 to 6 short keywords for this memory note as a JSON array of strings.",
+            ),
+            LLMRepresentation(
+                field="tags",
+                value_type=list[str],
+                prompt="Assign 2 to 4 compact semantic tags for this memory note as a JSON array of strings.",
+            ),
+            LLMRepresentation(
+                field="category",
+                prompt=(
+                    "Assign one short category label for this memory note, such as "
+                    "personal_preference, insight, task, relationship, or plan."
+                ),
+            ),
+            LLMRepresentation(
+                field="attributes",
+                value_type=dict[str, str],
+                prompt=(
+                    "Extract a small JSON object of salient attributes for this memory note. "
+                    "Use short string keys and string values only."
+                ),
+            ),
             ConfigurableEmbeddingRepresentation(
                 embedding_text=text_prompt(
-                    f"{{{{ unit.metadata.{note_namespace}.content }}}} | "
-                    f"context: {{{{ unit.metadata.{note_namespace}.context }}}} | "
-                    f"keywords: {{{{ unit.metadata.{note_namespace}.keywords | join(', ') }}}} | "
-                    f"tags: {{{{ unit.metadata.{note_namespace}.tags | join(', ') }}}}"
+                    "{{ unit.text }} | "
+                    "context: {{ unit.metadata.representation.context }} | "
+                    "keywords: {{ unit.metadata.representation.keywords | join(', ') }} | "
+                    "tags: {{ unit.metadata.representation.tags | join(', ') }}"
                 )
             ),
         ),
