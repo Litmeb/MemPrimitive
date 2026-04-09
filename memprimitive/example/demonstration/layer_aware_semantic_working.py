@@ -35,14 +35,19 @@ def main() -> None:
     topology = StoreTopology.from_layers(
         [
             StoreLayerSpec(name="working", theme="working", indices=("temporal", "keyword")),
-            StoreLayerSpec(name="semantic", theme="semantic", indices=("vector", "entity")),
+            StoreLayerSpec(
+                name="semantic",
+                theme="semantic",
+                indices=("vector", "entity"),
+                settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+            ),
         ]
     )
     store = MemoryStore(topology=topology)
 
     write_pipeline = MemoryPipeline(
         representation=(
-            BasicRepresentation(elements=("text", "embedding")),
+            BasicRepresentation(elements=("text",)),
             LLMRepresentation(field="entities", prompt="Extract grounded entities from this memory unit."),
             LLMRepresentation(field="tags", prompt="Extract short retrieval tags for this memory unit."),
         ),

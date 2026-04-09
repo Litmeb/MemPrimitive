@@ -90,8 +90,18 @@ def build_mem0_memory_system(
     topology = StoreTopology.from_layers(
         [
             StoreLayerSpec(name="recent_dialogue", theme="working", indices=("temporal",)),
-            StoreLayerSpec(name="conversation_summary", theme="semantic", indices=("temporal", "vector")),
-            StoreLayerSpec(name="profile", theme="semantic", indices=("vector", "temporal")),
+            StoreLayerSpec(
+                name="conversation_summary",
+                theme="semantic",
+                indices=("temporal", "vector"),
+                settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+            ),
+            StoreLayerSpec(
+                name="profile",
+                theme="semantic",
+                indices=("vector", "temporal"),
+                settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+            ),
         ]
     )
     store = MemoryStore(topology=topology)
@@ -189,7 +199,7 @@ def build_mem0_memory_system(
         memory_evolution=LLMFunctionCallEvolution(
             source_layer="profile",
             target_layer="profile",
-            tools=build_fixed_profile_tools(embed_on_add=True, embed_on_update=True),
+            tools=build_fixed_profile_tools(embed_on_add=False, embed_on_update=False),
             prompt=structured_prompt(
                 {
                     "blocks": [

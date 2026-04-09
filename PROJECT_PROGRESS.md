@@ -39,6 +39,9 @@ Avoid re-documenting these in detail unless something materially changes.
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
 - Integration smoke coverage for real LLM / embedding baselines exists in `tests/test_smoke_real_model_modules.py` and can exercise the main LLM-backed baseline families when runtime credentials are configured.
+- Embedding first-stage downshift is now implemented: ordinary record-level text embeddings can be declared per layer in `StoreLayerSpec.settings["embedding"]`, and `MemoryStore.append()` / `replace_record()` now auto-generate or refresh `record.embedding` for those layers.
+- The implemented policy boundary is intentionally narrow: stage 1 only handles `mode="text"` with refresh on semantic text change. Entity embeddings, note-payload-derived embeddings, query embeddings, and the broader `UNIT_EMBEDDING_CONTRACT` redesign are still deliberately left in their existing specialized paths.
+- Follow-up simplification landed in the expected moderate form: responsibility is more centralized and Mem0/tool-path manual embedding logic is smaller, but the harder embedding complexity still remains in graph/entity/note/query-specialized paths.
 - `memprimitive/example/classics` now contains executable reconstructions rather than an empty placeholder. The most important current examples are:
   - COMEDY / compressive-memory style hierarchical maintenance
   - Mem0
@@ -87,9 +90,16 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 ### A-MEM / Agentic Memory
 
-- Current baseline modules likely suffice for a mechanism-level reconstruction without adding new primitives.
-- The main remaining gap is fidelity of orchestration and storage shape, not obvious missing baseline coverage.
-- A higher-fidelity reconstruction would likely want an example-local loop for "new note -> neighbor fetch -> link strengthen -> neighbor rewrite" rather than trying to force everything through one default ingest pass.
+- Paper + upstream repo review now suggests current baseline modules are sufficient for an A-MEM reconstruction without adding new primitives, as long as alignment follows the easier repo-consistent path rather than the paper's most ambitious wording.
+- The clean mapping is now clearer:
+  - note construction -> `SemanticFieldEnrichmentRepresentation` + `RetrievalOrientedEmbeddingRepresentation`
+  - append note into graph memory -> `GraphAppendLinkReadyOrganization`
+  - link generation -> `LinkStrengtheningEvolution`
+  - neighbor memory rewrite -> `NeighborContextUpdateEvolution`
+  - retrieval -> `VectorGraphSeedAndExpandRetrieval`
+- The main remaining work is example-level wiring and prompt/readout shaping, not baseline-family coverage.
+- Important paper/repo mismatch: the paper text says evolved neighbors may update context, keywords, and tags, but the released repos mostly implement context/tag updates only. The current framework matches the repo-side behavior more naturally; keyword rewrite should be treated as optional fidelity stretch, not a blocker.
+- Retrieval alignment is also better with the repo interpretation: seed by embedding similarity, then expand by stored links / neighbors. Query keyword generation can be expressed with existing retrieval-query rewrite machinery rather than a new primitive.
 
 ### Other Boundary Papers
 

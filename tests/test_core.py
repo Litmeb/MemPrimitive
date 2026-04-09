@@ -13,6 +13,22 @@ from memprimitive.contracts import (
     UNIT_TAGS_CONTRACT,
 )
 from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Observation, Query, StoreLayerSpec, StoreTopology
+from memprimitive.utils import _runtime as runtime_module
+
+
+class _FakeRuntime:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def embed(self, text: str) -> list[float]:
+        normalized = str(text).strip()
+        self.calls.append(normalized)
+        return [float(len(normalized)), float(sum(ord(ch) for ch in normalized) % 97)]
+
+
+def _fake_embedding(text: str) -> list[float]:
+    normalized = str(text).strip()
+    return [float(len(normalized)), float(sum(ord(ch) for ch in normalized) % 97)]
 
 
 def test_observation_rejects_empty_text() -> None:
@@ -222,6 +238,220 @@ def test_memory_record_from_unit_carries_embedding_vector_and_representation_dim
     assert record.metadata["representation"]["normalized_text"] == "alice likes tea."
     assert record.metadata["representation"]["entities"] == ["Alice"]
     assert record.metadata["representation"]["embedding"] == {"dim": 3}
+
+
+def test_memory_store_append_auto_embeds_record_when_layer_policy_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="semantic",
+                    theme="semantic",
+                    indices=("vector",),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
+
+    record = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="semantic",
+        text="Alice likes tea",
+        timestamp="2026-01-01T00:00:00+00:00",
+    )
+    store.append(record)
+
+    stored = store.iter_records("semantic")[0]
+    assert stored.embedding == _fake_embedding("Alice likes tea")
+    assert fake_runtime.calls == ["Alice likes tea"]
+
+
+def test_memory_store_append_skips_auto_embedding_when_layer_policy_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="default")]))
+
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="plain note",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+    assert store.iter_records("default")[0].embedding is None
+    assert fake_runtime.calls == []
+
+
+def test_memory_store_replace_record_refreshes_embedding_when_text_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="semantic",
+                    theme="semantic",
+                    indices=("vector",),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="semantic",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+    updated = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="semantic",
+        text="Alice likes jasmine tea",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={"changed": True},
+    )
+    store.replace_record("semantic", "rec-1", updated)
+
+    stored = store.iter_records("semantic")[0]
+    assert stored.embedding == _fake_embedding("Alice likes jasmine tea")
+    assert fake_runtime.calls == ["Alice likes tea", "Alice likes jasmine tea"]
+
+
+def test_memory_store_replace_record_keeps_embedding_when_only_metadata_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="semantic",
+                    theme="semantic",
+                    indices=("vector",),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="semantic",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    original_embedding = list(store.iter_records("semantic")[0].embedding)
+
+    store.replace_record(
+        "semantic",
+        "rec-1",
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="semantic",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"owner": "updated"},
+        ),
+    )
+
+    stored = store.iter_records("semantic")[0]
+    assert stored.embedding == original_embedding
+    assert stored.metadata["owner"] == "updated"
+    assert fake_runtime.calls == ["Alice likes tea"]
+
+
+def test_memory_store_graph_link_updates_do_not_refresh_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="knowledge_graph",
+                    theme="semantic",
+                    shape="Graph",
+                    indices=("graph", "vector"),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="knowledge_graph",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"graph": {"entities": ["Alice"], "links": []}},
+        )
+    )
+    original_embedding = list(store.iter_records("knowledge_graph")[0].embedding)
+
+    merged_links = store.add_graph_links("knowledge_graph", "rec-1", ["rec-2"])
+
+    stored = store.iter_records("knowledge_graph")[0]
+    assert merged_links == ["rec-2"]
+    assert stored.embedding == original_embedding
+    assert stored.metadata["graph"]["links"] == ["rec-2"]
+    assert fake_runtime.calls == ["Alice likes tea"]
+
+
+def test_memory_store_replace_record_preserves_explicit_embedding_over_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="semantic",
+                    theme="semantic",
+                    indices=("vector",),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="semantic",
+            text="Alice likes tea",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+    store.replace_record(
+        "semantic",
+        "rec-1",
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="semantic",
+            text="Alice likes tea very much",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[9.0, 9.0],
+        ),
+    )
+
+    stored = store.iter_records("semantic")[0]
+    assert stored.embedding == [9.0, 9.0]
+    assert fake_runtime.calls == ["Alice likes tea"]
 
 
 def test_memory_store_check_passes_without_registered_modules() -> None:

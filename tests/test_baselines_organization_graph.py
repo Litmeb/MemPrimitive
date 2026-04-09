@@ -143,7 +143,19 @@ def test_graph_append_organization_requires_graph_layer_and_writes_graph_metadat
             represented = self._replace_unit(unit, unit.text.strip(), unit.text.strip().casefold(), entities, triples)
             return represented, {"source": "test_seed", "entities": entities, "triple_count": len(triples)}
 
-    store = _graph_store()
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="knowledge_graph",
+                    theme="semantic",
+                    shape="Graph",
+                    indices=("graph", "entity", "vector"),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice likes tea.", source="notes")),
         store,
@@ -183,7 +195,19 @@ def test_graph_append_organization_preserves_standard_record_embedding_shape() -
             )
             return represented, {"source": "test_seed"}
 
-    store = _graph_store()
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="knowledge_graph",
+                    theme="semantic",
+                    shape="Graph",
+                    indices=("graph", "entity", "vector"),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
     packet, store = PassThroughUnitFormation().run(
         Packet(observation=Observation(text="Alice likes tea.", source="notes")),
         store,
@@ -501,7 +525,19 @@ def test_graph_deduplication_append_organization_uses_runtime_embedding_and_skip
 
     fake_runtime = _FakeAMEMRuntime()
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
-    store = _graph_store()
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(
+                    name="knowledge_graph",
+                    theme="semantic",
+                    shape="Graph",
+                    indices=("graph", "entity", "vector"),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                )
+            ]
+        )
+    )
     store.append(
         MemoryRecord(
             record_id="rec-missing",
@@ -548,7 +584,7 @@ def test_graph_deduplication_append_organization_uses_runtime_embedding_and_skip
     assert record.text == "Alice likes tea."
     assert record.embedding == target_embedding
     assert packet.trace["organization"]["effects"][0]["effect_type"] == "merge"
-    assert packet.trace["organization"]["effects"][0]["embedding_source"] == "runtime_fallback"
+    assert packet.trace["organization"]["effects"][0]["embedding_source"] == "store_policy_fallback"
     assert packet.trace["organization"]["records_with_embedding"] == 1
     assert store.count("knowledge_graph") == 3
 

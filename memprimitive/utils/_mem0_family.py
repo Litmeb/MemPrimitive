@@ -121,6 +121,8 @@ def build_fixed_profile_tools(
     embed_on_add: bool,
     embed_on_update: bool,
 ) -> list[WriteToolSpec]:
+    del embed_on_add, embed_on_update
+
     def _now_iso() -> str:
         return datetime.now(UTC).isoformat()
 
@@ -145,14 +147,12 @@ def build_fixed_profile_tools(
         packet_unit = context.packet.units[0] if context.packet.units else None
         unit_id = packet_unit.unit_id if packet_unit is not None else f"tool-unit-{context.store.next_sequence_id()}"
         timestamp = packet_unit.timestamp if packet_unit is not None else _now_iso()
-        embedding = get_runtime().embed(text) if embed_on_add else None
         record = MemoryRecord(
             record_id=f"rec-{context.store.next_sequence_id()}",
             unit_id=unit_id,
             layer="profile",
             text=text,
             timestamp=timestamp,
-            embedding=embedding,
             metadata=_tool_metadata(metadata, action="ADD_PROFILE", context=context),
         )
         context.store.append(record)
@@ -172,13 +172,10 @@ def build_fixed_profile_tools(
     def _update_executor(context: WriteToolCallContext, arguments: dict[str, object]) -> WriteToolResult:
         record = find_visible_record(context, str(arguments.get("record_id", "")))
         text = record.text
-        embedding = record.embedding
         if "text" in arguments:
             text = str(arguments.get("text", "")).strip()
             if not text:
                 raise ValueError("UPDATE_PROFILE text must be non-empty when provided.")
-            if embed_on_update:
-                embedding = get_runtime().embed(text)
         metadata_patch = arguments.get("metadata_patch", {})
         if metadata_patch is None:
             metadata_patch = {}
@@ -190,7 +187,6 @@ def build_fixed_profile_tools(
             layer=record.layer,
             text=text,
             timestamp=record.timestamp,
-            embedding=embedding,
             metadata=_tool_metadata({**record.metadata, **metadata_patch}, action="UPDATE_PROFILE", context=context),
         )
         context.store.replace_record(record.layer, record.record_id, updated)

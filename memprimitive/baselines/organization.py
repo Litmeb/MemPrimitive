@@ -37,7 +37,6 @@ from ..utils._llm_function_tools import (
     write_tool_specs_require_graph_contracts,
 )
 from ..utils._runtime import Runtime
-from ..utils._runtime import get_runtime
 from ..utils._template import (
     PromptPlan,
     ensure_prompt_plan,
@@ -140,14 +139,15 @@ def _record_from_unit_with_text(
     normalized_text = str(text).strip()
     if not normalized_text:
         raise ValueError("text override must be a non-empty string.")
+    effective_embedding = list(unit.embedding) if embedding is None and unit.embedding is not None else embedding
     representation_elements = set(unit.representation_elements)
-    if embedding is not None:
+    if effective_embedding is not None:
         representation_elements.add("embedding")
     projected_unit = replace(
         unit,
         text=normalized_text,
         normalized_text=normalized_text.casefold().strip(),
-        embedding=None if embedding is None else list(embedding),
+        embedding=None if effective_embedding is None else list(effective_embedding),
         representation_elements=tuple(sorted(representation_elements)),
     )
     return MemoryRecord.from_unit(unit=projected_unit, layer=layer, sequence_id=sequence_id)
@@ -173,13 +173,6 @@ def _entity_embedding_map_from_unit(unit) -> dict[str, list[float]]:
             continue
         normalized[entity_text] = embedding
     return normalized
-
-
-def _ensure_unit_embedding(unit) -> Any:
-    if unit.embedding is not None:
-        return unit
-    runtime = get_runtime()
-    return replace(unit, embedding=runtime.embed(unit.text))
 
 
 def _representation_summary_for_graph_merge(unit, existing_record: MemoryRecord) -> dict[str, Any]:
@@ -723,23 +716,23 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
 
     def _find_best_match(self, store: MemoryStore, unit) -> tuple[MemoryRecord | None, float | None, str]:
         embedding_source = "existing_unit_embedding"
-        candidate_unit = unit
-        if unit.embedding is None:
-            candidate_unit = _ensure_unit_embedding(unit)
-            embedding_source = "runtime_fallback"
-        if candidate_unit.embedding is None:
+        candidate_embedding = None if unit.embedding is None else list(unit.embedding)
+        if candidate_embedding is None:
+            candidate_embedding = store.embedding_for_record(self.target_layer, unit.text)
+            embedding_source = "store_policy_fallback"
+        if candidate_embedding is None:
             return None, None, embedding_source
         best_record: MemoryRecord | None = None
         best_similarity: float | None = None
         for candidate in store.iter_records(self.target_layer):
-            if candidate.embedding is None or len(candidate.embedding) != len(candidate_unit.embedding):
+            if candidate.embedding is None or len(candidate.embedding) != len(candidate_embedding):
                 continue
-            similarity = Runtime.cosine_similarity(candidate_unit.embedding, candidate.embedding)
+            similarity = Runtime.cosine_similarity(candidate_embedding, candidate.embedding)
             if best_similarity is None or similarity > best_similarity:
                 best_record = candidate
                 best_similarity = float(similarity)
-        if unit.embedding is None and candidate_unit.embedding is not None:
-            unit.embedding = list(candidate_unit.embedding)
+        if unit.embedding is None:
+            unit.embedding = list(candidate_embedding)
         return best_record, best_similarity, embedding_source
 
     def _merge_record(self, existing_record: MemoryRecord, unit) -> MemoryRecord:
