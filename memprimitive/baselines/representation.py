@@ -30,13 +30,14 @@ from ..utils._amem_family import (
     DEFAULT_EMBEDDING_VERSION,
     DEFAULT_NOTE_NAMESPACE,
     repair_note_payload,
-    representation_from_note_payload,
 )
 from ..utils._template import (
     PromptPlan,
     ensure_prompt_plan,
+    looks_like_template,
     project_unit_for_template,
     render_prompt_plan,
+    text_prompt,
 )
 from ..utils._trace import copy_trace
 
@@ -1026,39 +1027,38 @@ class SemanticFieldEnrichmentRepresentation(RepresentationModule):
         return repair_note_payload(raw, fallback_content=unit.text, default_category=self.default_category)
 
 
-class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
-    """Embed enriched note fields into a retrieval-oriented composite representation.
+class ConfigurableEmbeddingRepresentation(RepresentationModule):
+    """Build embeddings from configurable text or template-rendered text.
 
-    Constructor: ``note_namespace`` selects which repaired note payload to read.
-    ``embedding_version`` is written into trace and representation metadata so
-    downstream retrieval/readout modules can reason about the embedding source.
+    Constructor: ``embedding_text`` controls the text sent to the embedding
+    runtime. It may be a literal string, a template string, or a full
+    :class:`~memprimitive.utils._template.PromptPlan`. When omitted, the module
+    embeds ``unit.text``. ``embedding_version`` is recorded in trace and
+    representation metadata as embedding provenance.
 
     ``run`` requires ``packet.units`` and does not mutate ``store``. Units keep
-    their original identity while gaining embedding vectors plus a structured
-    ``metadata['representation']`` projection derived from the note payload.
+    their original identity and text-facing fields while gaining embedding
+    vectors plus a structured ``metadata['representation']`` projection that
+    records the embedding input text.
     """
 
     spec = ModuleSpec(
-        name="retrieval_oriented_embedding_representation",
+        name="configurable_embedding_representation",
         slot="representation",
         input_requirements=("units",),
         output_guarantees=("units.embedding", "units.metadata.representation"),
     )
-    requires_contracts = frozenset({UNIT_NOTE_PAYLOAD_CONTRACT})
-    produces_contracts = frozenset({UNIT_EMBEDDING_CONTRACT, UNIT_NOTE_PAYLOAD_CONTRACT})
+    requires_contracts = frozenset()
+    produces_contracts = frozenset({UNIT_EMBEDDING_CONTRACT})
 
     def __init__(
         self,
         *,
-        note_namespace: str = DEFAULT_NOTE_NAMESPACE,
-        default_category: str = DEFAULT_CATEGORY,
+        embedding_text: PromptPlan | str | None = None,
         embedding_version: str = DEFAULT_EMBEDDING_VERSION,
         embedding_model: str | None = None,
     ) -> None:
-        if not str(note_namespace).strip():
-            raise ValueError("RetrievalOrientedEmbeddingRepresentation requires a non-empty note_namespace.")
-        self.note_namespace = str(note_namespace).strip()
-        self.default_category = default_category
+        self.embedding_text = embedding_text if embedding_text is not None else text_prompt("{{ unit.text }}")
         self.embedding_version = embedding_version
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
@@ -1069,57 +1069,32 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
-            raise ValueError("RetrievalOrientedEmbeddingRepresentation requires packet.units.")
+            raise ValueError("ConfigurableEmbeddingRepresentation requires packet.units.")
 
         represented_units: list[MemoryUnit] = []
         per_unit_trace: list[dict[str, Any]] = []
         for unit in packet.units:
-            payload = repair_note_payload(
-                unit.metadata.get(self.note_namespace),
-                fallback_content=unit.text,
-                default_category=self.default_category,
+            embedding_input_text, prompt_trace, store = self._render_embedding_text(packet, unit, store)
+            embedding = self._embed_text(embedding_input_text)
+            represented_unit = replace(
+                unit,
+                embedding=embedding,
+                representation_elements=tuple(sorted({*unit.representation_elements, "embedding"})),
             )
-            representation = representation_from_note_payload(payload, embedding_version=self.embedding_version)
-            embedding = self._embed_text(representation["enhanced_embedding_text"])
+            representation_meta = {
+                **_representation_summary_from_unit(represented_unit),
+                "embedding_input_text": embedding_input_text,
+                "embedding_input_preview": embedding_input_text[:200],
+                "embedding_version": self.embedding_version,
+            }
+            representation_meta.pop("enhanced_embedding_text", None)
             represented_units.append(
                 replace(
-                    unit,
-                    text=payload["content"],
-                    normalized_text=payload["content"].casefold(),
-                    embedding=embedding,
-                    description=payload["context"],
-                    tags=list(payload["tags"]),
-                    representation_elements=tuple(
-                        sorted(
-                            {
-                                *unit.representation_elements,
-                                "text",
-                                "embedding",
-                                "description",
-                                "keywords",
-                                "tags",
-                            }
-                        )
-                    ),
+                    represented_unit,
                     metadata={
-                        **unit.metadata,
-                        self.note_namespace: {
-                            **payload,
-                            "enhanced_embedding_text": representation["enhanced_embedding_text"],
-                            "embedding_version": self.embedding_version,
-                        },
+                        **represented_unit.metadata,
                         "representation": {
-                            **_representation_summary_from_unit(
-                                replace(
-                                    unit,
-                                    text=payload["content"],
-                                    normalized_text=payload["content"].casefold(),
-                                    embedding=embedding,
-                                    description=payload["context"],
-                                    tags=list(payload["tags"]),
-                                )
-                            ),
-                            **representation,
+                            **representation_meta,
                         },
                     },
                 )
@@ -1127,17 +1102,19 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
             per_unit_trace.append(
                 {
                     "unit_id": unit.unit_id,
-                    "namespace": self.note_namespace,
                     "embedding_version": self.embedding_version,
-                    "enhanced_embedding_text": representation["enhanced_embedding_text"],
+                    "embedding_input_text": embedding_input_text,
+                    "embedding_input_preview": embedding_input_text[:200],
+                    **prompt_trace,
                 }
             )
 
         trace = copy_trace(packet)
+        prompt_plan = ensure_prompt_plan(self.embedding_text, metadata_mode="prompt")
         trace["representation"] = {
             "module": self.spec.name,
-            "note_namespace": self.note_namespace,
             "embedding_version": self.embedding_version,
+            "prompt_is_template": prompt_plan.mode == "structured" or looks_like_template(str(prompt_plan.template)),
             "per_unit": per_unit_trace,
         }
         return replace(packet, units=represented_units, trace=trace), store
@@ -1147,6 +1124,28 @@ class RetrievalOrientedEmbeddingRepresentation(RepresentationModule):
 
         return list(get_runtime().embed(text))
 
+    def _render_embedding_text(
+        self,
+        packet: Packet,
+        unit: MemoryUnit,
+        store: MemoryStore,
+    ) -> tuple[str, dict[str, Any], MemoryStore]:
+        rendered, prompt_trace, store = render_prompt_plan(
+            ensure_prompt_plan(
+                self.embedding_text,
+                metadata_mode="prompt",
+                context_builder=lambda current_packet, current_store: {
+                    "unit": project_unit_for_template(unit),
+                },
+            ),
+            packet=packet,
+            store=store,
+        )
+        normalized = rendered.strip()
+        if not normalized:
+            raise ValueError("ConfigurableEmbeddingRepresentation requires non-empty embedding text.")
+        return normalized, prompt_trace, store
+
 
 BASELINE_SLOT: Final[str] = "representation"
 BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
@@ -1154,5 +1153,5 @@ BASELINE_CLASSES: Final[tuple[type[RepresentationModule], ...]] = (
     TripleRepresentation,
     LLMRepresentation,
     SemanticFieldEnrichmentRepresentation,
-    RetrievalOrientedEmbeddingRepresentation,
+    ConfigurableEmbeddingRepresentation,
 )

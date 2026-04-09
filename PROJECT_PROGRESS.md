@@ -42,6 +42,7 @@ Avoid re-documenting these in detail unless something materially changes.
 - Embedding first-stage downshift is now implemented: ordinary record-level text embeddings can be declared per layer in `StoreLayerSpec.settings["embedding"]`, and `MemoryStore.append()` / `replace_record()` now auto-generate or refresh `record.embedding` for those layers.
 - The implemented policy boundary is intentionally narrow: stage 1 only handles `mode="text"` with refresh on semantic text change. Entity embeddings, note-payload-derived embeddings, query embeddings, and the broader `UNIT_EMBEDDING_CONTRACT` redesign are still deliberately left in their existing specialized paths.
 - Follow-up simplification landed in the expected moderate form: responsibility is more centralized and Mem0/tool-path manual embedding logic is smaller, but the harder embedding complexity still remains in graph/entity/note/query-specialized paths.
+- `ConfigurableEmbeddingRepresentation` is now the generic text-configurable embedding representation primitive: render configurable text (including template-based text) from the current unit, embed that text, and record embedding-input provenance in `metadata["representation"]` / trace without rewriting the unit's main text-facing fields.
 - `memprimitive/example/classics` now contains executable reconstructions rather than an empty placeholder. The most important current examples are:
   - COMEDY / compressive-memory style hierarchical maintenance
   - A-MEM / Agentic Memory
@@ -93,7 +94,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 - Paper + upstream repo review now suggests current baseline modules are sufficient for an A-MEM reconstruction without adding new primitives, as long as alignment follows the easier repo-consistent path rather than the paper's most ambitious wording.
 - The clean mapping is now clearer:
-  - note construction -> `SemanticFieldEnrichmentRepresentation` + `RetrievalOrientedEmbeddingRepresentation`
+  - note construction -> `SemanticFieldEnrichmentRepresentation` + `ConfigurableEmbeddingRepresentation`
   - append note into graph memory -> `GraphAppendOrganization`
   - link generation -> `LinkStrengtheningEvolution`
   - neighbor memory rewrite -> `NeighborContextUpdateEvolution`

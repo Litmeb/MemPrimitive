@@ -25,7 +25,7 @@ from baselines_test_helpers import (
 
 def test_semantic_field_enrichment_and_retrieval_embedding_repair_note_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.utils import _runtime
-    from memprimitive.baselines import RetrievalOrientedEmbeddingRepresentation, SemanticFieldEnrichmentRepresentation
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, SemanticFieldEnrichmentRepresentation
 
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
     packet = Packet(
@@ -38,12 +38,23 @@ def test_semantic_field_enrichment_and_retrieval_embedding_repair_note_schema(mo
     )
 
     packet, store = SemanticFieldEnrichmentRepresentation(note_namespace="amem").run(packet, MemoryStore())
-    packet, _ = RetrievalOrientedEmbeddingRepresentation(note_namespace="amem").run(packet, store)
+    packet, _ = ConfigurableEmbeddingRepresentation(
+        embedding_text=(
+            "{{ unit.metadata.amem.content }} | "
+            "context: {{ unit.metadata.amem.context }} | "
+            "keywords: {{ unit.metadata.amem.keywords | join(', ') }} | "
+            "tags: {{ unit.metadata.amem.tags | join(', ') }}"
+        )
+    ).run(packet, store)
 
     unit = packet.units[0]
     assert unit.metadata["amem"]["note_text"].startswith("Comprehensive note:")
-    assert unit.metadata["representation"]["enhanced_embedding_text"].startswith("content: Alice likes tea.")
-    assert unit.embedding == _runtime._DEFAULT_RUNTIME.embed(unit.metadata["representation"]["enhanced_embedding_text"])
+    assert unit.text == "Alice likes tea."
+    assert unit.metadata["representation"]["embedding_input_text"] == (
+        "Alice likes tea. | context: Alice's tea habit supports her daily routine. | "
+        "keywords: alice, tea, routine | tags: preference, habit, beverage"
+    )
+    assert unit.embedding == _runtime._DEFAULT_RUNTIME.embed(unit.metadata["representation"]["embedding_input_text"])
 
 
 def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: pytest.MonkeyPatch) -> None:

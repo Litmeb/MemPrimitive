@@ -60,7 +60,7 @@ unit_formation
 | `TripleRepresentation` (`triple_representation`) | `method="direct"`, `prompt=None`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None`, `embed_extracted=False`, `embed_entities=False` | 用 LLM 抽取 `(subject, relation, object)` triples；`embed_extracted=True` 时给整份抽取出的 `entities + triples` 生成一个 graph-object embedding 写回 `unit.embedding`，`embed_entities=True` 时额外把每个 entity 的 embedding 写入 `metadata["representation"]["entity_embeddings"]`。 |
 | `LLMRepresentation` (`llm_representation`) | `field`, `prompt`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 prompt 驱动的方式为 unit 生成一个语义字段，并回写到 `metadata["representation"]` 等标准位置。 |
 | `SemanticFieldEnrichmentRepresentation` (`semantic_field_enrichment_representation`) | `note_namespace="note"`, `strict_llm=True`, `default_category="Uncategorized"` | 生成更丰富的 note 结构字段，供图存储或高阶检索使用。 |
-| `RetrievalOrientedEmbeddingRepresentation` (`retrieval_oriented_embedding_representation`) | `note_namespace="note"`, `default_category="Uncategorized"`, `embedding_version="content_context_keywords_tags_v2"`, `embedding_model=None` | 为 note 风格记录构造更适合检索的复合 embedding。 |
+| `ConfigurableEmbeddingRepresentation` (`configurable_embedding_representation`) | `embedding_text=None`, `embedding_version="content_context_keywords_tags_v2"`, `embedding_model=None` | 基于可配置文本或模板渲染文本生成 embedding，并记录 embedding 输入来源。 |
 
 ## `write_trigger`
 

@@ -1274,7 +1274,7 @@ MIRIX 的 memory 机制重点，不是“单一记忆库上再叠一层检索”
 - 哪些模块只能部分复用
   - `BasicRepresentation`
     - 可提供 `summary`、`embedding`、`keywords` 等通用增强，但不能产出 MIRIX 所需的多 schema typed memory payload。
-  - `RetrievalOrientedEmbeddingRepresentation`
+  - `ConfigurableEmbeddingRepresentation`
     - 可覆盖“表示后附 embedding 供检索”的局部需求，但不负责把交互抽成 episodic / semantic / procedural / resource / vault 这些不同结构。
   - `SemanticFieldEnrichmentRepresentation`
     - 只是在统一记录上补语义字段，不是按 memory family 分化 schema。

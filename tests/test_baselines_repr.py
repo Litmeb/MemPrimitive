@@ -4,6 +4,7 @@ import json
 from typing import Any
 import pytest
 
+from memprimitive.contracts import UNIT_EMBEDDING_CONTRACT, UNIT_NOTE_PAYLOAD_CONTRACT
 from memprimitive.core import (
     MemoryStore,
     Observation,
@@ -11,8 +12,10 @@ from memprimitive.core import (
     StoreLayerSpec,
     StoreTopology,
 )
+from memprimitive.utils import _runtime
 
 from baselines_test_helpers import (
+    _FakeAMEMRuntime,
     _seed_layer,
 )
 
@@ -70,6 +73,107 @@ def test_basic_representation_rejects_legacy_triple_element() -> None:
 
     with pytest.raises(ValueError, match="Unsupported representation element"):
         BasicRepresentation(elements=("text", "triple"))
+
+
+def test_configurable_embedding_representation_defaults_to_unit_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, PassThroughUnitFormation
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+
+    out, _ = ConfigurableEmbeddingRepresentation().run(packet, store)
+
+    unit = out.units[0]
+    assert unit.text == "Alice likes tea."
+    assert unit.normalized_text is None
+    assert unit.description is None
+    assert unit.tags == []
+    assert unit.metadata["representation"]["embedding_input_text"] == "Alice likes tea."
+    assert unit.metadata["representation"]["embedding_input_preview"] == "Alice likes tea."
+    assert unit.metadata["representation"]["embedding_version"]
+    assert unit.metadata["representation"]["embedding"]["dim"] == len(unit.embedding)
+    assert unit.embedding == _runtime._DEFAULT_RUNTIME.embed("Alice likes tea.")
+    assert "enhanced_embedding_text" not in unit.metadata["representation"]
+    assert out.trace["representation"]["prompt_is_template"] is True
+    assert out.trace["representation"]["per_unit"][0]["embedding_input_text"] == "Alice likes tea."
+
+
+def test_configurable_embedding_representation_supports_literal_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, PassThroughUnitFormation
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+
+    out, _ = ConfigurableEmbeddingRepresentation(embedding_text="focus only").run(packet, store)
+
+    assert out.units[0].metadata["representation"]["embedding_input_text"] == "focus only"
+    assert out.units[0].embedding == _runtime._DEFAULT_RUNTIME.embed("focus only")
+    assert out.trace["representation"]["prompt_is_template"] is False
+
+
+def test_configurable_embedding_representation_supports_template_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, PassThroughUnitFormation
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    packet, store = PassThroughUnitFormation().run(
+        Packet(
+            observation=Observation(
+                text="Alice likes tea.",
+                source="notes",
+                metadata={
+                    "amem": {
+                        "content": "Alice likes tea.",
+                        "context": "Tea supports focus.",
+                        "keywords": ["alice", "tea"],
+                        "tags": ["preference", "habit"],
+                    }
+                },
+            )
+        ),
+        MemoryStore(),
+    )
+
+    out, _ = ConfigurableEmbeddingRepresentation(
+        embedding_text=(
+            "{{ unit.metadata.amem.content }} | "
+            "context: {{ unit.metadata.amem.context }} | "
+            "keywords: {{ unit.metadata.amem.keywords | join(', ') }}"
+        )
+    ).run(packet, store)
+
+    assert out.units[0].metadata["representation"]["embedding_input_text"] == (
+        "Alice likes tea. | context: Tea supports focus. | keywords: alice, tea"
+    )
+    assert out.trace["representation"]["per_unit"][0]["missing_variables"] == []
+
+
+def test_configurable_embedding_representation_rejects_empty_rendered_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, PassThroughUnitFormation
+
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice likes tea.", source="notes")),
+        MemoryStore(),
+    )
+
+    with pytest.raises(ValueError, match="non-empty embedding text"):
+        ConfigurableEmbeddingRepresentation(embedding_text="   ").run(packet, store)
+
+
+def test_configurable_embedding_representation_contracts_are_embedding_only() -> None:
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation
+
+    module = ConfigurableEmbeddingRepresentation()
+
+    assert module.get_requires_contracts() == frozenset()
+    assert module.get_produces_contracts() == frozenset({UNIT_EMBEDDING_CONTRACT})
+    assert UNIT_NOTE_PAYLOAD_CONTRACT not in module.get_produces_contracts()
 
 
 def test_triple_representation_direct_uses_real_llm(require_real_runtime: None) -> None:

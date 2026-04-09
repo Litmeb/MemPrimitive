@@ -9,7 +9,7 @@ Coverage map (one pass per public module that calls into LLM or embedding):
 
 - **representation**: ``BasicRepresentation``, ``TripleRepresentation``,
   ``LLMRepresentation``, ``SemanticFieldEnrichmentRepresentation``,
-  ``RetrievalOrientedEmbeddingRepresentation``
+  ``ConfigurableEmbeddingRepresentation``
 - **retrieval**: ``EmbeddingSimilarityRetrieval``, ``QueryRewriteRetrieval`` (llm),
   ``VectorGraphSeedAndExpandRetrieval`` (LLM query expand + ``Runtime.embed`` + graph expand)
 - **organization**: ``GraphDeduplicationAppendOrganization``,
@@ -160,9 +160,10 @@ def test_smoke_semantic_field_enrichment_representation(require_real_runtime: No
 
 
 @pytest.mark.integration
-def test_smoke_retrieval_oriented_embedding_representation() -> None:
-    from memprimitive.baselines import PassThroughUnitFormation, RetrievalOrientedEmbeddingRepresentation
+def test_smoke_configurable_embedding_representation() -> None:
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, PassThroughUnitFormation
     from memprimitive.utils._amem_family import repair_note_payload
+    from memprimitive.utils._template import text_prompt
 
     payload = repair_note_payload(
         {"content": "Carol indexes embeddings for retrieval.", "note_text": "Carol indexes embeddings for retrieval."},
@@ -179,7 +180,9 @@ def test_smoke_retrieval_oriented_embedding_representation() -> None:
         metadata={**unit.metadata, DEFAULT_NOTE_NAMESPACE: dict(payload)},
     )
     packet = _packet_with_unit(packet, unit)
-    out, _ = RetrievalOrientedEmbeddingRepresentation().run(packet, store)
+    out, _ = ConfigurableEmbeddingRepresentation(
+        embedding_text=text_prompt("{{ unit.metadata.note.content }}")
+    ).run(packet, store)
     assert out.units is not None
     assert out.units[0].embedding is not None
     assert len(out.units[0].embedding) > 0
