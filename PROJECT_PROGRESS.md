@@ -135,6 +135,10 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Important paper/repo mismatch: the paper describes a generic verbal reinforcement framework with episodic memory, but the public repo implementations are mostly plain append-only text memory plus prompt templating, sometimes with a recent-3 truncation rule. The current framework matches this repo-side interpretation better than a more ambitious generalized-learning reading.
 - The memory-only orchestration now exists in `memprimitive/example/classics/reflexion_memory.py` and is covered by deterministic tests in `tests/test_classics_reflexion.py`.
 - New primitive work is only needed if future goals expand beyond the repo-consistent Reflexion memory slice, such as trial-indexed multi-task memory partitioning, richer evaluator provenance, or tighter coupling between evaluation outcome and recall selection.
+- Paper-fidelity gaps are now clearer for the memory slice:
+  - reflection generation now conditions on prior retained reflections via prompt-side sub-recall, so the earlier "latest failed trial only" mismatch is closed without adding a Reflexion-specific primitive
+  - the helper/default path now prefers an explicit full `trial_trace` for short-term memory and only falls back to `last_attempt`, so the earlier "single compressed attempt string only" mismatch is also closed at the example level
+  - recall is still a pure recency window over one shared reflection buffer, so the example still lacks the paper's task-local trial loop semantics and can mix reflections across unrelated tasks unless the caller isolates stores manually; this is currently treated as an intentional research-prototype simplification rather than a primitive gap
 
 ### Other Boundary Papers
 
