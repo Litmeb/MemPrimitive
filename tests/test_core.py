@@ -9,7 +9,6 @@ from memprimitive.contracts import (
     TOPOLOGY_TAG_INDEX_CONTRACT,
     TOPOLOGY_VECTOR_INDEX_CONTRACT,
     UNIT_EMBEDDING_CONTRACT,
-    UNIT_NOTE_PAYLOAD_CONTRACT,
     UNIT_TAGS_CONTRACT,
 )
 from memprimitive.core import MemoryRecord, MemoryStore, MemoryUnit, ModuleSpec, Observation, Query, StoreLayerSpec, StoreTopology
@@ -508,9 +507,9 @@ def test_memory_store_topology_contracts_surface_declared_capabilities() -> None
             id="missing-tags-and-tag-index",
         ),
         pytest.param(
-            (UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT),
+            (RECORD_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT),
             (),
-            {UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT},
+            {RECORD_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT},
             id="missing-note-payload-and-graph-vector-layer",
         ),
         pytest.param(
@@ -552,11 +551,6 @@ def test_memory_store_check_accepts_contracts_jointly_satisfied_by_modules_and_t
                 StoreLayerSpec(name="knowledge_graph", shape="Graph", indices=("graph", "vector")),
             ]
         )
-    )
-    store.register_module_contracts(
-        slot="representation",
-        module_name="semantic_field_enrichment_representation",
-        produces_contracts=(UNIT_NOTE_PAYLOAD_CONTRACT,),
     )
     store.register_module_contracts(
         slot="organization",

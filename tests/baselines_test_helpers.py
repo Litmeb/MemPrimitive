@@ -125,6 +125,39 @@ def _invoke_runtime_tool(tool, arguments: dict[str, Any]) -> Any:
 
 
 class _FakeAMEMRuntime:
+    @staticmethod
+    def _note_payload_for_text(text: str) -> dict[str, Any]:
+        lowered = text.casefold()
+        if "alice likes tea" in lowered:
+            return {
+                "content": "Alice likes tea.",
+                "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
+                "context": "Alice's tea habit supports her daily routine.",
+                "keywords": ["alice", "tea", "routine"],
+                "tags": ["preference", "habit", "beverage"],
+                "category": "personal_preference",
+                "attributes": {"person": "Alice"},
+            }
+        if "tea routines improve focus" in lowered:
+            return {
+                "content": "Tea routines improve focus.",
+                "note_text": "Comprehensive note: Tea routines improve focus during reflective work.",
+                "context": "Tea routines are linked to improved focus.",
+                "keywords": ["tea", "focus", "routine"],
+                "tags": ["productivity", "habit", "focus"],
+                "category": "insight",
+                "attributes": {"topic": "focus"},
+            }
+        return {
+            "content": text,
+            "note_text": "Graph note",
+            "context": "Graph memory context.",
+            "keywords": ["graph", "memory"],
+            "tags": ["graph", "memory"],
+            "category": "insight",
+            "attributes": {"topic": "graph"},
+        }
+
     def require_llm(self, *, capability: str) -> None:
         return None
 
@@ -138,40 +171,33 @@ class _FakeAMEMRuntime:
             float(len(lowered)),
         ]
 
+    def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
+        payload = self.json(system=system, user=user)
+        if isinstance(payload, str):
+            return payload
+        return json.dumps(payload, ensure_ascii=False)
+
     def json(self, *, system: str, user: str):
         payload = json.loads(user)
         lowered_system = system.casefold()
+        if "extract one requested representation field" in lowered_system:
+            field = payload["field"]
+            note_payload = self._note_payload_for_text(payload["unit"]["text"])
+            if field == "context":
+                return note_payload["context"]
+            if field == "keywords":
+                return note_payload["keywords"]
+            if field == "tags":
+                return note_payload["tags"]
+            if field == "category":
+                return note_payload["category"]
+            if field == "attributes":
+                return note_payload["attributes"]
+            if field == "summary":
+                return f"Summary: {note_payload['context']}"
+            raise AssertionError(f"Unexpected representation field: {field}")
         if "enrich memory notes" in lowered_system or "note generator" in lowered_system:
-            unit_text = payload["unit_text"].casefold()
-            if "alice likes tea" in unit_text:
-                return {
-                    "content": "Alice likes tea.",
-                    "note_text": "Comprehensive note: Alice likes tea and keeps a steady routine.",
-                    "context": "Alice's tea habit supports her daily routine.",
-                    "keywords": ["alice", "tea", "routine"],
-                    "tags": ["preference", "habit", "beverage"],
-                    "category": "personal_preference",
-                    "attributes": {"person": "Alice"},
-                }
-            if "tea routines improve focus" in unit_text:
-                return {
-                    "content": "Tea routines improve focus.",
-                    "note_text": "Comprehensive note: Tea routines improve focus during reflective work.",
-                    "context": "Tea routines are linked to improved focus.",
-                    "keywords": ["tea", "focus", "routine"],
-                    "tags": ["productivity", "habit", "focus"],
-                    "category": "insight",
-                    "attributes": {"topic": "focus"},
-                }
-            return {
-                "content": payload["unit_text"],
-                "note_text": "Graph note",
-                "context": "Graph memory context.",
-                "keywords": ["graph", "memory"],
-                "tags": ["graph", "memory"],
-                "category": "insight",
-                "attributes": {"topic": "graph"},
-            }
+            return self._note_payload_for_text(payload["unit_text"])
         if "memory write controller" in lowered_system:
             return {"decision": "write", "reason": "store the note", "confidence": 0.9}
         if "choose which neighbors should receive" in lowered_system:

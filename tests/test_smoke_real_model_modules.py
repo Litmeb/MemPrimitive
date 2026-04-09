@@ -8,8 +8,7 @@ without them, affected tests are skipped. Embedding-only paths (local
 Coverage map (one pass per public module that calls into LLM or embedding):
 
 - **representation**: ``BasicRepresentation``, ``TripleRepresentation``,
-  ``LLMRepresentation``, ``SemanticFieldEnrichmentRepresentation``,
-  ``ConfigurableEmbeddingRepresentation``
+  ``LLMRepresentation``, ``ConfigurableEmbeddingRepresentation``
 - **retrieval**: ``EmbeddingSimilarityRetrieval``, ``QueryRewriteRetrieval`` (llm),
   ``VectorGraphSeedAndExpandRetrieval`` (LLM query expand + ``Runtime.embed`` + graph expand)
 - **organization**: ``GraphDeduplicationAppendOrganization``,
@@ -143,20 +142,6 @@ def test_smoke_llm_representation(require_real_runtime: None) -> None:
     assert out.units is not None
     summary = out.units[0].metadata.get("representation", {}).get("summary", "")
     assert isinstance(summary, str) and summary.strip()
-
-
-@pytest.mark.integration
-def test_smoke_semantic_field_enrichment_representation(require_real_runtime: None) -> None:
-    from memprimitive.baselines import PassThroughUnitFormation, SemanticFieldEnrichmentRepresentation
-
-    packet, store = PassThroughUnitFormation().run(
-        Packet(observation=Observation(text="Bob stores session notes about tea preferences.", source="notes")),
-        MemoryStore(),
-    )
-    out, _ = SemanticFieldEnrichmentRepresentation().run(packet, store)
-    assert out.units is not None
-    note = out.units[0].metadata.get(DEFAULT_NOTE_NAMESPACE)
-    assert isinstance(note, dict) and str(note.get("content", "")).strip()
 
 
 @pytest.mark.integration

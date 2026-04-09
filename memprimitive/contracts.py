@@ -8,8 +8,6 @@ UNIT_EMBEDDING_CONTRACT = "unit.embedding"
 UNIT_ENTITIES_CONTRACT = "unit.entities"
 UNIT_TAGS_CONTRACT = "unit.tags"
 UNIT_PARTITION_KEY_CONTRACT = "unit.partition_key"
-UNIT_NOTE_PAYLOAD_CONTRACT = "unit.note_payload"
-
 RECORD_GRAPH_LINKS_CONTRACT = "record.graph_links"
 RECORD_NOTE_PAYLOAD_CONTRACT = "record.note_payload"
 RECORD_REFLECTION_PAYLOAD_CONTRACT = "record.reflection_payload"
@@ -53,7 +51,6 @@ __all__ = [
     "TOPOLOGY_VECTOR_INDEX_CONTRACT",
     "UNIT_EMBEDDING_CONTRACT",
     "UNIT_ENTITIES_CONTRACT",
-    "UNIT_NOTE_PAYLOAD_CONTRACT",
     "UNIT_PARTITION_KEY_CONTRACT",
     "UNIT_TAGS_CONTRACT",
     "normalize_contracts",

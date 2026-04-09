@@ -94,13 +94,14 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 - Paper + upstream repo review now suggests current baseline modules are sufficient for an A-MEM reconstruction without adding new primitives, as long as alignment follows the easier repo-consistent path rather than the paper's most ambitious wording.
 - The clean mapping is now clearer:
-  - note construction -> `SemanticFieldEnrichmentRepresentation` + `ConfigurableEmbeddingRepresentation`
+  - note construction -> multiple `LLMRepresentation` fields (`context` / `keywords` / `tags` / `category` / `attributes`) + `ConfigurableEmbeddingRepresentation`
   - append note into graph memory -> `GraphAppendOrganization`
   - link generation -> `LinkStrengtheningEvolution`
   - neighbor memory rewrite -> `NeighborContextUpdateEvolution`
   - retrieval -> `VectorGraphSeedAndExpandRetrieval`
 - The main remaining work is example-level wiring and prompt/readout shaping, not baseline-family coverage.
 - That example-level wiring now exists in `memprimitive/example/classics/amem_memory.py`, so A-MEM should no longer be treated only as a capability hypothesis. The current status is: executable mechanism-level reconstruction exists; remaining gaps are fidelity/prompt tuning questions rather than missing framework coverage.
+- The old dedicated A-MEM note-construction representation has now been removed. The intended behavior is expressed by composing generic `LLMRepresentation` modules with `ConfigurableEmbeddingRepresentation`, rather than by preserving a special unit-level note-payload contract.
 - The old A-MEM-specialized `GraphAppendLinkReadyOrganization` has now been removed. Its intended write role is folded back into `GraphAppendOrganization`, which is now the single baseline graph-append primitive used for both ordinary graph records and note-graph/A-MEM-style writes.
 - Important paper/repo mismatch: the paper text says evolved neighbors may update context, keywords, and tags, but the released repos mostly implement context/tag updates only. The current framework matches the repo-side behavior more naturally; keyword rewrite should be treated as optional fidelity stretch, not a blocker.
 - Retrieval alignment is also better with the repo interpretation: seed by embedding similarity, then expand by stored links / neighbors. Query keyword generation can be expressed with existing retrieval-query rewrite machinery rather than a new primitive.

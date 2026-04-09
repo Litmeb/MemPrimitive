@@ -23,38 +23,51 @@ from baselines_test_helpers import (
 )
 
 
-def test_semantic_field_enrichment_and_retrieval_embedding_repair_note_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_llm_note_fields_and_retrieval_embedding_repair_note_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.utils import _runtime
-    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, SemanticFieldEnrichmentRepresentation
+    from memprimitive.baselines import ConfigurableEmbeddingRepresentation, LLMRepresentation
 
-    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", _FakeAMEMRuntime())
+    fake_runtime = _FakeAMEMRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
     packet = Packet(
         units=[
             MemoryUnit(
                 text="Alice likes tea.",
-                metadata={"amem": {"context": "Alice routine only", "keywords": ["alice", "tea"]}},
             )
         ]
     )
 
-    packet, store = SemanticFieldEnrichmentRepresentation(note_namespace="amem").run(packet, MemoryStore())
+    store = MemoryStore()
+    for module in (
+        LLMRepresentation(field="context", prompt="Write note context."),
+        LLMRepresentation(field="keywords", value_type=list[str], prompt="Extract keywords."),
+        LLMRepresentation(field="tags", value_type=list[str], prompt="Assign tags."),
+        LLMRepresentation(field="category", prompt="Assign a category."),
+        LLMRepresentation(field="attributes", value_type=dict[str, str], prompt="Extract attributes."),
+    ):
+        packet, store = module.run(packet, store)
     packet, _ = ConfigurableEmbeddingRepresentation(
         embedding_text=(
-            "{{ unit.metadata.amem.content }} | "
-            "context: {{ unit.metadata.amem.context }} | "
-            "keywords: {{ unit.metadata.amem.keywords | join(', ') }} | "
-            "tags: {{ unit.metadata.amem.tags | join(', ') }}"
+            "{{ unit.text }} | "
+            "context: {{ unit.metadata.representation.context }} | "
+            "keywords: {{ unit.metadata.representation.keywords | join(', ') }} | "
+            "tags: {{ unit.metadata.representation.tags | join(', ') }}"
         )
     ).run(packet, store)
 
     unit = packet.units[0]
-    assert unit.metadata["amem"]["note_text"].startswith("Comprehensive note:")
     assert unit.text == "Alice likes tea."
+    assert unit.metadata["representation"]["context"] == "Alice's tea habit supports her daily routine."
+    assert unit.metadata["representation"]["keywords"] == ["alice", "tea", "routine"]
+    assert unit.metadata["representation"]["category"] == "personal_preference"
+    assert unit.metadata["representation"]["attributes"] == {"person": "Alice"}
+    assert unit.tags == ["preference", "habit", "beverage"]
     assert unit.metadata["representation"]["embedding_input_text"] == (
         "Alice likes tea. | context: Alice's tea habit supports her daily routine. | "
         "keywords: alice, tea, routine | tags: preference, habit, beverage"
     )
-    assert unit.embedding == _runtime._DEFAULT_RUNTIME.embed(unit.metadata["representation"]["embedding_input_text"])
+    assert unit.embedding == fake_runtime.embed(unit.metadata["representation"]["embedding_input_text"])
 
 
 def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: pytest.MonkeyPatch) -> None:
