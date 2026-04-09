@@ -53,6 +53,7 @@ from ..utils._template import (
     ensure_prompt_plan,
     project_record_for_template,
     render_prompt_plan,
+    resolve_records_from_prompt_metadata,
 )
 from ..utils._reflexion_family import (
     DEFAULT_MEMORY_SIZE,
@@ -67,6 +68,18 @@ from ..utils._reflexion_family import (
     scratchpad_from_payload,
 )
 from ..utils._trace import copy_trace
+
+
+def _merge_visible_records(*record_groups: list[MemoryRecord]) -> list[MemoryRecord]:
+    merged: list[MemoryRecord] = []
+    seen: set[str] = set()
+    for records in record_groups:
+        for record in records:
+            if record.record_id in seen:
+                continue
+            seen.add(record.record_id)
+            merged.append(record)
+    return merged
 
 
 class AppendOnlyEvolution(MemoryEvolutionModule):
@@ -1314,12 +1327,13 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         selected_records, decision_source = self._select_records(packet, store)
+        visible_records_holder = {"records": list(selected_records)}
         context = WriteToolCallContext(
             packet=packet,
             store=store,
             module_slot="memory_evolution",
             default_target_layer=self.target_layer,
-            visible_records=list(selected_records),
+            visible_records=list(visible_records_holder["records"]),
         )
         state = ToolExecutionState()
         runtime_tools = build_runtime_tools(
@@ -1334,6 +1348,7 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
                 metadata_mode="prompt",
                 context_builder=lambda current_packet, current_store: {
                     "selected_records": [project_record_for_template(record) for record in selected_records],
+                    "visible_records": [project_record_for_template(record) for record in visible_records_holder["records"]],
                     "source_layer": self.source_layer or "",
                     "tools": project_tool_specs_for_prompt(self.tool_specs),
                     "default_target_layer": self.target_layer,
@@ -1341,9 +1356,18 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
             ),
             packet=packet,
             store=store,
+            post_recall_context_builder=lambda prompt_context, prompt_metadata, current_store: (
+                self._apply_prompt_visible_records(
+                    prompt_metadata=prompt_metadata,
+                    store=current_store,
+                    selected_records=selected_records,
+                    visible_records_holder=visible_records_holder,
+                )
+            ),
         )
         context.store = store
-        context.visible_records = list(selected_records)
+        context.visible_records = list(visible_records_holder["records"])
+        visible_record_ids = [record.record_id for record in visible_records_holder["records"]]
         self._run_agent(
             rendered_prompt=rendered_prompt,
             tools=runtime_tools,
@@ -1364,6 +1388,10 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
             "decision_source": decision_source,
             "source_layer": self.source_layer,
             "selected_record_ids": [record.record_id for record in selected_records],
+            "visible_record_ids": visible_record_ids,
+            "visible_record_source": (
+                "selected_records_plus_prompt_recall" if prompt_trace.get("visible_record_ids_by_label") else "selected_records"
+            ),
             "written_record_ids": list(state.written_record_ids),
             "updated_record_ids": list(state.updated_record_ids),
             "deleted_record_ids": list(state.deleted_record_ids),
@@ -1394,6 +1422,21 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
         if self.source_layer is not None:
             return store.iter_records(self.source_layer), "source_layer_scan"
         return store.iter_records(), "store_scan"
+
+    @staticmethod
+    def _apply_prompt_visible_records(
+        *,
+        prompt_metadata: dict[str, Any],
+        store: MemoryStore,
+        selected_records: list[MemoryRecord],
+        visible_records_holder: dict[str, list[MemoryRecord]],
+    ) -> dict[str, Any]:
+        prompt_visible_records = resolve_records_from_prompt_metadata(store, prompt_metadata)
+        merged_records = _merge_visible_records(selected_records, prompt_visible_records)
+        visible_records_holder["records"] = merged_records
+        return {
+            "visible_records": [project_record_for_template(record) for record in merged_records],
+        }
 
     def _run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
         runtime = Runtime(

@@ -92,9 +92,9 @@ from memprimitive.utils._mem0_family import (
     build_fixed_profile_tools,
     build_graph_pair_context,
     build_profile_pair_context,
-    build_profile_pair_context_with_profile_recall,
     finalize_dialogue_turn,
     per_fact_profile_recall,
+    PromptRecallSelectionTrigger,
     snapshot_dialogue_turn,
 )
 from memprimitive.utils._template import structured_prompt, text_prompt
@@ -315,6 +315,12 @@ def build_mem0g_memory_system(
         store=store,
     )
 
+    profile_candidate_recall_pipeline = MemoryPipeline(
+        retrieval=EmbeddingSimilarityRetrieval(top_k=similar_top_k, layer="profile"),
+        readout=ConcatenateReadout(separator="\n"),
+        store=store,
+    )
+
     profile_write_pipeline = MemoryPipeline(
         representation=(
             BasicRepresentation(elements=("text",)),
@@ -353,7 +359,7 @@ def build_mem0g_memory_system(
         ),
         write_trigger=AlwaysTrigger(),
         organization=PlacementWithoutAppendOrganization(target_layer="profile"),
-        evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
+        evolution_trigger=PromptRecallSelectionTrigger(layer_names=("profile",)),
         memory_evolution=LLMFunctionCallEvolution(
             source_layer="profile",
             target_layer="profile",
@@ -392,22 +398,33 @@ def build_mem0g_memory_system(
                             "template": "{{ topk_similar }}",
                         },
                         {
-                            "id": "selected_records",
+                            "id": "visible_records",
                             "title": "Visible Profile Records",
-                            "condition": "selected_records | length",
-                            "repeat_over": "selected_records",
+                            "condition": "visible_records | length",
+                            "repeat_over": "visible_records",
                             "item_template": "- record_id={{ item.record_id }} | text={{ item.text }}",
                             "separator": "\n",
                         },
                     ]
                 },
-                context_builder=build_profile_pair_context_with_profile_recall(similar_top_k),
+                context_builder=build_profile_pair_context,
                 labeled_recall_plans={
                     "topk_similar": text_prompt("{{ topk_similar }}"),
                     "conversation_summary": text_prompt("{{ conversation_summary }}"),
                     "recent_messages": text_prompt("{{ recent_messages }}"),
                 },
+                labeled_sub_recall_pipelines={
+                    "topk_similar": profile_candidate_recall_pipeline,
+                },
                 labeled_recall_query_builders={
+                    "topk_similar": (
+                        lambda packet, store, context: "\n".join(
+                            str(item).strip() for item in context.get("fact_list", []) if str(item).strip()
+                        )
+                        or str(context.get("user_message", ""))
+                        or str(context.get("assistant_message", ""))
+                        or str(context.get("pair_text", ""))
+                    ),
                     "conversation_summary": (
                         lambda packet, store, context: str(context.get("pair_text", "")),
                     ),
@@ -415,6 +432,7 @@ def build_mem0g_memory_system(
                         lambda packet, store, context: str(context.get("pair_text", "")),
                     ),
                 },
+                visible_record_recall_labels=("topk_similar",),
             ),
         ),
         store=store,
@@ -487,7 +505,7 @@ def build_mem0g_memory_system(
             separate=True,
             separate_layer="graph_source_observation",
         ),
-        evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
+        evolution_trigger=PromptRecallSelectionTrigger(layer_names=("knowledge_graph",)),
         # Upstream graph memory prefers relation-level soft invalidation
         # (`valid=false`) for stale edges. Our current baseline surface does not
         # expose that exact temporal edge-state model here, so we approximate it
@@ -536,10 +554,10 @@ def build_mem0g_memory_system(
                             "template": "{{ graph_context }}",
                         },
                         {
-                            "id": "selected_records",
+                            "id": "visible_records",
                             "title": "Visible Graph Records",
-                            "condition": "selected_records | length",
-                            "repeat_over": "selected_records",
+                            "condition": "visible_records | length",
+                            "repeat_over": "visible_records",
                             "item_template": "- record_id={{ item.record_id }} | text={{ item.text }} | graph={{ item.graph }}",
                             "separator": "\n",
                         },
@@ -574,6 +592,7 @@ def build_mem0g_memory_system(
                         lambda packet, store, context: str(context.get("pair_text", "")),
                     ),
                 },
+                visible_record_recall_labels=("graph_context",),
             ),
         ),
         store=store,

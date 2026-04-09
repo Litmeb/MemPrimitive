@@ -38,6 +38,7 @@ Avoid re-documenting these in detail unless something materially changes.
 ## Important Recent Progress
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
+- PromptPlan-driven tool visibility is now implemented for `LLMFunctionCallOrganization` / `LLMFunctionCallEvolution`: prompt-side recall branches can report retrieved record provenance, select which recall branches contribute to `visible_records`, and expose that visibility in trace metadata.
 - Integration smoke coverage for real LLM / embedding baselines exists in `tests/test_smoke_real_model_modules.py` and can exercise the main LLM-backed baseline families when runtime credentials are configured.
 - Embedding first-stage downshift is now implemented: ordinary record-level text embeddings can be declared per layer in `StoreLayerSpec.settings["embedding"]`, and `MemoryStore.append()` / `replace_record()` now auto-generate or refresh `record.embedding` for those layers.
 - The implemented policy boundary is intentionally narrow: stage 1 only handles `mode="text"` with refresh on semantic text change. Entity embeddings, note-payload-derived embeddings, query embeddings, and the broader `UNIT_EMBEDDING_CONTRACT` redesign are still deliberately left in their existing specialized paths.
@@ -78,8 +79,9 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 ### Mem0 Family
 
 - `mem0_memory.py` is reasonably close at the mechanism level.
-- The main remaining mismatch is candidate restriction during update: the evolution step can still see more of the `profile` layer than the original paper/repo intends.
+- PromptPlan-controlled candidate visibility now closes the previous major update-scope mismatch: the Mem0 profile-update tools can be restricted to recalled profile candidates instead of the whole `profile` layer.
 - `mem0g_memory.py` has moved closer to upstream structure by keeping both a profile/vector branch and a graph branch, but it is still only partially aligned.
+- Mem0g now uses the same prompt-controlled visible-domain path for both its profile/vector tools and graph-maintenance tools.
 - The biggest remaining Mem0g gaps are graph-native storage semantics, relation-level invalidation/update behavior, and full repo-style recall behavior.
 
 ### RET-LLM / MemLLM
@@ -105,6 +107,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - The old A-MEM-specialized `GraphAppendLinkReadyOrganization` has now been removed. Its intended write role is folded back into `GraphAppendOrganization`, which is now the single baseline graph-append primitive used for both ordinary graph records and note-graph/A-MEM-style writes.
 - Important paper/repo mismatch: the paper text says evolved neighbors may update context, keywords, and tags, but the released repos mostly implement context/tag updates only. The current framework matches the repo-side behavior more naturally; keyword rewrite should be treated as optional fidelity stretch, not a blocker.
 - Retrieval alignment is also better with the repo interpretation: seed by embedding similarity, then expand by stored links / neighbors. Query keyword generation can be expressed with existing retrieval-query rewrite machinery rather than a new primitive.
+- A new concrete design direction is now documented in `AMEM_FUNCTION_CALL_EVOLUTION_CONTRACT.md`: the current two-step A-MEM evolution can be collapsed into one `LLMFunctionCallEvolution` if execution uses a hard visible-record boundary plus two A-MEM-specific tools, one for current-record link strengthening and one for neighbor-only context/tag updates. This path is now the preferred repo-consistent refactor target.
 
 ### Reflexion
 
