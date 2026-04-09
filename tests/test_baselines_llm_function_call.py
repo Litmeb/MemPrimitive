@@ -13,12 +13,23 @@ from memprimitive.core import (
     StoreLayerSpec,
     StoreTopology,
 )
+from memprimitive.utils import _runtime as runtime_module
 
 from baselines_test_helpers import (
     _graph_store,
     _invoke_runtime_tool,
     _seed_layer,
 )
+
+
+class _FakeEmbeddingRuntime:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def embed(self, text: str) -> list[float]:
+        normalized = str(text).strip()
+        self.calls.append(normalized)
+        return [float(len(normalized)), float(len(normalized.split()))]
 
 
 def test_llm_function_call_organization_adds_record_and_renders_prompt_template() -> None:
@@ -78,6 +89,44 @@ def test_llm_function_call_organization_updates_existing_record() -> None:
     assert store.iter_records("default")[0].text == "new text"
     assert packet_out.trace["organization"]["updated_record_ids"] == ["rec-1"]
     assert packet_out.trace["organization"]["effects"][0]["action"] == "update"
+
+
+def test_llm_function_call_tools_use_store_managed_embedding_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import LLMFunctionCallOrganization, PassThroughUnitFormation
+
+    fake_runtime = _FakeEmbeddingRuntime()
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: fake_runtime)
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="default"),
+                StoreLayerSpec(
+                    name="profile",
+                    theme="semantic",
+                    indices=("vector",),
+                    settings={"embedding": {"enabled": True, "mode": "text", "refresh_on_update": "semantic_text_change"}},
+                ),
+            ]
+        )
+    )
+    packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="trigger managed embedding", source="notes")),
+        store,
+    )
+    packet = replace(packet, decisions=[True])
+    module = LLMFunctionCallOrganization(prompt="Write profile memory", tools=["ADD"], target_layer="profile")
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"text": "Alice profile note"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, store = module.run(packet, store)
+
+    record = store.iter_records("profile")[0]
+    assert record.embedding == [18.0, 3.0]
+    assert fake_runtime.calls == ["Alice profile note"]
+    assert packet_out.trace["organization"]["written_record_ids"] == [record.record_id]
 
 
 def test_llm_function_call_organization_deletes_existing_record() -> None:

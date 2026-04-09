@@ -38,6 +38,8 @@ def _default_id(prefix: str) -> str:
 _VALID_LAYER_SHAPES = frozenset({"Flat", "Graph"})
 _VALID_LAYER_INDICES = frozenset({"vector", "entity", "temporal", "keyword", "graph", "tag"})
 _VALID_LAYER_CAPACITIES = frozenset({"token_limited", "sliding_window", "unlimited"})
+_VALID_EMBEDDING_MODES = frozenset({"text"})
+_VALID_EMBEDDING_REFRESH_POLICIES = frozenset({"semantic_text_change"})
 
 
 def _require_choice(value: str, field_name: str, allowed: frozenset[str]) -> str:
@@ -516,8 +518,102 @@ class MemoryStore:
 
     def append(self, record: MemoryRecord) -> None:
         self.ensure_layer(record.layer)
-        self.layers[record.layer].append(record)
+        stored_record = self._apply_embedding_policy_on_append(record)
+        self.layers[record.layer].append(stored_record)
         self._enforce_layer_capacity(record.layer)
+
+    def _layer_embedding_policy(self, layer: str) -> dict[str, Any] | None:
+        raw_policy = self.layer_setting(layer, "embedding")
+        if raw_policy is None:
+            return None
+        if not isinstance(raw_policy, dict):
+            raise ValueError(f"StoreLayerSpec.settings['embedding'] for layer {layer!r} must be a dict.")
+
+        enabled = bool(raw_policy.get("enabled", False))
+        if not enabled:
+            return None
+
+        raw_mode = raw_policy.get("mode", "text")
+        mode = _require_choice(str(raw_mode), "StoreLayerSpec.settings.embedding.mode", _VALID_EMBEDDING_MODES)
+        raw_refresh = raw_policy.get("refresh_on_update", "semantic_text_change")
+        refresh_on_update = _require_choice(
+            str(raw_refresh),
+            "StoreLayerSpec.settings.embedding.refresh_on_update",
+            _VALID_EMBEDDING_REFRESH_POLICIES,
+        )
+        return {
+            "enabled": True,
+            "mode": mode,
+            "refresh_on_update": refresh_on_update,
+        }
+
+    @staticmethod
+    def _semantic_text(record: MemoryRecord) -> str:
+        return record.text.strip()
+
+    def _embed_text_for_layer(self, layer: str, text: str) -> list[float]:
+        policy = self._layer_embedding_policy(layer)
+        if policy is None:
+            raise ValueError(f"Layer {layer!r} does not declare an active embedding policy.")
+        if policy["mode"] != "text":
+            raise ValueError(f"Unsupported embedding mode {policy['mode']!r} for layer {layer!r}.")
+        from .utils._runtime import get_runtime
+
+        return list(get_runtime().embed(text))
+
+    def embedding_for_record(self, layer: str, text: str) -> list[float] | None:
+        layer_name = _require_non_empty_text(layer, "layer")
+        normalized_text = _require_non_empty_text(text, "text")
+        if self._layer_embedding_policy(layer_name) is None:
+            return None
+        return self._embed_text_for_layer(layer_name, normalized_text)
+
+    def _apply_embedding_policy_on_append(self, record: MemoryRecord) -> MemoryRecord:
+        policy = self._layer_embedding_policy(record.layer)
+        if policy is None or record.embedding is not None:
+            return record
+        embedding = self._embed_text_for_layer(record.layer, self._semantic_text(record))
+        return MemoryRecord(
+            record_id=record.record_id,
+            unit_id=record.unit_id,
+            layer=record.layer,
+            text=record.text,
+            timestamp=record.timestamp,
+            embedding=embedding,
+            metadata=dict(record.metadata),
+        )
+
+    def _apply_embedding_policy_on_replace(self, previous_record: MemoryRecord, new_record: MemoryRecord) -> MemoryRecord:
+        policy = self._layer_embedding_policy(new_record.layer)
+        if policy is None:
+            return new_record
+        if new_record.embedding is not None:
+            return new_record
+
+        if policy["refresh_on_update"] == "semantic_text_change":
+            if self._semantic_text(previous_record) == self._semantic_text(new_record):
+                if previous_record.embedding is None:
+                    return new_record
+                return MemoryRecord(
+                    record_id=new_record.record_id,
+                    unit_id=new_record.unit_id,
+                    layer=new_record.layer,
+                    text=new_record.text,
+                    timestamp=new_record.timestamp,
+                    embedding=list(previous_record.embedding),
+                    metadata=dict(new_record.metadata),
+                )
+            embedding = self._embed_text_for_layer(new_record.layer, self._semantic_text(new_record))
+            return MemoryRecord(
+                record_id=new_record.record_id,
+                unit_id=new_record.unit_id,
+                layer=new_record.layer,
+                text=new_record.text,
+                timestamp=new_record.timestamp,
+                embedding=embedding,
+                metadata=dict(new_record.metadata),
+            )
+        return new_record
 
     def _enforce_layer_capacity(self, layer: str) -> None:
         spec = self.topology.get_layer(layer)
@@ -643,7 +739,7 @@ class MemoryStore:
         records = self.layers[layer_name]
         for idx, record in enumerate(records):
             if record.record_id == rid:
-                records[idx] = new_record
+                records[idx] = self._apply_embedding_policy_on_replace(record, new_record)
                 return
         raise KeyError(f"Record {rid!r} not found in layer {layer_name!r}.")
 
@@ -705,7 +801,7 @@ class MemoryStore:
                     },
                 },
             )
-            records[idx] = updated
+            records[idx] = self._apply_embedding_policy_on_replace(record, updated)
             return merged_links
         raise KeyError(f"Record {rid!r} not found in layer {layer_name!r}.")
 
