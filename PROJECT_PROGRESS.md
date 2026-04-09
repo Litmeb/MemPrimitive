@@ -51,6 +51,11 @@ Avoid re-documenting these in detail unless something materially changes.
   - Mem0
   - Mem0g
   - RET-LLM / MemLLM-style triple memory
+- The old `PlacementWithoutAppendOrganization` baseline has now been removed as redundant. The concrete places that had still been using it right before removal were:
+  - `memprimitive/example/classics/mem0_memory.py`
+  - `memprimitive/example/classics/mem0g_memory.py`
+  - `memprimitive/example/classics/comedy_memory.py`
+  These now use `NeverTrigger(slot="write_trigger") + AppendOrganization(...)` to preserve placement emission without ingest-time writes.
 - Trigger literature review suggests trigger diversity is real but not the main source of cross-paper variation. The bigger long-term differences are in representation, organization, maintenance/evolution, and retrieval.
 
 ## Main Open Gaps
@@ -134,6 +139,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
   - `retention_size` prunes the target layer to a bounded recency window, matching the repo-style small reflection buffer
 - Important paper/repo mismatch: the paper describes a generic verbal reinforcement framework with episodic memory, but the public repo implementations are mostly plain append-only text memory plus prompt templating, sometimes with a recent-3 truncation rule. The current framework matches this repo-side interpretation better than a more ambitious generalized-learning reading.
 - The memory-only orchestration now exists in `memprimitive/example/classics/reflexion_memory.py` and is covered by deterministic tests in `tests/test_classics_reflexion.py`.
+- The old `ReflectionGenerationEvolution` baseline has now been removed. The last direct test-only usage before removal was in `tests/test_pipeline_triggers_dispatch.py`; supported Reflexion behavior remains on the `HierarchicalEvolution`-based path in `memprimitive/example/classics/reflexion_memory.py`.
 - New primitive work is only needed if future goals expand beyond the repo-consistent Reflexion memory slice, such as trial-indexed multi-task memory partitioning, richer evaluator provenance, or tighter coupling between evaluation outcome and recall selection.
 - Paper-fidelity gaps are now clearer for the memory slice:
   - reflection generation now conditions on prior retained reflections via prompt-side sub-recall, so the earlier "latest failed trial only" mismatch is closed without adding a Reflexion-specific primitive
