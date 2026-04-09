@@ -560,8 +560,8 @@ def test_memory_store_check_accepts_contracts_jointly_satisfied_by_modules_and_t
     )
     store.register_module_contracts(
         slot="organization",
-        module_name="graph_append_link_ready_organization",
-        requires_contracts=(UNIT_NOTE_PAYLOAD_CONTRACT, TOPOLOGY_GRAPH_VECTOR_LAYER_CONTRACT),
+        module_name="graph_append_organization",
+        requires_contracts=(TOPOLOGY_GRAPH_LAYER_CONTRACT,),
         produces_contracts=(RECORD_NOTE_PAYLOAD_CONTRACT, RECORD_GRAPH_LINKS_CONTRACT),
     )
     store.register_module_contracts(

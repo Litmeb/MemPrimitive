@@ -150,7 +150,7 @@
 - 要补的能力是什么
   - 把 passage、entity/noun phrase、fact/triple 组织成异构图索引，并保留 node-to-passage incidence 信息，供后续图检索和 passage 聚合使用。
 - 为什么现有模块不够
-  - `GraphAppendOrganization` 与 `GraphAppendLinkReadyOrganization` 都是 record-centric graph 写入；它们没有 HippoRAG 所需的异构节点类型、fact 边语义、以及节点到 passage 的聚合统计结构。
+  - `GraphAppendOrganization` 仍然是 record-centric graph 写入；它没有 HippoRAG 所需的异构节点类型、fact 边语义、以及节点到 passage 的聚合统计结构。
 - 这是为 HippoRAG 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。凡是“graph over extracted concepts, readout over source documents”的 memory 系统都可能复用。
 
@@ -164,9 +164,8 @@
     - 把 observation 本身写成 episodic entry；
     - 建立“该 observation 对应这批 triplets”的关联结构。
 - 为什么现有模块不够
-  - `GraphAppendOrganization` 只能表达普通 graph-layer append；
-  - `GraphAppendLinkReadyOrganization` 面向 note graph；
-  - 两者都不能自然表达 AriGraph 的 semantic / episodic 双记忆联合组织。
+  - `GraphAppendOrganization` 可以承接普通 graph-layer append，也可承接 note graph 写入；
+  - 但它仍不能自然表达 AriGraph 的 semantic / episodic 双记忆联合组织。
 - 这是为 AriGraph 特化，还是可抽象为通用 primitive
   - 可抽象为通用 primitive。很多 world-model memory、事件图 memory、agent episode memory 都需要这种双层组织能力。
 
