@@ -36,7 +36,7 @@ from ..utils._llm_function_tools import (
     project_tool_specs_for_prompt,
     write_tool_specs_require_graph_contracts,
 )
-from ..utils._runtime import Runtime
+from ..utils._runtime import Runtime, get_runtime
 from ..utils._template import (
     PromptPlan,
     ensure_prompt_plan,
@@ -719,7 +719,11 @@ class GraphDeduplicationAppendOrganization(OrganizationModule):
         candidate_embedding = None if unit.embedding is None else list(unit.embedding)
         if candidate_embedding is None:
             candidate_embedding = store.embedding_for_record(self.target_layer, unit.text)
-            embedding_source = "store_policy_fallback"
+            if candidate_embedding is not None:
+                embedding_source = "store_policy_fallback"
+            else:
+                candidate_embedding = list(get_runtime().embed(unit.text))
+                embedding_source = "runtime_fallback"
         if candidate_embedding is None:
             return None, None, embedding_source
         best_record: MemoryRecord | None = None
