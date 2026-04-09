@@ -93,12 +93,11 @@ unit_formation
 | --- | --- | --- |
 | `AppendOrganization` (`append_organization`) | `target_layer="default"` | 直接 append 到固定 layer。 |
 | `ConditionalLayerOrganization` (`conditional_layer_organization`) | `default_layer="default"`, `rules=()` | 按 tags、entities、metadata 等规则路由到不同 layer。 |
-| `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 向图层追加记录，并维护 graph metadata；`separate=True` 时原文本与 triple 记录可分层落库。 |
+| `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 向图层追加记录，并维护 graph metadata；保留 unit 上已有的 note payload 等 metadata，因而也可承接 A-MEM 风格的 note graph 写入；`separate=True` 时原文本与 triple 记录可分层落库。 |
 | `GraphEntityAppendOrganization` (`graph_entity_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 保持 `GraphAppendOrganization` 的 graph metadata / provenance 约定，但把一个 unit 展开成多条 graph record，每条 `record.text` 是一个 entity；若当前 unit 没有 entity，则跳过该 unit。 |
 | `GraphDeduplicationAppendOrganization` (`graph_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 向图层写入前先与同 layer 现有 graph records 做 embedding top-1 相似度匹配；若 `similarity > threshold`，则原地合并节点并更新 text / embedding / triples，否则正常 append；`separate=True` 时 source 文本仍可单独落到 side layer。 |
 | `GraphEntityDeduplicationAppendOrganization` (`graph_entity_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 保持 `GraphDeduplicationAppendOrganization` 的阈值去重与 provenance 语义，但按 entity 独立执行 merge-or-append：每个 entity 用自己的 entity embedding 与现有 graph records 比较，相似度超过阈值时合并到命中节点，否则追加一个新的 entity 节点；缺少该 entity embedding 时只跳过该 entity。 |
 | `PlacementWithoutAppendOrganization` (`placement_without_append_organization`) | `target_layer="trial_buffer"` | 只给出 placement，不实际 append。 |
-| `GraphAppendLinkReadyOrganization` (`graph_append_link_ready_organization`) | `target_layer="knowledge_graph"`, `note_namespace="note"` | 追加 link-ready 图记录，为后续图演化准备 metadata。 |
 | `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 对选中的 source-layer records 做抽象聚合，再通过子 `MemoryPipeline.ingest()` 写入高层记忆。 |
 | `LLMFunctionCallOrganization` (`llm_function_call_organization`) | `prompt`, `tools`, `target_layer=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM tool call 在 organization 阶段执行 `add / update / delete` 等写操作。 |
 

@@ -86,10 +86,8 @@ HippoRAG 把外部文档记忆建模成一个受 hippocampal indexing theory 启
   - 无可直接完整复用模块。
 - 哪些模块只能部分复用
   - `GraphAppendOrganization`
-    - 能把记录放进 graph layer，并写一些 graph metadata。
-    - 但它的“图”仍然是 record-centric metadata graph，不是 HippoRAG 那种显式 node/edge/index 结构。
-  - `GraphAppendLinkReadyOrganization`
-    - 能准备图层 + link-ready metadata，但设计目标是 note graph/A-MEM 风格，不是 passage-entity-triple 异构索引。
+    - 能把记录放进 graph layer，并写一些 graph metadata；现在也能承接 note graph/A-MEM 风格写入。
+    - 但它的“图”仍然是 record-centric metadata graph，不是 HippoRAG 那种显式 node/edge/index 结构，也不是 passage-entity-triple 异构索引。
 - 当前缺失什么能力
   - 缺少异构图组织能力：需要同时表示 passage 节点、entity/noun phrase 节点、relation/fact 边，且这些对象不是同一种普通 `MemoryRecord` 就能自然表达。
   - 缺少 node-to-passage incidence matrix 或等价统计结构。
@@ -330,10 +328,8 @@ AriGraph 不是离线文档索引型 memory，而是面向交互式环境的 wor
   - 无可直接完整复用模块。
 - 哪些模块只能部分复用
   - `GraphAppendOrganization`
-    - 能把记录放入 graph layer，并维护一些图元数据。
-    - 但它表达的是 record-centric graph append，不是 AriGraph 所需的“semantic triplets + episodic observation + 跨两类记忆的连接”。
-  - `GraphAppendLinkReadyOrganization`
-    - 提供 graph layer + link-ready 写入壳子，但它服务的是 note graph/A-MEM 风格，不是 semantic/episodic 双记忆结构。
+    - 能把记录放入 graph layer，并维护一些图元数据；现在也可服务 note graph/A-MEM 风格写入。
+    - 但它表达的仍是 record-centric graph append，不是 AriGraph 所需的“semantic triplets + episodic observation + 跨两类记忆的连接”，也不是 semantic/episodic 双记忆结构。
 - 当前缺失什么能力
   - 缺少同时组织 semantic graph 与 episodic observation memory 的统一 organization primitive。
   - 缺少“observation -> 当步 triplets”这种跨两类记忆对象的连接结构。

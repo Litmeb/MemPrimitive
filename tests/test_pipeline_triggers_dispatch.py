@@ -25,7 +25,6 @@ from memprimitive.baselines import (
     EntityRetrieval,
     GraphAppendOrganization,
     GraphDeduplicationAppendOrganization,
-    GraphAppendLinkReadyOrganization,
     GraphLinkEvolution,
     GraphNeighborContextTraceEvolution,
     GraphNeighborRetrieval,
@@ -927,7 +926,7 @@ def test_store_check_accepts_cross_pipeline_shared_store_contract_production() -
     MemoryPipeline(
         store=store,
         representation=(SemanticFieldEnrichmentRepresentation(), RetrievalOrientedEmbeddingRepresentation()),
-        organization=GraphAppendLinkReadyOrganization(target_layer="knowledge_graph"),
+        organization=GraphAppendOrganization(target_layer="knowledge_graph"),
     )
     MemoryPipeline(
         store=store,
@@ -1008,10 +1007,6 @@ _OBVIOUSLY_INVALID_SINGLE_SLOT_PIPELINES = (
     pytest.param(
         {"organization": GraphAppendOrganization()},
         id="graph-organization-without-graph-topology",
-    ),
-    pytest.param(
-        {"organization": GraphAppendLinkReadyOrganization(target_layer="knowledge_graph")},
-        id="graph-note-organization-without-note-payload-or-graph-vector-topology",
     ),
     pytest.param(
         {"memory_evolution": GraphLinkEvolution(target_layer="knowledge_graph")},

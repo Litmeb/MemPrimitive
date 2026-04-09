@@ -46,24 +46,6 @@ def test_semantic_field_enrichment_and_retrieval_embedding_repair_note_schema(mo
     assert unit.embedding == _runtime._DEFAULT_RUNTIME.embed(unit.metadata["representation"]["enhanced_embedding_text"])
 
 
-def test_graph_append_link_ready_organization_does_not_eagerly_validate_graph_vector_layer() -> None:
-    from memprimitive import MemoryPipeline
-    from memprimitive.baselines import GraphAppendLinkReadyOrganization
-
-    bad_store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [StoreLayerSpec(name="memory_graph", shape="Graph", indices=("graph", "keyword", "tag"))]
-        )
-    )
-
-    pipeline = MemoryPipeline(
-        store=bad_store,
-        organization=GraphAppendLinkReadyOrganization(target_layer="memory_graph"),
-    )
-
-    assert isinstance(pipeline.organization, GraphAppendLinkReadyOrganization)
-
-
 def test_vector_graph_seed_and_expand_retrieval_expands_neighbors(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.utils import _runtime
     from memprimitive.baselines import VectorGraphSeedAndExpandRetrieval
