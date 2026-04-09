@@ -15,6 +15,7 @@ from ._template import (
 
 _PSEUDO_FIELDS = frozenset({"record_id", "unit_id", "layer", "text", "timestamp"})
 _VALID_EXTRACT_MODES = frozenset({"copy", "generate"})
+_VALID_SELECTION_MODES = frozenset({"decisions_store_or_scan", "latest_active_units"})
 
 
 def validate_hierarchical_config(
@@ -26,21 +27,33 @@ def validate_hierarchical_config(
     extract_fields: tuple[str, ...],
     group_by: tuple[str, ...],
     prompt: PromptPlan | str | None,
+    selection_mode: str,
+    record_text_field: str | None,
 ) -> dict[str, Any]:
     normalized_source = str(source_layer).strip()
     normalized_target = None if target_layer is None else str(target_layer).strip()
     normalized_mode = str(extract_mode).strip()
     normalized_fields = tuple(str(field).strip() for field in extract_fields if str(field).strip())
     normalized_group_by = tuple(str(field).strip() for field in group_by if str(field).strip())
+    normalized_selection_mode = str(selection_mode).strip()
+    normalized_record_text_field = None if record_text_field is None else str(record_text_field).strip()
 
     if not normalized_source:
         raise ValueError("source_layer must be a non-empty string.")
     if normalized_mode not in _VALID_EXTRACT_MODES:
         raise ValueError("extract_mode must be one of: copy, generate.")
+    if normalized_selection_mode not in _VALID_SELECTION_MODES:
+        raise ValueError(
+            "selection_mode must be one of: decisions_store_or_scan, latest_active_units."
+        )
     if not normalized_fields:
         raise ValueError("extract_fields must contain at least one non-empty field name.")
     if prompt is not None and normalized_mode != "generate":
         raise ValueError("prompt is only supported when extract_mode='generate'.")
+    if normalized_record_text_field == "":
+        raise ValueError("record_text_field must be non-empty when provided.")
+    if normalized_record_text_field is not None and normalized_record_text_field not in normalized_fields:
+        raise ValueError("record_text_field must be one of extract_fields.")
 
     has_target_layer = normalized_target is not None and normalized_target != ""
     has_memory_pipeline = memory_pipeline is not None
@@ -59,6 +72,8 @@ def validate_hierarchical_config(
         "extract_fields": normalized_fields,
         "group_by": normalized_group_by,
         "prompt": prompt,
+        "selection_mode": normalized_selection_mode,
+        "record_text_field": normalized_record_text_field,
     }
 
 
@@ -122,21 +137,58 @@ def resolve_source_records(
     store: MemoryStore,
     *,
     source_layer: str,
+    selection_mode: str = "decisions_store_or_scan",
 ) -> tuple[list[MemoryRecord], str]:
     if packet.decisions_store is None:
+        if selection_mode == "latest_active_units":
+            return _latest_active_unit_records(packet, store, source_layer=source_layer), "latest_active_units"
         return store.iter_records(source_layer), "source_layer_scan"
 
     layer_entry = packet.decisions_store.get(source_layer)
     if not isinstance(layer_entry, dict):
+        if selection_mode == "latest_active_units":
+            return _latest_active_unit_records(packet, store, source_layer=source_layer), "latest_active_units"
         return [], "decisions_store"
 
     record_ids = [str(record_id).strip() for record_id in layer_entry.get("record_ids", []) if str(record_id).strip()]
     if not record_ids:
+        if selection_mode == "latest_active_units":
+            return _latest_active_unit_records(packet, store, source_layer=source_layer), "latest_active_units"
         return [], "decisions_store"
 
     records_by_id = {record.record_id: record for record in store.iter_records(source_layer)}
     selected = [records_by_id[record_id] for record_id in record_ids if record_id in records_by_id]
     return selected, "decisions_store"
+
+
+def _latest_active_unit_records(
+    packet: Packet,
+    store: MemoryStore,
+    *,
+    source_layer: str,
+) -> list[MemoryRecord]:
+    if packet.units is None or packet.decisions is None or packet.placements is None:
+        return []
+    active_unit_ids = [
+        unit.unit_id
+        for unit, decision, placement in zip(packet.units, packet.decisions, packet.placements, strict=True)
+        if decision and placement.target_layer == source_layer
+    ]
+    if not active_unit_ids:
+        return []
+
+    selected: list[MemoryRecord] = []
+    seen: set[str] = set()
+    for record in reversed(store.iter_records(source_layer)):
+        if record.unit_id not in active_unit_ids or record.unit_id in seen:
+            continue
+        selected.append(record)
+        seen.add(record.unit_id)
+        if len(seen) == len(set(active_unit_ids)):
+            break
+
+    selected.reverse()
+    return selected
 
 
 def resolve_record_field(record: MemoryRecord, field: str) -> Any:
@@ -295,7 +347,14 @@ def serialize_source_record(record: MemoryRecord) -> dict[str, Any]:
     }
 
 
-def render_record_text(field_payload: dict[str, Any], *, extract_fields: tuple[str, ...]) -> str:
+def render_record_text(
+    field_payload: dict[str, Any],
+    *,
+    extract_fields: tuple[str, ...],
+    record_text_field: str | None = None,
+) -> str:
+    if record_text_field is not None:
+        return render_value(field_payload.get(record_text_field))
     if len(extract_fields) == 1:
         return render_value(field_payload.get(extract_fields[0]))
     return "\n".join(f"{field}: {render_value(field_payload.get(field))}" for field in extract_fields)
@@ -363,6 +422,7 @@ def build_hierarchical_observation(
     target_layer: str,
     extract_mode: str,
     extract_fields: tuple[str, ...],
+    record_text_field: str | None,
     group_by: tuple[str, ...],
     group_key: dict[str, Any],
     records: list[MemoryRecord],
@@ -370,7 +430,11 @@ def build_hierarchical_observation(
 ) -> Observation:
     timestamp = records[-1].timestamp if records else None
     return Observation(
-        text=render_record_text(field_payload, extract_fields=extract_fields),
+        text=render_record_text(
+            field_payload,
+            extract_fields=extract_fields,
+            record_text_field=record_text_field,
+        ),
         timestamp=timestamp or datetime.now(UTC).isoformat(),
         source="hierarchical",
         metadata=build_hierarchical_metadata(
@@ -394,6 +458,7 @@ def append_hierarchical_records(
     memory_pipeline: MemoryPipeline | None,
     extract_mode: str,
     extract_fields: tuple[str, ...],
+    record_text_field: str | None,
     group_by: tuple[str, ...],
     grouped_records: list[dict[str, Any]],
     prompt: PromptPlan | str | None,
@@ -425,6 +490,7 @@ def append_hierarchical_records(
             target_layer=effective_target_layer,
             extract_mode=extract_mode,
             extract_fields=extract_fields,
+            record_text_field=record_text_field,
             group_by=group_by,
             group_key=group_key,
             records=records,

@@ -828,7 +828,15 @@ class ReflectionGenerationEvolution(MemoryEvolutionModule):
 
 
 class HierarchicalEvolution(MemoryEvolutionModule):
-    """Aggregate selected source-layer records into higher-level target records."""
+    """Aggregate selected source-layer records into higher-level target records.
+
+    Supports both the original layer-scan / decisions-store selection path and
+    an opt-in ``latest_active_units`` mode for patterns that first append raw
+    trial records and then immediately abstract only those newly written
+    records. Optional ``record_text_field`` lets generated payloads keep richer
+    metadata while choosing a single field as the stored record text. Optional
+    ``retention_size`` prunes the target layer to a bounded recency window.
+    """
 
     spec = ModuleSpec(
         name="hierarchical_evolution",
@@ -848,6 +856,9 @@ class HierarchicalEvolution(MemoryEvolutionModule):
         prompt: PromptPlan | str | None = None,
         target_layer: str | None = None,
         memory_pipeline=None,
+        selection_mode: str = "decisions_store_or_scan",
+        record_text_field: str | None = None,
+        retention_size: int | None = None,
     ) -> None:
         config = validate_hierarchical_config(
             source_layer=source_layer,
@@ -857,6 +868,8 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             extract_fields=extract_fields,
             group_by=group_by,
             prompt=prompt,
+            selection_mode=selection_mode,
+            record_text_field=record_text_field,
         )
         self.source_layer = config["source_layer"]
         self.target_layer = config["target_layer"]
@@ -865,6 +878,11 @@ class HierarchicalEvolution(MemoryEvolutionModule):
         self.extract_fields = config["extract_fields"]
         self.group_by = config["group_by"]
         self.prompt = config["prompt"]
+        self.selection_mode = config["selection_mode"]
+        self.record_text_field = config["record_text_field"]
+        if retention_size is not None and int(retention_size) <= 0:
+            raise ValueError("retention_size must be positive when provided.")
+        self.retention_size = None if retention_size is None else int(retention_size)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         require_aligned_units_decisions(packet, include_placements=True)
@@ -873,6 +891,7 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             packet,
             store,
             source_layer=self.source_layer,
+            selection_mode=self.selection_mode,
         )
         grouped = group_records(selected_records, group_by=self.group_by)
         effects, writer_pipeline_mode = append_hierarchical_records(
@@ -882,6 +901,7 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             memory_pipeline=self.memory_pipeline,
             extract_mode=self.extract_mode,
             extract_fields=self.extract_fields,
+            record_text_field=self.record_text_field,
             group_by=self.group_by,
             grouped_records=grouped,
             prompt=self.prompt,
@@ -890,6 +910,15 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             target_layer=self.target_layer,
             memory_pipeline=self.memory_pipeline,
         )
+        pruned_record_ids: list[str] = []
+        retained_record_ids: list[str] = []
+        if self.retention_size is not None and store.has_layer(effective_target_layer):
+            records = store.layers.get(effective_target_layer, [])
+            if len(records) > self.retention_size:
+                removed = records[:-self.retention_size]
+                pruned_record_ids = [record.record_id for record in removed]
+                store.layers[effective_target_layer] = records[-self.retention_size:]
+            retained_record_ids = [record.record_id for record in store.layers.get(effective_target_layer, [])]
 
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
@@ -899,6 +928,8 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             "target_layer": effective_target_layer,
             "extract_mode": self.extract_mode,
             "extract_fields": list(self.extract_fields),
+            "selection_mode": self.selection_mode,
+            "record_text_field": self.record_text_field,
             "group_by": list(self.group_by),
             "prompt_is_template": bool(
                 self.prompt is not None
@@ -918,6 +949,9 @@ class HierarchicalEvolution(MemoryEvolutionModule):
             "write_mode": "memory_pipeline_ingest",
             "writer_pipeline_mode": writer_pipeline_mode,
             "prompt_trace": [effect["prompt_trace"] for effect in effects if effect.get("prompt_trace") is not None],
+            "retention_size": self.retention_size,
+            "pruned_record_ids": pruned_record_ids,
+            "retained_record_ids": retained_record_ids,
         }
         return replace(packet, trace=trace), store
 

@@ -1090,6 +1090,8 @@ class HierarchicalOrganization(OrganizationModule):
             extract_fields=extract_fields,
             group_by=group_by,
             prompt=prompt,
+            selection_mode="decisions_store_or_scan",
+            record_text_field=None,
         )
         self.source_layer = config["source_layer"]
         self.target_layer = config["target_layer"]
@@ -1120,6 +1122,7 @@ class HierarchicalOrganization(OrganizationModule):
             memory_pipeline=self.memory_pipeline,
             extract_mode=self.extract_mode,
             extract_fields=self.extract_fields,
+            record_text_field=None,
             group_by=self.group_by,
             grouped_records=grouped,
             prompt=self.prompt,
