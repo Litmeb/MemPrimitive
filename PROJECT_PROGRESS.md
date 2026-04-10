@@ -150,7 +150,22 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Paper-fidelity gaps are now clearer for the memory slice:
   - reflection generation now conditions on prior retained reflections via prompt-side sub-recall, so the earlier "latest failed trial only" mismatch is closed without adding a Reflexion-specific primitive
   - the helper/default path now prefers an explicit full `trial_trace` for short-term memory and only falls back to `last_attempt`, so the earlier "single compressed attempt string only" mismatch is also closed at the example level
-  - recall is still a pure recency window over one shared reflection buffer, so the example still lacks the paper's task-local trial loop semantics and can mix reflections across unrelated tasks unless the caller isolates stores manually; this is currently treated as an intentional research-prototype simplification rather than a primitive gap
+- recall is still a pure recency window over one shared reflection buffer, so the example still lacks the paper's task-local trial loop semantics and can mix reflections across unrelated tasks unless the caller isolates stores manually; this is currently treated as an intentional research-prototype simplification rather than a primitive gap
+
+### RecurrentGPT
+
+- Paper + upstream repo review now suggests the current framework can reproduce the RecurrentGPT memory module without adding new primitives, as long as scope excludes the human/agent loop and aligns to the easier repo-consistent path.
+- The most implementation-friendly interpretation is the released repo rather than the paper's stricter wording:
+  - short-term memory -> one bounded natural-language summary record that is rewritten each step
+  - long-term memory -> append-only paragraph memory with vector retrieval by current plan/instruction
+  - prompt context assembly -> previous paragraph + current plan + rewritten short memory + retrieved long-term paragraphs
+- The clean module mapping is now clearer:
+  - paragraph/history persistence -> `AppendOrganization`
+  - long-term recall by next-plan query -> `EmbeddingSimilarityRetrieval` + `ConcatenateReadout` or `TemplateReadout`
+  - short-memory rewrite -> `HierarchicalEvolution(extract_mode="generate", selection_mode="latest_active_units", retention_size=1)`
+  - full generation prompt assembly with recalled memory -> `TemplateReadout` / `PromptPlan`-based recalled-prompt composition, or equivalently `LLMRepresentation` prompts with sub-recall
+- Important paper/repo mismatch: the paper/README often says long-term memory stores summaries of prior paragraphs, but the released repo actually appends raw generated paragraphs into the vector memory and retrieves those paragraphs directly. The current framework matches the repo-side behavior more naturally; paper-style summary memory is still possible by inserting one extra abstraction layer, not by adding a new primitive.
+- The example-level wiring now exists in `memprimitive/example/classics/recurrentgpt_memory.py`. Its current status is: executable repo-style reconstruction exists for the memory module plus the simple writer/human-simulator loop; remaining gaps are prompt fidelity/tuning questions rather than missing framework coverage.
 
 ### Other Boundary Papers
 
