@@ -25,3 +25,4 @@ output.txt
 *.jsonl
 *.mdc
 *.yml
+testing.py

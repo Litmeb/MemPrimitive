@@ -7,3 +7,11 @@ from .reflexion_memory import (
     recall_reflection_context,
     recall_reflections,
 )
+from .recurrentgpt_memory import (
+    bootstrap_recurrentgpt_story,
+    build_recurrentgpt_memory_system,
+    current_short_memory,
+    recall_related_paragraphs,
+    run_recurrentgpt_iteration,
+    run_recurrentgpt_loop,
+)
