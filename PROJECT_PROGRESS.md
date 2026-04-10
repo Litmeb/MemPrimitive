@@ -167,6 +167,36 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Important paper/repo mismatch: the paper/README often says long-term memory stores summaries of prior paragraphs, but the released repo actually appends raw generated paragraphs into the vector memory and retrieves those paragraphs directly. The current framework matches the repo-side behavior more naturally; paper-style summary memory is still possible by inserting one extra abstraction layer, not by adding a new primitive.
 - The example-level wiring now exists in `memprimitive/example/classics/recurrentgpt_memory.py`. Its current status is: executable repo-style reconstruction exists for the memory module plus the simple writer/human-simulator loop; remaining gaps are prompt fidelity/tuning questions rather than missing framework coverage.
 
+### Memory Sharing / INMS
+
+- Paper + upstream repo review now suggests the current framework can reproduce the repo-consistent memory module of `Memory Sharing for Large Language Model based Agents` without adding new baseline primitive families, as long as scope excludes the multi-agent control loop and treats retriever updating as example-level orchestration rather than a new declarative module.
+- The easiest alignment target is the released repo `GHupppp/InteractiveMemorySharingLLM`, not the paper's cleaner prose:
+  - stored memory is the full retrieved/enhanced prompt plus the generated answer, not just the raw user query plus answer
+  - write filtering is an LLM rubric score with a simple threshold gate
+  - retrieval at inference is cosine similarity over encoder embeddings of concatenated QA strings
+  - the advertised BM25 + LLM labeling + online training path mainly appears in the update procedure for the retriever, not in the final recall scoring path
+- The clean framework mapping is now clearer:
+  - shared domain memory pool -> one shared `MemoryStore` layer, or one layer per domain when reproducing domain-pool vs single-pool experiments
+  - memory write filtering -> `LLMJudgeTrigger(decision_mode="score")`
+  - memory append -> `AppendOrganization`
+  - retrieval seed / fallback -> `EmbeddingSimilarityRetrieval` for the repo-consistent main path, optionally `BM25Retrieval` or `LayerAwareRetrieval` if reproducing the repo's BM25-first candidate mining logic around retriever updates
+  - prompt assembly from retrieved QA examples -> `TemplateReadout` or `ConcatenateReadout`
+- Important paper/repo mismatch: the paper frames retriever learning as a central part of the mechanism, while the public repo's executed path is looser and partly inconsistent:
+  - new memories are scored and appended with a fixed threshold
+  - retriever training uses BM25 candidate mining plus LLM-generated binary labels
+  - recall itself later uses encoder cosine similarity on stored QA strings, not the classifier head output
+- Current framework boundary:
+  - mechanism-level repo-style reconstruction is feasible now without adding new baseline modules
+  - fully first-class declarative support for "online-train the retriever whenever a memory is accepted" still does not exist as a primitive; that piece would need to live in wrapper/orchestration code unless a future trainable-retriever primitive is added
+- Paper-first audit note: the current example should still not be described as paper-aligned at the memory-transition level. The main paper-relevant mismatches are now clearer:
+  - long-term memory persists raw paragraph text rather than paragraph summaries
+  - long-term memory write timing is shifted: bootstrap does not persist the third generated paragraph into long-term memory at the same step, and later writes append the prior finalized paragraph on the next iteration
+  - the recurrent content state is human-extended before it is reused and later written to long-term memory, whereas the paper describes the previous timestep's generated paragraph/plan being reused, with the human simulator only selecting and revising the next plan
+- Upstream repo audit note: these three behaviors are not local deviations from `aiwaves-cn/RecurrentGPT`; they are how the released repo itself works. In upstream:
+  - `recurrentgpt.py` embeds and retrieves `self.long_memory` as raw paragraphs, not summary records
+  - `recurrentgpt.py` appends `self.input["output_paragraph"]` after each writer step, so long-memory persistence is one-step-lagged and bootstrap starts from only paragraph 1/2
+  - `human_simulator.py` returns an `Extended Paragraph`, and `gradio_server.py` feeds that extended paragraph back into `RecurrentGPT` as the next `input["output_paragraph"]`
+
 ### Other Boundary Papers
 
 - `HippoRAG`: still highlights graph retrieval / propagation gaps.

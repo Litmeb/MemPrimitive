@@ -1,24 +1,37 @@
 """Mechanism-level reconstruction of RecurrentGPT with the repo-style loop.
 
 This file intentionally aligns to the released `aiwaves-cn/RecurrentGPT` code
-path more than to the paper's stricter prose. In particular:
+path more than to the paper's stricter prose.
 
 Important alignment note:
 
-- The current implementation is a reconstruction of the released repo behavior.
-- It is not a paper-first normalization of RecurrentGPT.
-- Where this file differs from the paper, that mismatch is treated as an
+- This implementation is a reconstruction of the released repo behavior, not a
+  paper-first normalization of RecurrentGPT.
+- Long-term memory follows the released repo's actual code path: it stores raw
+  prior paragraphs in a vector-backed memory and retrieves those paragraphs
+  directly. The paper/README often describe long-term memory as storing
+  summaries of prior paragraphs instead.
+- Long-term memory write timing also follows the released repo: bootstrap seeds
+  long memory with only the first two paragraphs, and later writer steps append
+  the previous input paragraph after generation. This is not the paper's
+  cleaner "generate paragraph -> append its summary in the same step" story.
+- The recurrent content state also follows the released repo: the human
+  simulator extends the writer's new paragraph, and that extended paragraph is
+  what gets fed into the next writer step and later appended into long memory.
+  The paper's wording makes the human role sound closer to plan selection and
+  revision only.
+- Where this file differs from the paper in those ways, treat that as an
   upstream paper/repo inconsistency in the original RecurrentGPT release, not
   as a defect in this reconstruction.
 
 1. long-term memory stores prior paragraphs directly in a vector-backed layer,
-2. the current plan/instruction queries that long-term memory,
+2. the current plan/instruction queries that paragraph memory,
 3. the writer prompt jointly produces a new paragraph, a rewritten short memory,
    and three next-step plans,
-4. a lightweight "human simulator" selects one plan and rewrites/extends the
-   paragraph for the next step, and
-5. the finalized current paragraph is appended to long-term memory on the next
-   writer step, matching the upstream control flow.
+4. a lightweight "human simulator" selects one plan, extends the new paragraph,
+   and rewrites the next-step plan, and
+5. the paragraph appended to long-term memory is the previous human-finalized
+   paragraph, on the next writer step, matching the upstream control flow.
 
 This keeps the causal memory loop faithful to the repo while still reusing the
 framework's existing primitives for memory storage and retrieval.
