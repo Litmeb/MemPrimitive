@@ -901,6 +901,10 @@ def test_query_rewrite_retrieval_is_registered_in_baseline_exports() -> None:
     assert "QueryRewriteRetrieval" in registered_baseline_class_names()
 
 
+def test_metadata_retrieval_is_registered_in_baseline_exports() -> None:
+    assert "MetadataRetrieval" in registered_baseline_class_names()
+
+
 def test_graph_deduplication_append_organization_is_registered_in_baseline_exports() -> None:
     assert "GraphDeduplicationAppendOrganization" in registered_baseline_class_names()
 

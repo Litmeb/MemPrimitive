@@ -48,6 +48,17 @@ def test_embedding_similarity_retrieval_rejects_non_positive_top_k() -> None:
         EmbeddingSimilarityRetrieval(top_k=0)
 
 
+def test_metadata_retrieval_rejects_invalid_inputs() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    with pytest.raises(ValueError, match="top_k > 0"):
+        MetadataRetrieval(top_k=0, field="topic", target="graphs")
+    with pytest.raises(ValueError, match="non-empty field"):
+        MetadataRetrieval(field="   ", target="graphs")
+    with pytest.raises(ValueError, match="match_mode"):
+        MetadataRetrieval(field="topic", target="graphs", match_mode="contains")
+
+
 def test_retrieval_on_empty_store_returns_empty_retrieved_set() -> None:
     from memprimitive.baselines import RecencyRetrieval
 

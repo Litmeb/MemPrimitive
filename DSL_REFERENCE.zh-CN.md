@@ -158,6 +158,7 @@ unit_formation
 | --- | --- | --- |
 | `RecencyRetrieval` (`recency_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按时间新近性检索。 |
 | `KeywordCountRetrieval` (`keyword_count_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按 token 命中数排序。 |
+| `MetadataRetrieval` (`metadata_retrieval`) | `top_k=3`, `field`, `target`, `match_mode="exact"`, `layer=None`, `source="store"` | 按 `record.metadata[field]` 过滤记录；默认做大小写不敏感的 exact match，`match_mode="regex"` 时按正则匹配；若字段值是 `list` / `tuple` / `set` 等 iterable，则逐成员匹配，命中任一成员即可。 |
 | `EmbeddingSimilarityRetrieval` (`embedding_similarity_retrieval`) | `top_k=3`, `layer=None`, `embedding_model="sentence-transformers/all-MiniLM-L6-v2"`, `source="store"` | 按 embedding 相似度检索。 |
 | `EntityRetrieval` (`entity_retrieval`) | `top_k=3`, `layer=None` | 按 query 与 entities 的重叠度检索。 |
 | `BM25Retrieval` (`bm25_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 对文本和关键词做 BM25 排序。 |

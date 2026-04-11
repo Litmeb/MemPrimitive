@@ -92,6 +92,294 @@ def test_keyword_count_retrieval_source_retrieved_only_reranks_candidate_subset(
     assert all(record.record_id != "rec-3" for record in packet_out.retrieved.items)
 
 
+def test_metadata_retrieval_exact_match_on_scalar_metadata_field() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Graph memory note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"topic": "graphs"},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="default",
+            text="Tea note",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"topic": "tea"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=3, field="topic", target="graphs").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.retrieved.trace["matched_count"] == 1
+    assert packet_out.retrieved.trace["match_mode"] == "exact"
+
+
+def test_metadata_retrieval_exact_match_is_case_insensitive() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Alice record",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"owner": "Alice"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=1, field="owner", target="alice").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+
+
+def test_metadata_retrieval_regex_match_on_scalar_metadata_field() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Graph memory note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"topic": "graph-memory"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(
+        top_k=1,
+        field="topic",
+        target=r"graph.*memory",
+        match_mode="regex",
+    ).run(Packet(query=Query(text="ignored")), store)
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.retrieved.trace["match_mode"] == "regex"
+
+
+def test_metadata_retrieval_iterable_field_matches_any_member() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Tagged note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"tags": ["tea", "graphs", "memory"]},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=1, field="tags", target="graphs").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+
+
+def test_metadata_retrieval_iterable_field_skips_non_matching_members() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Tagged note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"tags": ["tea", "memory"]},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=1, field="tags", target="graphs").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.trace["matched_count"] == 0
+
+
+def test_metadata_retrieval_treats_string_metadata_as_single_value() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Single string note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"code": "abc"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=1, field="code", target="b").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert packet_out.retrieved.items == []
+
+
+def test_metadata_retrieval_skips_missing_metadata_field() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Missing field note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"other": "graphs"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=1, field="topic", target="graphs").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.trace["candidate_count"] == 1
+
+
+def test_metadata_retrieval_honors_layer_filtering() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile"), StoreLayerSpec(name="history")])
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="profile",
+            text="Profile graph note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"topic": "graphs"},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="history",
+            text="History graph note",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"topic": "graphs"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=2, field="topic", target="graphs", layer="profile").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert packet_out.retrieved.trace["layer"] == "profile"
+
+
+def test_metadata_retrieval_source_retrieved_limits_candidate_subset() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    candidate_a = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="default",
+        text="Tea note",
+        timestamp="2026-01-01T00:00:00+00:00",
+        metadata={"topic": "tea"},
+    )
+    candidate_b = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="default",
+        text="Graph note",
+        timestamp="2026-01-01T00:00:01+00:00",
+        metadata={"topic": "graphs"},
+    )
+    better_outside = MemoryRecord(
+        record_id="rec-3",
+        unit_id="unit-3",
+        layer="default",
+        text="Graph note outside subset",
+        timestamp="2026-01-01T00:00:02+00:00",
+        metadata={"topic": "graphs"},
+    )
+    store = MemoryStore()
+    for record in (candidate_a, candidate_b, better_outside):
+        store.append(record)
+
+    packet_out, _ = MetadataRetrieval(top_k=2, field="topic", target="graphs", source="retrieved").run(
+        Packet(query=Query(text="ignored"), retrieved=RetrievedSet(items=[candidate_a, candidate_b], scores=[])),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2"]
+    assert packet_out.retrieved.trace["source"] == "retrieved"
+    assert packet_out.retrieved.trace["candidate_count"] == 2
+
+
+def test_metadata_retrieval_orders_matches_by_recency() -> None:
+    from memprimitive.baselines import MetadataRetrieval
+
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="Older graph note",
+            timestamp="2026-01-01T00:00:00+00:00",
+            metadata={"topic": "graphs"},
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="rec-2",
+            unit_id="unit-2",
+            layer="default",
+            text="Newer graph note",
+            timestamp="2026-01-01T00:00:01+00:00",
+            metadata={"topic": "graphs"},
+        )
+    )
+
+    packet_out, _ = MetadataRetrieval(top_k=2, field="topic", target="graphs").run(
+        Packet(query=Query(text="ignored")),
+        store,
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+
+
 def test_bm25_retrieval_prefers_stronger_lexical_matches() -> None:
     from memprimitive.baselines import BM25Retrieval
 
