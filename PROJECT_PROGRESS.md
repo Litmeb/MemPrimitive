@@ -53,6 +53,7 @@ Avoid re-documenting these in detail unless something materially changes.
 - Follow-up simplification landed in the expected moderate form: responsibility is more centralized and Mem0/tool-path manual embedding logic is smaller, but the harder embedding complexity still remains in graph/entity/note/query-specialized paths.
 - `ConfigurableEmbeddingRepresentation` is now the generic text-configurable embedding representation primitive: render configurable text (including template-based text) from the current unit, embed that text, and record embedding-input provenance in `metadata["representation"]` / trace without rewriting the unit's main text-facing fields.
 - `LLMRepresentation` now supports structured metadata-backed custom fields with `value_type=list[dict[str, str]]` in addition to `str`, `list[str]`, and `dict[str, str]`, using permissive normalization for JSON object lists.
+- TiM thought extraction now uses that structured `LLMRepresentation(field="thoughts", value_type=list[dict[str, str]])` path plus a thin example-level normalization helper, instead of a fully hand-written direct runtime JSON call.
 - `memprimitive/example/classics` now contains executable reconstructions rather than an empty placeholder. The most important current examples are:
   - COMEDY / compressive-memory style hierarchical maintenance
   - A-MEM / Agentic Memory
@@ -191,6 +192,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
   - mechanism-level TiM reconstruction is feasible now without new primitives
   - strict paper-faithful LSH as a first-class reusable primitive does not exist yet; current alignment would compute/query bucket ids in wrapper code and store them as ordinary metadata
   - if future work wants TiM-style hash retrieval and same-bucket maintenance to become declarative reusable baselines rather than example glue, a dedicated hash-bucketing representation/retrieval path would still be a worthwhile later refinement
+  - thought extraction is now slightly less ad hoc than before: the example reuses generic `LLMRepresentation` for multi-thought structured extraction, while still keeping bucket grouping and bucket-local update orchestration in thin TiM-specific helper code
 
 ### Memory Sharing / INMS
 
