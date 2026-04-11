@@ -168,6 +168,28 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Important paper/repo mismatch: the paper/README often says long-term memory stores summaries of prior paragraphs, but the released repo actually appends raw generated paragraphs into the vector memory and retrieves those paragraphs directly. The current framework matches the repo-side behavior more naturally; paper-style summary memory is still possible by inserting one extra abstraction layer, not by adding a new primitive.
 - The example-level wiring now exists in `memprimitive/example/classics/recurrentgpt_memory.py`. Its current status is: executable repo-style reconstruction exists for the memory module plus the simple writer/human-simulator loop; remaining gaps are prompt fidelity/tuning questions rather than missing framework coverage.
 
+### Think-in-Memory (TiM)
+
+- Paper review now suggests the current framework can reproduce the TiM memory module without adding new baseline primitive families, as long as scope excludes the surrounding agent loop and accepts a small amount of example-level orchestration/helper logic.
+- The clearest current mapping is:
+  - thought extraction / post-thinking -> `LLMFunctionCallOrganization` with repeated `ADD` calls, or helper orchestration plus `SentenceSplitUnitFormation` / `AppendOrganization`
+  - thought storage -> flat semantic layer with vector index plus top-level metadata such as `hash_bucket`, head entity, relation, tail entity, and provenance
+  - TiM retrieval -> example-level bucket computation, then `MetadataRetrieval(field="hash_bucket", source="store")` followed by `EmbeddingSimilarityRetrieval(source="retrieved")`
+  - TiM maintenance within one bucket -> `LLMFunctionCallEvolution` using existing `ADD` / `UPDATE` / `DELETE` tools, where merge is represented as `UPDATE` one kept record plus `DELETE` redundant records
+- Important paper ambiguity remains explicit:
+  - the paper clearly requires insert / forget / merge within a hash group, but it does not specify a deterministic execution protocol for conflict detection, merge target choice, output schema, or exact invocation timing
+  - the prompt examples for forget / merge are illustrative only; they are not enough to derive one unique implementation
+- Paper-first audit note:
+  - `memprimitive/example/classics/tim_memory.py` is still best described as a mechanism-level approximation rather than paper-aligned memory
+  - the biggest functional gaps are now clearer:
+    - post-thinking currently extracts thoughts only from the current Q-R pair, while the paper says memory update should incorporate both historical and new thoughts
+    - multiple newly extracted thoughts are written and maintained one by one, so there is no single joint update pass over the whole post-thinking result
+    - same-bucket maintenance only exposes a bounded same-bucket top-k candidate subset to forget/merge rather than the whole hash group described in the paper
+- Current framework boundary:
+  - mechanism-level TiM reconstruction is feasible now without new primitives
+  - strict paper-faithful LSH as a first-class reusable primitive does not exist yet; current alignment would compute/query bucket ids in wrapper code and store them as ordinary metadata
+  - if future work wants TiM-style hash retrieval and same-bucket maintenance to become declarative reusable baselines rather than example glue, a dedicated hash-bucketing representation/retrieval path would still be a worthwhile later refinement
+
 ### Memory Sharing / INMS
 
 - Paper + upstream repo review now suggests the current framework can reproduce the repo-consistent memory module of `Memory Sharing for Large Language Model based Agents` without adding new baseline primitive families, as long as scope excludes the multi-agent control loop and treats retriever updating as example-level orchestration rather than a new declarative module.

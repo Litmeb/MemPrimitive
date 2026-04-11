@@ -21,3 +21,10 @@ from .recurrentgpt_memory import (
     run_recurrentgpt_iteration,
     run_recurrentgpt_loop,
 )
+from .tim_memory import (
+    build_tim_memory_system,
+    build_tim_prompt,
+    post_think_and_update_memory,
+    recall_thoughts as recall_tim_thoughts,
+    store_thought as store_tim_thought,
+)
