@@ -143,11 +143,23 @@ class FanoutIngestOrganization(OrganizationModule):
             raise ValueError("FanoutIngestOrganization requires packet.observation.")
 
         raw_items = observation.metadata.get(self.field)
+        source = f"observation.metadata[{self.field!r}]"
         if self.field not in observation.metadata:
-            raise ValueError(f"FanoutIngestOrganization requires observation.metadata[{self.field!r}].")
+            raw_units = list(packet.units or [])
+            first_unit = raw_units[0] if raw_units else None
+            unit_metadata = first_unit.metadata if first_unit is not None and isinstance(first_unit.metadata, dict) else {}
+            representation = unit_metadata.get("representation", {}) if isinstance(unit_metadata, dict) else {}
+            if isinstance(representation, dict) and self.field in representation:
+                raw_items = representation.get(self.field)
+                source = f"unit.metadata.representation[{self.field!r}]"
+            else:
+                raise ValueError(
+                    f"FanoutIngestOrganization requires observation.metadata[{self.field!r}] "
+                    f"or unit.metadata.representation[{self.field!r}]."
+                )
         if isinstance(raw_items, (str, bytes)) or isinstance(raw_items, Mapping) or not isinstance(raw_items, Iterable):
             raise ValueError(
-                f"FanoutIngestOrganization requires observation.metadata[{self.field!r}] "
+                f"FanoutIngestOrganization requires {source} "
                 "to be an iterable of strings."
             )
 
@@ -188,6 +200,7 @@ class FanoutIngestOrganization(OrganizationModule):
         trace["organization"] = {
             "module": self.spec.name,
             "field": self.field,
+            "source": source,
             "fanout_count": fanout_count,
             "skipped_member_count": skipped_non_string + skipped_empty_string,
             "skipped_reasons": {

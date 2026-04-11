@@ -39,6 +39,7 @@ Avoid re-documenting these in detail unless something materially changes.
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
 - Organization baselines now also include `FanoutIngestOrganization`, a reusable ingest-time helper that reads an iterable string field from `Observation.metadata` and fans those strings out through a child `MemoryPipeline.ingest(...)` path while aggregating child ingest trace.
+- `FanoutIngestOrganization` now also supports reading that iterable string field from `packet.units[0].metadata["representation"]` when the field is not already present on `Observation.metadata`, so representation-driven extraction pipelines can fan out directly into child ingest paths without extra example glue.
 - Retrieval baselines now also include `MetadataRetrieval`, a simple metadata-field filter that supports case-insensitive exact match by default plus regex matching, with one-level iterable-member matching for list/tuple/set-style metadata fields.
 - The public baseline surface has been intentionally tightened again: `GraphNeighborAppendEvolution`, `BulletListReadout`, `GroupedByLayerReadout`, `GraphEntityAppendOrganization`, `TagRetrieval`, `ConditionalLayerOrganization`, `LineSplitUnitFormation`, `WindowedUnitFormation`, and `MetadataHintUnitFormation` are now removed rather than kept as extra baseline variants.
 - The intended replacements are now explicit in code/tests/docs rather than preserved as compatibility aliases:
@@ -96,8 +97,10 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 - `mem0_memory.py` is reasonably close at the mechanism level.
 - PromptPlan-controlled candidate visibility now closes the previous major update-scope mismatch: the Mem0 profile-update tools can be restricted to recalled profile candidates instead of the whole `profile` layer.
+- The Mem0 profile write path is now organized as extraction-plus-fanout rather than one multi-fact maintenance step: an outer pipeline extracts `fact_list`, then `FanoutIngestOrganization` fans each fact into a child single-fact profile pipeline for add/update/delete decisions. The old helper-side per-fact recall stitching path has been removed.
 - `mem0g_memory.py` has moved closer to upstream structure by keeping both a profile/vector branch and a graph branch, but it is still only partially aligned.
 - Mem0g now uses the same prompt-controlled visible-domain path for both its profile/vector tools and graph-maintenance tools.
+- Mem0g's profile/vector branch now follows the same extraction-plus-fanout organization as Mem0: outer fact extraction via `fact_list`, then per-fact child ingest through `FanoutIngestOrganization` rather than helper-side multi-fact recall assembly.
 - The biggest remaining Mem0g gaps are graph-native storage semantics, relation-level invalidation/update behavior, and full repo-style recall behavior.
 
 ### RET-LLM / MemLLM

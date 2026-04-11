@@ -5,7 +5,7 @@ import pytest
 from memprimitive import FanoutIngestOrganization as TopLevelFanoutIngestOrganization
 from memprimitive.baselines import AppendOrganization, BasicRepresentation, FanoutIngestOrganization, PassThroughUnitFormation
 from memprimitive.baselines.registry import registered_baseline_class_names
-from memprimitive.core import MemoryStore, Observation, Packet
+from memprimitive.core import MemoryStore, MemoryUnit, Observation, Packet
 from memprimitive.pipeline import MemoryPipeline
 
 
@@ -65,8 +65,27 @@ def test_fanout_ingest_organization_requires_metadata_field() -> None:
     module = FanoutIngestOrganization(field="segments", pipeline=_child_pipeline())
     packet = Packet(observation=Observation(text="parent", source="notes", metadata={}))
 
-    with pytest.raises(ValueError, match="requires observation.metadata"):
+    with pytest.raises(ValueError, match="requires observation.metadata.*unit.metadata.representation"):
         module.run(packet, MemoryStore())
+
+
+def test_fanout_ingest_organization_reads_from_unit_representation_when_metadata_is_missing() -> None:
+    store = MemoryStore()
+    module = FanoutIngestOrganization(field="segments", pipeline=_child_pipeline())
+    packet = Packet(
+        observation=Observation(text="parent", source="notes", metadata={}),
+        units=[
+            MemoryUnit(
+                text="parent",
+                metadata={"representation": {"segments": ["alpha", " beta "]}},
+            )
+        ],
+    )
+
+    packet_out, updated_store = module.run(packet, store)
+
+    assert [record.text for record in updated_store.iter_records("default")] == ["alpha", "beta"]
+    assert packet_out.trace["organization"]["source"] == "unit.metadata.representation['segments']"
 
 
 def test_fanout_ingest_organization_rejects_non_iterable_metadata_value() -> None:
