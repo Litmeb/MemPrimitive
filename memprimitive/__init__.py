@@ -24,6 +24,7 @@ from .dispatch import (
     DispatchUnitFormation,
     DispatchWriteTrigger,
 )
+from .baselines import FanoutIngestOrganization
 from .utils.exceptions import IncompatibleCompositionError
 from .utils._mid_decoding_tools import ReadoutToolCallContext, ReadoutToolResult, ReadoutToolSpec
 from .utils._llm_function_tools import WriteToolCallContext, WriteToolResult, WriteToolSpec
@@ -38,6 +39,7 @@ __all__ = [
     "DispatchRetrieval",
     "DispatchUnitFormation",
     "DispatchWriteTrigger",
+    "FanoutIngestOrganization",
     "FreeMemoryPipeline",
     "IncompatibleCompositionError",
     "MemoryPipeline",

@@ -38,6 +38,7 @@ Avoid re-documenting these in detail unless something materially changes.
 ## Important Recent Progress
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
+- Organization baselines now also include `FanoutIngestOrganization`, a reusable ingest-time helper that reads an iterable string field from `Observation.metadata` and fans those strings out through a child `MemoryPipeline.ingest(...)` path while aggregating child ingest trace.
 - Retrieval baselines now also include `MetadataRetrieval`, a simple metadata-field filter that supports case-insensitive exact match by default plus regex matching, with one-level iterable-member matching for list/tuple/set-style metadata fields.
 - The public baseline surface has been intentionally tightened again: `GraphNeighborAppendEvolution`, `BulletListReadout`, `GroupedByLayerReadout`, `GraphEntityAppendOrganization`, `TagRetrieval`, `ConditionalLayerOrganization`, `LineSplitUnitFormation`, `WindowedUnitFormation`, and `MetadataHintUnitFormation` are now removed rather than kept as extra baseline variants.
 - The intended replacements are now explicit in code/tests/docs rather than preserved as compatibility aliases:
