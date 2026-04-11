@@ -25,22 +25,22 @@ decision in this file:
 
 1. The paper gives illustrative prompts for forget/merge, but does not specify
    a deterministic execution protocol, output schema, or target-selection rule.
-2. The paper does not specify whether forget/merge sees the entire memory or a
-   bounded local candidate set.
-3. The paper does not define an explicit "merge write primitive".
+2. The paper does not define an explicit "merge write primitive".
+3. The paper does not specify one unique packet/module decomposition for a
+   framework reconstruction.
 
 Implementation decisions made here:
 
-1. We restrict forget/merge to one local hash bucket at a time.
-2. Insert happens by normal append of each newly extracted thought.
-3. Forget and merge are both implemented by ``LLMFunctionCallEvolution`` over
-   the visible same-bucket candidate set.
+1. Update runs one bucket-level batch per affected hash bucket.
+2. Insert is a bucket-level ``LLMFunctionCallOrganization`` over the current
+   round's newly extracted thoughts plus historical same-bucket thoughts.
+3. Forget and merge are implemented by ``LLMFunctionCallEvolution`` over the
+   full visible hash group for the bucket.
 4. Merge is represented as:
    - ``UPDATE`` one keeper record into the merged canonical thought, then
    - ``DELETE`` redundant records.
 5. LSH-style bucket assignment is implemented as example-level helper logic,
-   not as a new reusable framework primitive. This keeps the reconstruction
-   within existing MemPrimitive baseline families.
+   not as a new reusable framework primitive.
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ from __future__ import annotations
 import json
 import random
 import sys
+from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from pprint import pprint
 from typing import Any
@@ -55,13 +57,12 @@ from typing import Any
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from memprimitive import MemoryPipeline, MemoryStore, Observation, Packet, Query, StoreLayerSpec, StoreTopology
+from memprimitive import MemoryPipeline, MemoryRecord, MemoryStore, MemoryUnit, Packet, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
-    AlwaysTrigger,
-    AppendOrganization,
-    BasicRepresentation,
+    ConcatenateReadout,
     EmbeddingSimilarityRetrieval,
     LLMFunctionCallEvolution,
+    LLMFunctionCallOrganization,
     MetadataRetrieval,
     TemplateReadout,
 )
@@ -118,16 +119,33 @@ def build_tim_memory_system(
 def extract_inductive_thoughts(
     question: str,
     response: str,
+    *,
+    historical_thoughts: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    """Extract TiM-style inductive thoughts from one question-response pair."""
+    """Extract TiM-style inductive thoughts from the current round plus history."""
 
     runtime = get_runtime()
+    normalized_history = [
+        {
+            "thought": str(item.get("thought", "")).strip(),
+            "head": str(item.get("head", "")).strip(),
+            "relation": str(item.get("relation", "")).strip(),
+            "tail": str(item.get("tail", "")).strip(),
+        }
+        for item in (historical_thoughts or [])
+        if isinstance(item, dict)
+        and str(item.get("thought", "")).strip()
+        and str(item.get("head", "")).strip()
+        and str(item.get("relation", "")).strip()
+        and str(item.get("tail", "")).strip()
+    ]
     payload = runtime.json(
         system=(
-            "Extract TiM-style inductive thoughts from a question-response pair.\n"
+            "Extract TiM-style inductive thoughts for TiM post-thinking.\n"
             "Return a strict JSON array. Each item must be an object with keys:\n"
             "thought, head, relation, tail.\n"
             "Each thought must be one grounded factual relation sentence aligned to the triple.\n"
+            "Use both the current question-response pair and the provided historical thoughts when useful.\n"
             "Only keep thoughts supported by the response.\n"
             "Avoid duplicates and avoid vague summaries."
         ),
@@ -135,6 +153,7 @@ def extract_inductive_thoughts(
             {
                 "question": question,
                 "response": response,
+                "historical_thoughts": normalized_history,
                 "paper_examples": [
                     {
                         "question": "Do you have any company recommendations for me?",
@@ -202,23 +221,36 @@ def post_think_and_update_memory(
     source: str = "tim_post_think",
     extra_metadata: dict[str, Any] | None = None,
 ) -> list[Packet]:
-    """Run TiM post-thinking, then insert and locally maintain extracted thoughts."""
+    """Run one round-level TiM update over all newly extracted thoughts."""
 
+    store = system["store"]
+    assert isinstance(store, MemoryStore)
+    memory_layer = str(system["memory_layer"])
+    historical_thoughts = [
+        {
+            "thought": record.text,
+            "head": str(record.metadata.get("head", "")).strip(),
+            "relation": str(record.metadata.get("relation", "")).strip(),
+            "tail": str(record.metadata.get("tail", "")).strip(),
+        }
+        for record in store.iter_records(memory_layer)
+    ]
+    extracted = extract_inductive_thoughts(
+        question=question,
+        response=response,
+        historical_thoughts=historical_thoughts,
+    )
+    grouped = _group_thoughts_by_bucket(
+        system,
+        thoughts=extracted,
+        source_question=question,
+        source_response=response,
+        source=source,
+        extra_metadata=extra_metadata,
+    )
     packets: list[Packet] = []
-    for thought in extract_inductive_thoughts(question=question, response=response):
-        packets.append(
-            store_thought(
-                system,
-                thought_text=thought["thought"],
-                head=thought["head"],
-                relation=thought["relation"],
-                tail=thought["tail"],
-                source_question=question,
-                source_response=response,
-                source=source,
-                extra_metadata=extra_metadata,
-            )
-        )
+    for hash_bucket, bucket_thoughts in grouped.items():
+        packets.append(_run_tim_bucket_update(system, hash_bucket=hash_bucket, thoughts=bucket_thoughts))
     return packets
 
 
@@ -234,7 +266,7 @@ def store_thought(
     source: str = "tim_post_think",
     extra_metadata: dict[str, Any] | None = None,
 ) -> Packet:
-    """Store one extracted thought, then run same-bucket forget/merge maintenance."""
+    """Store one pre-extracted thought via the same bucket-level batch path."""
 
     normalized_thought = str(thought_text).strip()
     normalized_head = str(head).strip()
@@ -243,23 +275,20 @@ def store_thought(
     if not (normalized_thought and normalized_head and normalized_relation and normalized_tail):
         raise ValueError("thought_text, head, relation, and tail must all be non-empty.")
 
-    bucket = compute_hash_bucket(system, normalized_thought)
-    write_pipeline = _build_tim_thought_write_pipeline(system, hash_bucket=bucket)
-    observation = Observation(
-        text=normalized_thought,
-        source=source,
-        metadata={
-            "head": normalized_head,
-            "relation": normalized_relation,
-            "tail": normalized_tail,
-            "hash_bucket": bucket,
-            "source_question": str(source_question),
-            "source_response": str(source_response),
-            "thought_kind": "inductive_relation_thought",
-            **({} if extra_metadata is None else dict(extra_metadata)),
-        },
-    )
-    return write_pipeline.ingest(observation)
+    hash_bucket = compute_hash_bucket(system, normalized_thought)
+    thought = {
+        "thought": normalized_thought,
+        "head": normalized_head,
+        "relation": normalized_relation,
+        "tail": normalized_tail,
+        "hash_bucket": hash_bucket,
+        "source_question": str(source_question),
+        "source_response": str(source_response),
+        "source": str(source),
+        "thought_kind": "inductive_relation_thought",
+        **({} if extra_metadata is None else dict(extra_metadata)),
+    }
+    return _run_tim_bucket_update(system, hash_bucket=hash_bucket, thoughts=[thought])
 
 
 def recall_thoughts(system: dict[str, object], *, user_query: str) -> list[dict[str, Any]]:
@@ -305,10 +334,10 @@ def build_tim_query(system: dict[str, object], *, query_text: str) -> Query:
 def build_tim_recall_pipeline(system: dict[str, object], *, query_text: str) -> MemoryPipeline:
     """Build a TiM recall pipeline for one query using the query's hash bucket."""
 
-    bucket = compute_hash_bucket(system, query_text)
+    hash_bucket = compute_hash_bucket(system, query_text)
     return _build_bucket_recall_pipeline(
         system,
-        hash_bucket=bucket,
+        hash_bucket=hash_bucket,
         final_top_k=int(system["recall_top_k"]),
         prompt=text_prompt(
             "Recalled TiM thoughts for the current query:\n"
@@ -325,104 +354,287 @@ def compute_hash_bucket(system: dict[str, object], text: str) -> str:
     return f"bucket-{bucket_index}"
 
 
-def _build_tim_thought_write_pipeline(system: dict[str, object], *, hash_bucket: str) -> MemoryPipeline:
+def _group_thoughts_by_bucket(
+    system: dict[str, object],
+    *,
+    thoughts: list[dict[str, str]],
+    source_question: str,
+    source_response: str,
+    source: str,
+    extra_metadata: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for thought in thoughts:
+        normalized_thought = str(thought["thought"]).strip()
+        hash_bucket = compute_hash_bucket(system, normalized_thought)
+        grouped[hash_bucket].append(
+            {
+                "thought": normalized_thought,
+                "head": str(thought["head"]).strip(),
+                "relation": str(thought["relation"]).strip(),
+                "tail": str(thought["tail"]).strip(),
+                "hash_bucket": hash_bucket,
+                "source_question": str(source_question),
+                "source_response": str(source_response),
+                "source": str(source),
+                "thought_kind": "inductive_relation_thought",
+                **({} if extra_metadata is None else dict(extra_metadata)),
+            }
+        )
+    return dict(grouped)
+
+
+def _run_tim_bucket_update(
+    system: dict[str, object],
+    *,
+    hash_bucket: str,
+    thoughts: list[dict[str, Any]],
+) -> Packet:
+    if not thoughts:
+        raise ValueError("TiM bucket update requires at least one thought.")
+
     store = system["store"]
     assert isinstance(store, MemoryStore)
     memory_layer = str(system["memory_layer"])
-    bucket_candidate_k = int(system["bucket_candidate_k"])
+    historical_records = _records_in_bucket(store, memory_layer=memory_layer, hash_bucket=hash_bucket)
 
-    bucket_recall_pipeline = _build_bucket_recall_pipeline(
-        system,
-        hash_bucket=hash_bucket,
-        final_top_k=bucket_candidate_k,
-        prompt=text_prompt("{{ retrieved.items | join_text }}"),
+    organization = _build_tim_bucket_insert_organization(system, hash_bucket=hash_bucket)
+    organization_packet = Packet(
+        units=[_build_bucket_update_unit(hash_bucket=hash_bucket, thoughts=thoughts, historical_records=historical_records)],
+        decisions=[True],
+    )
+    organization_packet, store = organization.run(organization_packet, store)
+
+    written_record_ids = [
+        str(record_id).strip()
+        for record_id in organization_packet.trace.get("organization", {}).get("written_record_ids", [])
+        if str(record_id).strip()
+    ]
+    if not written_record_ids:
+        return organization_packet
+
+    evolution = _build_tim_bucket_evolution_module(system, hash_bucket=hash_bucket)
+    evolution_packet = replace(
+        organization_packet,
+        decisions_store={memory_layer: {"record_ids": written_record_ids}},
+        units=None,
+        decisions=None,
+        placements=None,
+    )
+    evolution_packet, store = evolution.run(evolution_packet, store)
+    return evolution_packet
+
+
+def _build_bucket_update_unit(
+    *,
+    hash_bucket: str,
+    thoughts: list[dict[str, Any]],
+    historical_records: list[MemoryRecord],
+) -> MemoryUnit:
+    source_question = str(thoughts[0].get("source_question", ""))
+    source_response = str(thoughts[0].get("source_response", ""))
+    source = str(thoughts[0].get("source", "tim_post_think"))
+    return MemoryUnit(
+        text=f"TiM bucket update for {hash_bucket}",
+        unit_type="tim_bucket_update",
+        metadata={
+            "source": source,
+            "hash_bucket": hash_bucket,
+            "source_question": source_question,
+            "source_response": source_response,
+            "new_thoughts": [
+                {
+                    "text": thought["thought"],
+                    "head": thought["head"],
+                    "relation": thought["relation"],
+                    "tail": thought["tail"],
+                    "hash_bucket": thought["hash_bucket"],
+                }
+                for thought in thoughts
+            ],
+            "historical_bucket_records": [
+                {
+                    "record_id": record.record_id,
+                    "text": record.text,
+                    "head": record.metadata.get("head"),
+                    "relation": record.metadata.get("relation"),
+                    "tail": record.metadata.get("tail"),
+                    "hash_bucket": record.metadata.get("hash_bucket"),
+                }
+                for record in historical_records
+            ],
+        },
     )
 
+
+def _build_tim_bucket_insert_organization(system: dict[str, object], *, hash_bucket: str) -> LLMFunctionCallOrganization:
+    memory_layer = str(system["memory_layer"])
+    _ = hash_bucket
+    return LLMFunctionCallOrganization(
+        tools=["ADD"],
+        target_layer=memory_layer,
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {
+                        "id": "task",
+                        "title": "Task",
+                        "template": (
+                            "You are performing the TiM insert stage for one hash bucket.\n"
+                            "Review the current question/response, the newly extracted thoughts, and the historical same-bucket thoughts.\n"
+                            "Use ADD once for each new thought that should be inserted into memory.\n"
+                            "Do not rewrite or delete records in this stage.\n"
+                            "For every ADD, include metadata with head, relation, tail, hash_bucket, source_question, source_response, and thought_kind."
+                        ),
+                    },
+                    {
+                        "id": "bucket",
+                        "title": "Hash Bucket",
+                        "template": "{{ unit.metadata.hash_bucket }}",
+                    },
+                    {
+                        "id": "current_round",
+                        "title": "Current Question-Response Pair",
+                        "template": (
+                            "question={{ unit.metadata.source_question }}\n"
+                            "response={{ unit.metadata.source_response }}"
+                        ),
+                    },
+                    {
+                        "id": "new_thoughts",
+                        "title": "Newly Extracted Thoughts",
+                        "repeat_over": "unit.metadata.new_thoughts",
+                        "item_template": (
+                            "- text={{ item.text }} | "
+                            "triple=({{ item.head }}, {{ item.relation }}, {{ item.tail }}) | "
+                            "hash_bucket={{ item.hash_bucket }}"
+                        ),
+                        "separator": "\n",
+                    },
+                    {
+                        "id": "historical_thoughts",
+                        "title": "Historical Same-Bucket Thoughts",
+                        "condition": "unit.metadata.historical_bucket_records | length",
+                        "repeat_over": "unit.metadata.historical_bucket_records",
+                        "item_template": (
+                            "- record_id={{ item.record_id }} | text={{ item.text }} | "
+                            "triple=({{ item.head }}, {{ item.relation }}, {{ item.tail }}) | "
+                            "hash_bucket={{ item.hash_bucket }}"
+                        ),
+                        "separator": "\n",
+                    },
+                    {
+                        "id": "available_tools",
+                        "title": "Available Tools",
+                        "repeat_over": "tools",
+                        "item_template": "- {{ item.name }}",
+                        "separator": "\n",
+                    },
+                ]
+            }
+        ),
+    )
+
+
+def _build_tim_bucket_evolution_module(system: dict[str, object], *, hash_bucket: str) -> LLMFunctionCallEvolution:
+    memory_layer = str(system["memory_layer"])
+    full_bucket_pipeline = _build_full_bucket_visibility_pipeline(system, hash_bucket=hash_bucket)
+    return LLMFunctionCallEvolution(
+        source_layer=memory_layer,
+        target_layer=memory_layer,
+        tools=["UPDATE", "DELETE"],
+        prompt=structured_prompt(
+            {
+                "blocks": [
+                    {
+                        "id": "task",
+                        "title": "Task",
+                        "template": (
+                            "You are organizing TiM thoughts inside one local hash bucket.\n"
+                            "The selected records are the newly inserted thoughts from the current round.\n"
+                            "The visible records are the full same-bucket hash group.\n"
+                            "Only use the provided tools.\n"
+                            "Use UPDATE when a thought should be rewritten into a better merged canonical statement.\n"
+                            "When you update a kept record after merge, also keep its head/relation/tail metadata aligned via metadata_patch.\n"
+                            "Use DELETE when a visible thought is contradictory or redundant.\n"
+                            "If multiple thoughts should merge, keep one representative record via UPDATE and delete the others.\n"
+                            "Only operate on visible same-bucket records. If no change is needed, make no tool call."
+                        ),
+                    },
+                    {
+                        "id": "new_records",
+                        "title": "Newly Inserted Thoughts",
+                        "repeat_over": "selected_records",
+                        "item_template": (
+                            "- record_id={{ item.record_id }} | text={{ item.text }} | "
+                            "hash_bucket={{ item.metadata.hash_bucket }} | "
+                            "triple=({{ item.metadata.head }}, {{ item.metadata.relation }}, {{ item.metadata.tail }})"
+                        ),
+                        "separator": "\n",
+                    },
+                    {
+                        "id": "same_bucket_group",
+                        "title": "Full Same-Bucket Thought Group",
+                        "template": "{{ recalled_prompt }}",
+                    },
+                    {
+                        "id": "visible_records",
+                        "title": "Visible Records",
+                        "condition": "visible_records | length",
+                        "repeat_over": "visible_records",
+                        "item_template": (
+                            "- record_id={{ item.record_id }} | text={{ item.text }} | "
+                            "hash_bucket={{ item.metadata.hash_bucket }} | "
+                            "triple=({{ item.metadata.head }}, {{ item.metadata.relation }}, {{ item.metadata.tail }})"
+                        ),
+                        "separator": "\n",
+                    },
+                    {
+                        "id": "available_tools",
+                        "title": "Available Tools",
+                        "repeat_over": "tools",
+                        "item_template": "- {{ item.name }}",
+                        "separator": "\n",
+                    },
+                ]
+            },
+            recall_plan=text_prompt("{{ recalled_prompt }}"),
+            sub_recall_pipeline=full_bucket_pipeline,
+            recall_query_builder=lambda packet, current_store, context: Query(
+                text=f"same-bucket thought maintenance for {hash_bucket}",
+                metadata={"hash_bucket": hash_bucket},
+            ),
+            visible_record_recall_labels=(PRIMARY_RECALL_LABEL,),
+        ),
+    )
+
+
+def _build_full_bucket_visibility_pipeline(system: dict[str, object], *, hash_bucket: str) -> MemoryPipeline:
+    store = system["store"]
+    assert isinstance(store, MemoryStore)
+    memory_layer = str(system["memory_layer"])
+    full_bucket_size = max(len(_records_in_bucket(store, memory_layer=memory_layer, hash_bucket=hash_bucket)), 1)
     return MemoryPipeline(
-        representation=BasicRepresentation(elements=("text",)),
-        write_trigger=AlwaysTrigger(),
-        organization=AppendOrganization(target_layer=memory_layer),
-        evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
-        memory_evolution=LLMFunctionCallEvolution(
-            source_layer=memory_layer,
-            target_layer=memory_layer,
-            tools=["UPDATE", "DELETE"],
-            prompt=structured_prompt(
-                {
-                    "blocks": [
-                        {
-                            "id": "task",
-                            "title": "Task",
-                            "template": (
-                                "You are organizing TiM thoughts inside one local hash bucket.\n"
-                                "The selected record is the newly inserted current thought.\n"
-                                "Only use the provided tools.\n"
-                                "Use UPDATE when a thought should be rewritten into a better merged canonical statement.\n"
-                                "When you update a kept record after merge, also keep its head/relation/tail metadata aligned via metadata_patch.\n"
-                                "Use DELETE when a visible thought is contradictory or redundant.\n"
-                                "If multiple thoughts should merge, keep one representative record via UPDATE and delete the others.\n"
-                                "Only operate on visible same-bucket records. If no change is needed, make no tool call."
-                            ),
-                        },
-                        {
-                            "id": "current_thought",
-                            "title": "Current Thought",
-                            "template": (
-                                "record_id={{ selected_records.0.record_id }}\n"
-                                "text={{ selected_records.0.text }}\n"
-                                "hash_bucket={{ selected_records.0.metadata.hash_bucket }}\n"
-                                "triple=({{ selected_records.0.metadata.head }}, "
-                                "{{ selected_records.0.metadata.relation }}, "
-                                "{{ selected_records.0.metadata.tail }})"
-                            ),
-                        },
-                        {
-                            "id": "same_bucket_candidates",
-                            "title": "Same-Bucket Retrieved Thoughts",
-                            "template": "{{ recalled_prompt }}",
-                        },
-                        {
-                            "id": "visible_records",
-                            "title": "Visible Records",
-                            "condition": "visible_records | length",
-                            "repeat_over": "visible_records",
-                            "item_template": (
-                                "- record_id={{ item.record_id }} | text={{ item.text }} | "
-                                "hash_bucket={{ item.metadata.hash_bucket }} | "
-                                "triple=({{ item.metadata.head }}, {{ item.metadata.relation }}, {{ item.metadata.tail }})"
-                            ),
-                            "separator": "\n",
-                        },
-                        {
-                            "id": "available_tools",
-                            "title": "Available Tools",
-                            "repeat_over": "tools",
-                            "item_template": "- {{ item.name }}",
-                            "separator": "\n",
-                        },
-                    ]
-                },
-                recall_plan=text_prompt("{{ recalled_prompt }}"),
-                sub_recall_pipeline=bucket_recall_pipeline,
-                recall_query_builder=(
-                    lambda packet, current_store, context: (
-                        Query(
-                            text=str(context["selected_records"][0]["text"]),
-                            embedding=list(context["selected_records"][0]["embedding"]),
-                        )
-                        if context.get("selected_records") and context["selected_records"][0].get("embedding")
-                        else (
-                            Query(text=str(context["selected_records"][0]["text"]))
-                            if context.get("selected_records")
-                            else Query(text="same-bucket thought maintenance")
-                        )
-                    )
-                ),
-                visible_record_recall_labels=(PRIMARY_RECALL_LABEL,),
+        retrieval=(
+            MetadataRetrieval(
+                top_k=full_bucket_size,
+                field="hash_bucket",
+                target=hash_bucket,
+                layer=memory_layer,
+                source="store",
             ),
         ),
+        readout=ConcatenateReadout(),
         store=store,
     )
+
+
+def _records_in_bucket(store: MemoryStore, *, memory_layer: str, hash_bucket: str) -> list[MemoryRecord]:
+    return [
+        record
+        for record in store.iter_records(memory_layer)
+        if str(record.metadata.get("hash_bucket", "")).strip() == hash_bucket
+    ]
 
 
 def _build_bucket_recall_pipeline(

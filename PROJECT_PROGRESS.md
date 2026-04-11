@@ -180,11 +180,12 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
   - the paper clearly requires insert / forget / merge within a hash group, but it does not specify a deterministic execution protocol for conflict detection, merge target choice, output schema, or exact invocation timing
   - the prompt examples for forget / merge are illustrative only; they are not enough to derive one unique implementation
 - Paper-first audit note:
-  - `memprimitive/example/classics/tim_memory.py` is still best described as a mechanism-level approximation rather than paper-aligned memory
-  - the biggest functional gaps are now clearer:
-    - post-thinking currently extracts thoughts only from the current Q-R pair, while the paper says memory update should incorporate both historical and new thoughts
-    - multiple newly extracted thoughts are written and maintained one by one, so there is no single joint update pass over the whole post-thinking result
-    - same-bucket maintenance only exposes a bounded same-bucket top-k candidate subset to forget/merge rather than the whole hash group described in the paper
+  - latest paper-only re-audit suggests the main previously identified TiM memory mismatches are now closed at the example level:
+    - multiple newly extracted thoughts are grouped by bucket and updated in one bucket-level batch rather than one-by-one
+    - same-bucket maintenance exposes the full hash group to forget/merge, matching the paper's group-local organization intent
+    - post-thinking thought extraction now receives existing historical thoughts together with the current Q-R pair, matching the paper's "incorporates both historical and new thoughts" requirement at the memory-module level
+  - current boundary note:
+    - `memprimitive/example/classics/tim_memory.py` should now be treated as reasonably paper-aligned for the memory mechanism itself, while still excluding the broader surrounding agent loop
 - Current framework boundary:
   - mechanism-level TiM reconstruction is feasible now without new primitives
   - strict paper-faithful LSH as a first-class reusable primitive does not exist yet; current alignment would compute/query bucket ids in wrapper code and store them as ordinary metadata
