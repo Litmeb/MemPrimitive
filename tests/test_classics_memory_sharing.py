@@ -4,8 +4,9 @@ import json
 
 import pytest
 
-from memprimitive import MemoryStore
+from memprimitive import MemoryStore, Packet, Query
 from memprimitive.example.classics.memory_sharing_memory import (
+    build_domain_locked_recall_pipeline,
     build_memory_sharing_memory_system,
     build_memory_sharing_prompt,
     resolve_grading_category,
@@ -25,7 +26,14 @@ class _FakeMemorySharingRuntime:
         payload = json.loads(user)
         self.judge_prompts.append(payload["prompt"])
         candidate = payload["judge_context"]["observation"]["text"].casefold()
-        if "exercise" in candidate or "fitness" in candidate or "travel" in candidate:
+        if (
+            "exercise" in candidate
+            or "fitness" in candidate
+            or "travel" in candidate
+            or "logic" in candidate
+            or "riddle" in candidate
+            or "puzzle" in candidate
+        ):
             return {"score": 82}
         return {"score": 21}
 
@@ -54,8 +62,15 @@ def test_memory_sharing_builder_sets_up_shared_vector_pool() -> None:
 
     assert system["write_pipeline"].write_trigger.spec.name == "llm_judge_write_trigger"
     assert system["write_pipeline"].organization.spec.name == "append_organization"
-    assert system["recall_pipeline"].retrieval.spec.name == "embedding_similarity_retrieval"
-    assert system["recall_pipeline"].readout.spec.name == "template_readout"
+    assert system["memory_layer"] == "shared_memory_pool"
+    assert system["retrieval_top_k"] == 2
+
+    recall_pipeline = build_domain_locked_recall_pipeline(system, domain="plan_generation")
+    assert recall_pipeline.readout.spec.name == "template_readout"
+    retrieval_modules = recall_pipeline.retrieval
+    assert isinstance(retrieval_modules, tuple)
+    assert retrieval_modules[0].spec.name == "metadata_retrieval"
+    assert retrieval_modules[1].spec.name == "embedding_similarity_retrieval"
 
 
 def test_memory_sharing_accepts_high_score_examples_and_builds_augmented_prompt(
@@ -85,13 +100,24 @@ def test_memory_sharing_accepts_high_score_examples_and_builds_augmented_prompt(
         domain="plan_generation",
         agent_type="travel",
     )
+    logic_packet = store_prompt_answer_memory(
+        system,
+        prompt_text="What kind of riddle answer should logically follow from a hidden-clue setup?",
+        answer_text="Prefer an answer that resolves all clues without contradiction.",
+        original_query="What kind of riddle answer should logically follow from a hidden-clue setup?",
+        domain="logic_problem_solving",
+        agent_type="logic",
+    )
 
     assert fitness_packet.trace["write_trigger"]["decisions"] == [True]
     assert travel_packet.trace["write_trigger"]["decisions"] == [True]
+    assert logic_packet.trace["write_trigger"]["decisions"] == [True]
     assert "Selected grading category:\nPlan" in runtime.judge_prompts[0]
     assert "Feasibility and Practicality" in runtime.judge_prompts[0]
-    assert store.count("shared_memory_pool") == 2
-    assert [record.record_id for record in store.iter_records("shared_memory_pool")] == ["rec-1", "rec-2"]
+    assert "Selected grading category:\nLogic" in runtime.judge_prompts[2]
+    assert "Logical Consistency and Correctness" in runtime.judge_prompts[2]
+    assert store.count("shared_memory_pool") == 3
+    assert [record.record_id for record in store.iter_records("shared_memory_pool")] == ["rec-1", "rec-2", "rec-3"]
     assert store.metadata["pending_retriever_updates"] == [
         {
             "record_ids": ["rec-1"],
@@ -103,19 +129,51 @@ def test_memory_sharing_accepts_high_score_examples_and_builds_augmented_prompt(
             "observation_id": travel_packet.observation.observation_id,
             "memory_layer": "shared_memory_pool",
         },
+        {
+            "record_ids": ["rec-3"],
+            "observation_id": logic_packet.observation.observation_id,
+            "memory_layer": "shared_memory_pool",
+        },
     ]
 
     readout = build_memory_sharing_prompt(
         system,
         query_text="How should I organize a beginner workout routine this week?",
+        domain="plan_generation",
     )
 
     assert "Retrieved shared memories:" in readout.text
     assert "weekly fitness plan" in readout.text
     assert "museum trip" not in readout.text
+    assert "hidden-clue setup" not in readout.text
     assert "Now, based on these question and answer examples" in readout.text
     assert "How should I organize a beginner workout routine this week?" in readout.text
     assert readout.source_ids == ["rec-1"]
+
+    recall_pipeline = build_domain_locked_recall_pipeline(system, domain="plan_generation")
+    retrieval_modules = recall_pipeline.retrieval
+    assert isinstance(retrieval_modules, tuple)
+    packet = Packet(
+        query=Query(
+            text="How should I organize a beginner workout routine this week?",
+            embedding=runtime.embed("How should I organize a beginner workout routine this week?"),
+        )
+    )
+    packet, _ = retrieval_modules[0].run(
+        Packet(
+            query=packet.query,
+        ),
+        recall_pipeline.store,
+    )
+    assert packet.retrieved is not None
+    assert packet.retrieved.trace["module"] == "metadata_retrieval"
+    assert packet.retrieved.trace["target"] == "Plan"
+    assert packet.retrieved.trace["matched_count"] == 2
+    packet, _ = retrieval_modules[1].run(packet, recall_pipeline.store)
+    assert packet.retrieved is not None
+    assert packet.retrieved.trace["module"] == "embedding_similarity_retrieval"
+    assert packet.retrieved.trace["source"] == "retrieved"
+    assert packet.trace["retrieval"]["module"] == "embedding_similarity_retrieval"
 
 
 def test_memory_sharing_rejects_low_score_examples_without_writing(
