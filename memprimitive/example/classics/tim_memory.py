@@ -45,7 +45,6 @@ Implementation decisions made here:
 
 from __future__ import annotations
 
-import json
 import random
 import sys
 from collections import defaultdict
@@ -63,6 +62,7 @@ from memprimitive.baselines import (
     EmbeddingSimilarityRetrieval,
     LLMFunctionCallEvolution,
     LLMFunctionCallOrganization,
+    LLMRepresentation,
     MetadataRetrieval,
     TemplateReadout,
 )
@@ -122,10 +122,30 @@ def extract_inductive_thoughts(
     *,
     historical_thoughts: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    """Extract TiM-style inductive thoughts from the current round plus history."""
+    """Extract TiM-style inductive thoughts via ``LLMRepresentation``."""
 
-    runtime = get_runtime()
-    normalized_history = [
+    normalized_history = _normalize_tim_historical_thoughts(historical_thoughts)
+    extraction_packet = Packet(
+        units=[
+            MemoryUnit(
+                text="TiM post-thinking extraction",
+                unit_type="tim_thought_extraction",
+                metadata={
+                    "question": str(question).strip(),
+                    "response": str(response).strip(),
+                    "historical_thoughts": normalized_history,
+                },
+            )
+        ]
+    )
+    extraction_representation = _build_tim_thought_extraction_representation()
+    extraction_packet, _ = extraction_representation.run(extraction_packet, MemoryStore())
+    payload = extraction_packet.units[0].metadata.get("representation", {}).get("thoughts", [])
+    return payload if isinstance(payload, list) else []
+
+
+def _normalize_tim_historical_thoughts(historical_thoughts: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    return [
         {
             "thought": str(item.get("thought", "")).strip(),
             "head": str(item.get("head", "")).strip(),
@@ -139,22 +159,61 @@ def extract_inductive_thoughts(
         and str(item.get("relation", "")).strip()
         and str(item.get("tail", "")).strip()
     ]
-    payload = runtime.json(
-        system=(
-            "Extract TiM-style inductive thoughts for TiM post-thinking.\n"
-            "Return a strict JSON array. Each item must be an object with keys:\n"
-            "thought, head, relation, tail.\n"
-            "Each thought must be one grounded factual relation sentence aligned to the triple.\n"
-            "Use both the current question-response pair and the provided historical thoughts when useful.\n"
-            "Only keep thoughts supported by the response.\n"
-            "Avoid duplicates and avoid vague summaries."
-        ),
-        user=json.dumps(
+
+
+def _build_tim_thought_extraction_representation() -> LLMRepresentation:
+    return LLMRepresentation(
+        field="thoughts",
+        value_type=list[dict[str, str]],
+        prompt=structured_prompt(
             {
-                "question": question,
-                "response": response,
-                "historical_thoughts": normalized_history,
-                "paper_examples": [
+                "blocks": [
+                    {
+                        "id": "task",
+                        "title": "Task",
+                        "template": (
+                            "Extract TiM-style inductive thoughts for TiM post-thinking.\n"
+                            "Return only grounded relation-bearing thoughts supported by the current response.\n"
+                            "Each item must contain thought, head, relation, and tail.\n"
+                            "Each thought must be one factual relation sentence aligned to its triple.\n"
+                            "Use both the current question-response pair and the provided historical thoughts when useful.\n"
+                            "Avoid duplicates and avoid vague summaries."
+                        ),
+                    },
+                    {
+                        "id": "current_round",
+                        "title": "Current Question-Response Pair",
+                        "template": (
+                            "question={{ unit.metadata.question }}\n"
+                            "response={{ unit.metadata.response }}"
+                        ),
+                    },
+                    {
+                        "id": "historical_thoughts",
+                        "title": "Historical Thoughts",
+                        "condition": "unit.metadata.historical_thoughts | length",
+                        "repeat_over": "unit.metadata.historical_thoughts",
+                        "item_template": (
+                            "- thought={{ item.thought }} | "
+                            "triple=({{ item.head }}, {{ item.relation }}, {{ item.tail }})"
+                        ),
+                        "separator": "\n",
+                    },
+                    {
+                        "id": "paper_examples",
+                        "title": "Paper-Style Examples",
+                        "repeat_over": "examples",
+                        "item_template": (
+                            "question={{ item.question }}\n"
+                            "response={{ item.response }}\n"
+                            "output={{ item.output }}"
+                        ),
+                        "separator": "\n\n",
+                    },
+                ]
+            },
+            context_builder=lambda packet, current_store: {
+                "examples": [
                     {
                         "question": "Do you have any company recommendations for me?",
                         "response": "I recommend Google.",
@@ -179,38 +238,10 @@ def extract_inductive_thoughts(
                             }
                         ],
                     },
-                ],
+                ]
             },
-            ensure_ascii=False,
         ),
     )
-    if not isinstance(payload, list):
-        raise ValueError("Thought extraction must return a JSON list.")
-
-    normalized: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        thought = str(item.get("thought", "")).strip()
-        head = str(item.get("head", "")).strip()
-        relation = str(item.get("relation", "")).strip()
-        tail = str(item.get("tail", "")).strip()
-        if not (thought and head and relation and tail):
-            continue
-        key = (thought, head, relation, tail)
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(
-            {
-                "thought": thought,
-                "head": head,
-                "relation": relation,
-                "tail": tail,
-            }
-        )
-    return normalized
 
 
 def post_think_and_update_memory(

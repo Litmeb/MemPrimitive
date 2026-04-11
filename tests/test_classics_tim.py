@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -28,6 +27,9 @@ class _FakeTiMRuntime:
     ) -> None:
         self.extractions = [list(batch) for batch in extractions]
         self.embedding_map = {key: list(value) for key, value in embedding_map.items()}
+
+    def require_llm(self, *, capability: str) -> None:
+        _ = capability
 
     def json(self, *, system: str, user: str) -> Any:
         _ = system
@@ -104,7 +106,7 @@ def test_tim_classics_builder_uses_existing_baselines() -> None:
 def test_tim_classics_post_think_merge_uses_bucket_batch_insert_and_full_bucket_evolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization
+    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization, LLMRepresentation
 
     fake_runtime = _FakeTiMRuntime(
         extractions=[
@@ -132,6 +134,7 @@ def test_tim_classics_post_think_merge_uses_bucket_batch_insert_and_full_bucket_
         },
     )
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
     system = build_tim_memory_system(bucket_count=4, bucket_candidate_k=1, recall_top_k=2)
     jasmine_bucket = compute_hash_bucket(system, "Alice likes jasmine tea.")
 
@@ -238,7 +241,7 @@ def test_tim_classics_post_think_merge_uses_bucket_batch_insert_and_full_bucket_
 def test_tim_classics_joint_round_update_supports_multiple_adds_in_one_bucket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization
+    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization, LLMRepresentation
 
     fake_runtime = _FakeTiMRuntime(
         extractions=[
@@ -263,6 +266,7 @@ def test_tim_classics_joint_round_update_supports_multiple_adds_in_one_bucket(
         },
     )
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
     system = build_tim_memory_system(bucket_count=4, bucket_candidate_k=1, recall_top_k=2)
     round_bucket = compute_hash_bucket(system, "Alice likes jasmine tea in the evening.")
 
@@ -332,7 +336,7 @@ def test_tim_classics_joint_round_update_supports_multiple_adds_in_one_bucket(
 def test_tim_classics_full_bucket_evolution_visibility_ignores_old_candidate_truncation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization
+    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization, LLMRepresentation
 
     fake_runtime = _FakeTiMRuntime(
         extractions=[
@@ -354,6 +358,7 @@ def test_tim_classics_full_bucket_evolution_visibility_ignores_old_candidate_tru
         },
     )
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
     system = build_tim_memory_system(bucket_count=4, bucket_candidate_k=1, recall_top_k=2)
     preference_bucket = compute_hash_bucket(system, "Alice prefers jasmine tea.")
 
@@ -436,7 +441,7 @@ def test_tim_classics_full_bucket_evolution_visibility_ignores_old_candidate_tru
 def test_tim_classics_post_think_includes_historical_thoughts_in_extraction_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization
+    from memprimitive.baselines import LLMFunctionCallEvolution, LLMFunctionCallOrganization, LLMRepresentation
 
     captured_users: list[str] = []
 
@@ -463,6 +468,7 @@ def test_tim_classics_post_think_includes_historical_thoughts_in_extraction_inpu
         },
     )
     monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
     system = build_tim_memory_system(bucket_count=4, bucket_candidate_k=1, recall_top_k=2)
     history_bucket = compute_hash_bucket(system, "Alice likes jasmine tea.")
 
@@ -511,12 +517,6 @@ def test_tim_classics_post_think_includes_historical_thoughts_in_extraction_inpu
     )
 
     assert len(captured_users) == 1
-    extraction_payload = json.loads(captured_users[0])
-    assert extraction_payload["historical_thoughts"] == [
-        {
-            "thought": "Alice likes green tea.",
-            "head": "Alice",
-            "relation": "Likes",
-            "tail": "green tea",
-        }
-    ]
+    assert "Historical Thoughts" in captured_users[0]
+    assert "Alice likes green tea." in captured_users[0]
+    assert "triple=(Alice, Likes, green tea)" in captured_users[0]
