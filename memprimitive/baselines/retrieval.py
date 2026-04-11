@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 import json
 from math import sqrt
@@ -187,6 +188,7 @@ _QUERY_REWRITE_REGEX_FLAGS: Final[dict[str, int]] = {
     "MULTILINE": re.MULTILINE,
     "DOTALL": re.DOTALL,
 }
+_METADATA_MATCH_MODES: Final[frozenset[str]] = frozenset({"exact", "regex"})
 
 
 def _normalize_retrieval_source(source: str) -> str:
@@ -201,6 +203,37 @@ def _normalize_query_rewrite_strategy(strategy: str) -> str:
     if normalized not in _QUERY_REWRITE_STRATEGIES:
         raise ValueError("query rewrite strategy must be one of: llm, regex.")
     return normalized
+
+
+def _normalize_metadata_match_mode(match_mode: str) -> str:
+    normalized = str(match_mode).strip().casefold()
+    if normalized not in _METADATA_MATCH_MODES:
+        raise ValueError("metadata match_mode must be one of: exact, regex.")
+    return normalized
+
+
+def _normalize_metadata_field(field: str) -> str:
+    normalized = str(field).strip()
+    if not normalized:
+        raise ValueError("MetadataRetrieval requires a non-empty field.")
+    return normalized
+
+
+def _metadata_values_for_match(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value]
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
+        return [str(item).strip() for item in value]
+    return [str(value).strip()]
+
+
+def _metadata_value_matches(*, candidate_values: list[str], target: str, match_mode: str, regex: re.Pattern[str] | None) -> bool:
+    if match_mode == "exact":
+        normalized_target = target.casefold()
+        return any(value.casefold() == normalized_target for value in candidate_values)
+    if regex is None:
+        raise ValueError("regex pattern must be compiled when match_mode='regex'.")
+    return any(bool(regex.search(value)) for value in candidate_values)
 
 
 def _prompt_is_template(plan: PromptPlan) -> bool:
@@ -774,6 +807,88 @@ class KeywordCountRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
                 "top_k": self.top_k,
                 "source": self.source,
                 "candidate_count": len(all_records),
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+
+class MetadataRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
+    """Filter records by a metadata field using exact or regex matching."""
+
+    spec = ModuleSpec(
+        name="metadata_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = 3,
+        field: str = "",
+        target: str = "",
+        match_mode: str = "exact",
+        layer: str | None = None,
+        *,
+        source: str = "store",
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("MetadataRetrieval requires top_k > 0.")
+        self.top_k = top_k
+        self.field = _normalize_metadata_field(field)
+        self.target = str(target).strip()
+        self.match_mode = _normalize_metadata_match_mode(match_mode)
+        self.layer = layer
+        self.source = _normalize_retrieval_source(source)
+        self._regex = re.compile(self.target, re.IGNORECASE) if self.match_mode == "regex" else None
+
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("MetadataRetrieval requires packet.query.")
+
+        all_records = list(reversed(_candidate_records(packet, store, source=self.source, layer=self.layer)))
+        matched_records: list[Any] = []
+        scores: list[dict[str, Any]] = []
+
+        for record in all_records:
+            metadata = record.metadata if isinstance(record.metadata, dict) else {}
+            if self.field not in metadata:
+                continue
+            candidate_values = _metadata_values_for_match(metadata.get(self.field))
+            if not _metadata_value_matches(
+                candidate_values=candidate_values,
+                target=self.target,
+                match_mode=self.match_mode,
+                regex=self._regex,
+            ):
+                continue
+            matched_records.append(record)
+
+        selected_records = matched_records[: self.top_k]
+        for rank, record in enumerate(selected_records, start=1):
+            scores.append(
+                {
+                    "record_id": record.record_id,
+                    "rank": rank,
+                    "strategy": f"metadata_{self.match_mode}",
+                    "field": self.field,
+                }
+            )
+
+        retrieved = RetrievedSet(
+            items=selected_records,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "source": self.source,
+                "field": self.field,
+                "target": self.target,
+                "match_mode": self.match_mode,
+                "layer": self.layer,
+                "candidate_count": len(all_records),
+                "matched_count": len(matched_records),
+                "returned_count": len(selected_records),
             },
         )
         return _with_retrieved(packet, retrieved), store
@@ -2022,6 +2137,7 @@ BASELINE_SLOT: Final[str] = "retrieval"
 BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     RecencyRetrieval,
     KeywordCountRetrieval,
+    MetadataRetrieval,
     EmbeddingSimilarityRetrieval,
     EntityRetrieval,
     TripleMemoryRetrieval,
