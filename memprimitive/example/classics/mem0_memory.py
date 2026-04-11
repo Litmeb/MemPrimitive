@@ -53,6 +53,7 @@ from memprimitive.baselines import (
     BasicRepresentation,
     ConcatenateReadout,
     EmbeddingSimilarityRetrieval,
+    FanoutIngestOrganization,
     LLMFunctionCallEvolution,
     LLMRepresentation,
     NeverTrigger,
@@ -151,6 +152,94 @@ def build_mem0_memory_system(
         store=store,
     )
 
+    profile_fact_write_pipeline = MemoryPipeline(
+        representation=BasicRepresentation(elements=("text",)),
+        write_trigger=NeverTrigger(slot="write_trigger"),
+        organization=AppendOrganization(target_layer="profile"),
+        evolution_trigger=PromptRecallSelectionTrigger(layer_names=("profile",)),
+        memory_evolution=LLMFunctionCallEvolution(
+            source_layer="profile",
+            target_layer="profile",
+            tools=build_fixed_profile_tools(embed_on_add=False, embed_on_update=False),
+            prompt=structured_prompt(
+                {
+                    "blocks": [
+                        {
+                            "id": "task",
+                            "title": "Task",
+                            "template": (
+                                "You are updating a Mem0-style long-term memory store.\n"
+                                "Use only the provided tools.\n"
+                                "The memory store writes only to the fixed profile layer; never invent or reference any other layer name.\n"
+                                "You are processing one extracted fact at a time.\n"
+                                "Decide whether to ADD a new memory, UPDATE an existing one, DELETE a contradicted one, or do nothing.\n"
+                                "Prefer the top-k similar memories shown below when choosing targets."
+                            ),
+                        },
+                        {
+                            "id": "current_turn",
+                            "title": "Current Fact And Pair",
+                            "template": (
+                                "unit_id={{ unit.unit_id }}\n"
+                                "fact={{ unit.text }}\n"
+                                "pair_text={{ pair_text }}\n"
+                                "conversation_summary={{ conversation_summary }}\n"
+                                "recent_messages={{ recent_messages }}\n"
+                                "user_message={{ user_message }}\n"
+                                "assistant_message={{ assistant_message }}"
+                            ),
+                        },
+                        {
+                            "id": "similar_memories",
+                            "title": "Top-K Similar Existing Memories",
+                            "template": "{{ topk_similar }}",
+                        },
+                        {
+                            "id": "visible_records",
+                            "title": "Visible Profile Records",
+                            "condition": "visible_records | length",
+                            "repeat_over": "visible_records",
+                            "item_template": "- record_id={{ item.record_id }} | text={{ item.text }}",
+                            "separator": "\n",
+                        },
+                        {
+                            "id": "available_tools",
+                            "title": "Available Tools",
+                            "repeat_over": "tools",
+                            "item_template": "- {{ item.name }}",
+                            "separator": "\n",
+                        },
+                    ]
+                },
+                context_builder=build_profile_pair_context,
+                labeled_recall_plans={
+                    "topk_similar": text_prompt("{{ topk_similar }}"),
+                    "conversation_summary": text_prompt("{{ conversation_summary }}"),
+                    "recent_messages": text_prompt("{{ recent_messages }}"),
+                },
+                labeled_sub_recall_pipelines={
+                    "topk_similar": profile_candidate_recall_pipeline,
+                },
+                labeled_recall_query_builders={
+                    "topk_similar": (
+                        lambda packet, store, context: str(context.get("unit", {}).get("text", "")).strip()
+                        or str(context.get("user_message", ""))
+                        or str(context.get("assistant_message", ""))
+                        or str(context.get("pair_text", ""))
+                    ),
+                    "conversation_summary": (
+                        lambda packet, store, context: str(context.get("pair_text", "")),
+                    ),
+                    "recent_messages": (
+                        lambda packet, store, context: str(context.get("pair_text", "")),
+                    ),
+                },
+                visible_record_recall_labels=("topk_similar",),
+            ),
+        ),
+        store=store,
+    )
+
     mem0_write_pipeline = MemoryPipeline(
         representation=(
             BasicRepresentation(elements=("text",)),
@@ -188,90 +277,7 @@ def build_mem0_memory_system(
             ),
         ),
         write_trigger=NeverTrigger(slot="write_trigger"),
-        organization=AppendOrganization(target_layer="profile"),
-        evolution_trigger=PromptRecallSelectionTrigger(layer_names=("profile",)),
-        memory_evolution=LLMFunctionCallEvolution(
-            source_layer="profile",
-            target_layer="profile",
-            tools=build_fixed_profile_tools(embed_on_add=False, embed_on_update=False),
-            prompt=structured_prompt(
-                {
-                    "blocks": [
-                        {
-                            "id": "task",
-                            "title": "Task",
-                            "template": (
-                                "You are updating a Mem0-style long-term memory store.\n"
-                                "Use only the provided tools.\n"
-                                "The memory store writes only to the fixed profile layer; never invent or reference any other layer name.\n"
-                                "For each fact in fact_list, decide whether to ADD a new memory, UPDATE an existing one, "
-                                "DELETE a contradicted one, or do nothing.\n"
-                                "Prefer the top-k similar memories shown below when choosing targets."
-                            ),
-                        },
-                        {
-                            "id": "current_turn",
-                            "title": "Current Pair",
-                            "template": (
-                                "unit_id={{ unit.unit_id }}\n"
-                                "pair_text={{ pair_text }}\n"
-                                "conversation_summary={{ conversation_summary }}\n"
-                                "recent_messages={{ recent_messages }}\n"
-                                "user_message={{ user_message }}\n"
-                                "assistant_message={{ assistant_message }}\n"
-                                "fact_list={{ fact_list }}"
-                            ),
-                        },
-                        {
-                            "id": "similar_memories",
-                            "title": "Top-K Similar Existing Memories",
-                            "template": "{{ topk_similar }}",
-                        },
-                        {
-                            "id": "visible_records",
-                            "title": "Visible Profile Records",
-                            "condition": "visible_records | length",
-                            "repeat_over": "visible_records",
-                            "item_template": "- record_id={{ item.record_id }} | text={{ item.text }}",
-                            "separator": "\n",
-                        },
-                        {
-                            "id": "available_tools",
-                            "title": "Available Tools",
-                            "repeat_over": "tools",
-                            "item_template": "- {{ item.name }}",
-                            "separator": "\n",
-                        },
-                    ]
-                },
-                context_builder=build_profile_pair_context,
-                labeled_recall_plans={
-                    "topk_similar": text_prompt("{{ topk_similar }}"),
-                    "conversation_summary": text_prompt("{{ conversation_summary }}"),
-                    "recent_messages": text_prompt("{{ recent_messages }}"),
-                },
-                labeled_sub_recall_pipelines={
-                    "topk_similar": profile_candidate_recall_pipeline,
-                },
-                labeled_recall_query_builders={
-                    "topk_similar": (
-                        lambda packet, store, context: "\n".join(
-                            str(item).strip() for item in context.get("fact_list", []) if str(item).strip()
-                        )
-                        or str(context.get("user_message", ""))
-                        or str(context.get("assistant_message", ""))
-                        or str(context.get("pair_text", ""))
-                    ),
-                    "conversation_summary": (
-                        lambda packet, store, context: str(context.get("pair_text", "")),
-                    ),
-                    "recent_messages": (
-                        lambda packet, store, context: str(context.get("pair_text", "")),
-                    ),
-                },
-                visible_record_recall_labels=("topk_similar",),
-            ),
-        ),
+        organization=FanoutIngestOrganization(field="fact_list", pipeline=profile_fact_write_pipeline),
         store=store,
     )
 
@@ -288,6 +294,7 @@ def build_mem0_memory_system(
         "conversation_summary_recall": conversation_summary_recall,
         "conversation_summary_update_pipeline": conversation_summary_update_pipeline,
         "mem0_write_pipeline": mem0_write_pipeline,
+        "profile_fact_write_pipeline": profile_fact_write_pipeline,
         "reply_memory_pipeline": reply_memory_pipeline,
     }
 

@@ -6,7 +6,7 @@ from memprimitive import MemoryRecord, MemoryStore, StoreLayerSpec, StoreTopolog
 from memprimitive.core import MemoryUnit, Observation, Packet, Placement, Readout
 from memprimitive.example.classics import mem0_memory, mem0g_memory
 from memprimitive.utils._llm_function_tools import WriteToolCallContext
-from memprimitive.utils._mem0_family import build_fixed_profile_tools, per_fact_profile_recall
+from memprimitive.utils._mem0_family import build_fixed_profile_tools
 from memprimitive.utils import _runtime as runtime_module
 from baselines_test_helpers import _invoke_runtime_tool
 
@@ -24,62 +24,6 @@ class _FakeRuntime:
     def embed(self, text: str) -> list[float]:
         self.calls.append(text)
         return list(self._embeddings[text])
-
-
-def test_mem0_per_fact_profile_recall_deduplicates_across_fact_queries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_runtime = _FakeRuntime()
-
-    store = MemoryStore(
-        topology=StoreTopology.from_layers(
-            [
-                StoreLayerSpec(name="profile", theme="semantic", indices=("vector", "temporal")),
-            ]
-        )
-    )
-    store.append(
-        MemoryRecord(
-            record_id="rec-1",
-            unit_id="unit-1",
-            layer="profile",
-            text="Alice likes jasmine tea.",
-            timestamp="2026-04-05T00:00:01Z",
-            embedding=[1.0, 0.0],
-        )
-    )
-    store.append(
-        MemoryRecord(
-            record_id="rec-2",
-            unit_id="unit-2",
-            layer="profile",
-            text="Alice works on graph memory.",
-            timestamp="2026-04-05T00:00:02Z",
-            embedding=[0.0, 1.0],
-        )
-    )
-    store.append(
-        MemoryRecord(
-            record_id="rec-3",
-            unit_id="unit-3",
-            layer="profile",
-            text="Alice connects tea habits with project context.",
-            timestamp="2026-04-05T00:00:03Z",
-            embedding=[0.8, 0.6],
-        )
-    )
-
-    rendered = per_fact_profile_recall(
-        store,
-        ["alice likes jasmine tea", "alice works on graph memory"],
-        top_k=2,
-        layer="profile",
-        runtime=fake_runtime,
-    )
-
-    assert rendered.count("record_id=rec-1") == 1
-    assert rendered.count("record_id=rec-2") == 1
-    assert rendered.count("record_id=rec-3") == 1
 
 
 def test_build_fixed_profile_tools_delegate_embedding_to_store_policy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,8 +87,7 @@ def test_mem0_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: p
         )
     )
 
-    mem0_write_pipeline = system["mem0_write_pipeline"]
-    evolution = mem0_write_pipeline.memory_evolution
+    evolution = system["profile_fact_write_pipeline"].memory_evolution
 
     def _fake_recall_run(self, packet, current_store):
         return (
@@ -161,7 +104,7 @@ def test_mem0_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: p
 
     unit = MemoryUnit(
         unit_id="mem0-unit",
-        text="Current pair",
+        text="beta",
         timestamp="2026-04-05T00:01:00Z",
         metadata={
             "messages": [
@@ -171,7 +114,6 @@ def test_mem0_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: p
             "pair_text": "user: I switched to beta.\nassistant: Noted.",
             "recent_messages": "recent context",
             "conversation_summary": "summary",
-            "representation": {"fact_list": ["beta"]},
         },
     )
 
@@ -219,8 +161,7 @@ def test_mem0g_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: 
         )
     )
 
-    profile_write_pipeline = system["profile_write_pipeline"]
-    evolution = profile_write_pipeline.memory_evolution
+    evolution = system["profile_fact_write_pipeline"].memory_evolution
 
     def _fake_recall_run(self, packet, current_store):
         return (
@@ -237,7 +178,7 @@ def test_mem0g_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: 
 
     unit = MemoryUnit(
         unit_id="mem0g-profile-unit",
-        text="Current pair",
+        text="beta",
         timestamp="2026-04-05T00:01:00Z",
         metadata={
             "messages": [
@@ -247,7 +188,6 @@ def test_mem0g_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: 
             "pair_text": "user: Beta still matters.\nassistant: Noted.",
             "recent_messages": "recent context",
             "conversation_summary": "summary",
-            "representation": {"fact_list": ["beta"]},
         },
     )
 

@@ -12,17 +12,7 @@ from ._example_dialogue import (
     render_messages_for_prompt,
 )
 from ._llm_function_tools import WriteToolCallContext, WriteToolResult, WriteToolSpec
-from ._runtime import get_runtime
 from ._trace import copy_trace
-
-
-def cosine_similarity(left: list[float], right: list[float]) -> float:
-    numerator = sum(lv * rv for lv, rv in zip(left, right, strict=True))
-    left_norm = sum(v * v for v in left) ** 0.5
-    right_norm = sum(v * v for v in right) ** 0.5
-    if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    return numerator / (left_norm * right_norm)
 
 
 class PromptRecallSelectionTrigger(TriggerModule):
@@ -60,38 +50,6 @@ class PromptRecallSelectionTrigger(TriggerModule):
             "decisions_store_counts": {layer_name: 0 for layer_name in self.layer_names},
         }
         return replace(packet, decisions=[True] * len(units), decisions_store=decisions_store, trace=trace), store
-
-
-def per_fact_profile_recall(
-    store,
-    fact_list: list[str],
-    top_k: int,
-    layer: str,
-    *,
-    runtime=None,
-) -> str:
-    runtime = get_runtime() if runtime is None else runtime
-    all_records = store.iter_records(layer)
-    facts = [str(fact).strip() for fact in fact_list if str(fact).strip()]
-    if not all_records or not facts:
-        return "(no similar memories)"
-
-    seen: dict[str, MemoryRecord] = {}
-    for fact in facts:
-        query_embedding = runtime.embed(fact)
-        scored: list[tuple[float, MemoryRecord]] = []
-        for record in all_records:
-            if record.embedding is None or len(record.embedding) != len(query_embedding):
-                continue
-            scored.append((cosine_similarity(query_embedding, record.embedding), record))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        for _, record in scored[:top_k]:
-            seen.setdefault(record.record_id, record)
-
-    if not seen:
-        return "(no similar memories)"
-    return "\n".join(f"- record_id={record.record_id} | text={record.text}" for record in seen.values())
-
 
 def build_profile_pair_context(packet, _store) -> dict[str, object]:
     unit = packet.units[0]
@@ -136,15 +94,6 @@ def build_graph_pair_context(packet, _store) -> dict[str, object]:
         }
     )
     return messages
-
-
-def build_profile_pair_context_with_profile_recall(similar_top_k: int):
-    def _builder(packet, store) -> dict[str, object]:
-        context = build_profile_pair_context(packet, store)
-        context["topk_similar"] = per_fact_profile_recall(store, context.get("fact_list", []), similar_top_k, "profile")
-        return context
-
-    return _builder
 
 
 def find_visible_record(context: WriteToolCallContext, record_id: str) -> MemoryRecord:
