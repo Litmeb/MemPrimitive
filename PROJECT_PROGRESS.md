@@ -52,6 +52,7 @@ Avoid re-documenting these in detail unless something materially changes.
 - The implemented policy boundary is intentionally narrow: stage 1 only handles `mode="text"` with refresh on semantic text change. Entity embeddings, note-payload-derived embeddings, query embeddings, and the broader `UNIT_EMBEDDING_CONTRACT` redesign are still deliberately left in their existing specialized paths.
 - Follow-up simplification landed in the expected moderate form: responsibility is more centralized and Mem0/tool-path manual embedding logic is smaller, but the harder embedding complexity still remains in graph/entity/note/query-specialized paths.
 - `ConfigurableEmbeddingRepresentation` is now the generic text-configurable embedding representation primitive: render configurable text (including template-based text) from the current unit, embed that text, and record embedding-input provenance in `metadata["representation"]` / trace without rewriting the unit's main text-facing fields.
+- `LLMRepresentation` now supports structured metadata-backed custom fields with `value_type=list[dict[str, str]]` in addition to `str`, `list[str]`, and `dict[str, str]`, using permissive normalization for JSON object lists.
 - `memprimitive/example/classics` now contains executable reconstructions rather than an empty placeholder. The most important current examples are:
   - COMEDY / compressive-memory style hierarchical maintenance
   - A-MEM / Agentic Memory

@@ -141,6 +141,30 @@ def _normalize_string_dict(value: Any) -> dict[str, str]:
             normalized[key_text] = value_text
     return normalized
 
+
+def _normalize_string_dict_list(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError("Expected a JSON list of objects.")
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized_item: dict[str, str] = {}
+        for key, inner_value in item.items():
+            key_text = str(key).strip()
+            value_text = str(inner_value).strip()
+            if key_text and value_text:
+                normalized_item[key_text] = value_text
+        if not normalized_item:
+            continue
+        dedupe_key = tuple(normalized_item.items())
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized.append(normalized_item)
+    return normalized
+
 class BasicRepresentation(RepresentationModule):
     """Build a configurable representation-element set for each unit.
 
@@ -694,6 +718,7 @@ class LLMRepresentation(RepresentationModule):
     _VALUE_KIND_TEXT: ClassVar[str] = "text"
     _VALUE_KIND_LIST: ClassVar[str] = "list"
     _VALUE_KIND_DICT: ClassVar[str] = "dict"
+    _VALUE_KIND_DICT_LIST: ClassVar[str] = "dict_list"
 
     def __init__(
         self,
@@ -825,6 +850,8 @@ class LLMRepresentation(RepresentationModule):
             return "list[str]"
         if self._declared_value_kind == self._VALUE_KIND_DICT:
             return "dict[str, str]"
+        if self._declared_value_kind == self._VALUE_KIND_DICT_LIST:
+            return "list[dict[str, str]]"
         return str(self.value_type)
 
     @classmethod
@@ -838,11 +865,13 @@ class LLMRepresentation(RepresentationModule):
         args = get_args(value_type)
         if origin is list and args == (str,):
             return cls._VALUE_KIND_LIST
+        if origin is list and len(args) == 1 and get_origin(args[0]) is dict and get_args(args[0]) == (str, str):
+            return cls._VALUE_KIND_DICT_LIST
         if origin is dict and args == (str, str):
             return cls._VALUE_KIND_DICT
 
         raise ValueError(
-            "LLMRepresentation value_type only supports str, list[str], or dict[str, str]."
+            "LLMRepresentation value_type only supports str, list[str], dict[str, str], or list[dict[str, str]]."
         )
 
     def _runtime(self):
@@ -878,6 +907,8 @@ class LLMRepresentation(RepresentationModule):
             return _normalize_string_list(self._llm_json(user=user)), prompt_trace, store
         if kind == self._VALUE_KIND_DICT:
             return _normalize_string_dict(self._llm_json(user=user)), prompt_trace, store
+        if kind == self._VALUE_KIND_DICT_LIST:
+            return _normalize_string_dict_list(self._llm_json(user=user)), prompt_trace, store
         return self._llm_text(user=user), prompt_trace, store
 
     def _render_prompt(self, packet: Packet, unit: MemoryUnit, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
@@ -910,7 +941,12 @@ class LLMRepresentation(RepresentationModule):
         runtime = self._runtime()
         runtime.require_llm(capability=f"LLMRepresentation field {self.field!r}")
         kind = self._value_kind()
-        shape = "a strict JSON array of strings" if kind == self._VALUE_KIND_LIST else "a strict JSON object"
+        if kind == self._VALUE_KIND_LIST:
+            shape = "a strict JSON array of strings"
+        elif kind == self._VALUE_KIND_DICT_LIST:
+            shape = "a strict JSON array of objects with string keys and string values"
+        else:
+            shape = "a strict JSON object"
         return runtime.json(
             system=(
                 "You extract one requested representation field for a memory unit. "

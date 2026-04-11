@@ -867,6 +867,36 @@ def test_llm_representation_custom_field_explicit_dict_type_writes_json_dict() -
     assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "dict"
 
 
+def test_llm_representation_custom_field_explicit_dict_list_type_writes_json_dict_list() -> None:
+    from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
+
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text="Alice studies graph memory systems.", source="notes")),
+        MemoryStore(),
+    )
+    rep = LLMRepresentation(field="custom_thoughts", prompt="Extract thoughts.", value_type=list[dict[str, str]])
+    rep._llm_json = lambda *, user: [  # type: ignore[method-assign]
+        {"thought": " Graph memory helps retrieval. ", "topic": " research "},
+        {"thought": "Graph memory helps retrieval.", "topic": "research"},
+        {"thought": "Structured traces help debugging.", "topic": 7},
+        {"thought": "", "topic": "ignored"},
+        {"thought": "ignored", "": "blank-key"},
+        {},
+        "not-a-dict",
+    ]
+    packet_out, _ = rep.run(unit_packet, store)
+
+    unit = packet_out.units[0]
+    assert unit.metadata["representation"]["custom_thoughts"] == [
+        {"thought": "Graph memory helps retrieval.", "topic": "research"},
+        {"thought": "Structured traces help debugging.", "topic": "7"},
+        {"topic": "ignored"},
+        {"thought": "ignored"},
+    ]
+    assert packet_out.trace["representation"]["declared_value_type"] == "list[dict[str, str]]"
+    assert packet_out.trace["representation"]["per_unit"][0]["kind"] == "dict_list"
+
+
 def test_llm_representation_known_field_explicit_list_type_preserves_unit_writeback() -> None:
     from memprimitive.baselines import LLMRepresentation, PassThroughUnitFormation
 
@@ -887,13 +917,13 @@ def test_llm_representation_known_field_explicit_list_type_preserves_unit_writeb
 def test_llm_representation_rejects_unsupported_value_types() -> None:
     from memprimitive.baselines import LLMRepresentation
 
-    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], or dict\\[str, str\\]"):
+    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], dict\\[str, str\\], or list\\[dict\\[str, str\\]\\]"):
         LLMRepresentation(field="custom_score", prompt="Extract score.", value_type=int)
 
-    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], or dict\\[str, str\\]"):
+    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], dict\\[str, str\\], or list\\[dict\\[str, str\\]\\]"):
         LLMRepresentation(field="custom_scores", prompt="Extract scores.", value_type=list[int])
 
-    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], or dict\\[str, str\\]"):
+    with pytest.raises(ValueError, match="value_type only supports str, list\\[str\\], dict\\[str, str\\], or list\\[dict\\[str, str\\]\\]"):
         LLMRepresentation(field="custom_items", prompt="Extract items.", value_type=list)
 
 
