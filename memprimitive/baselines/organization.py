@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 import json
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from ..contracts import (
     RECORD_GRAPH_LINKS_CONTRACT,
     RECORD_NOTE_PAYLOAD_CONTRACT,
     TOPOLOGY_GRAPH_LAYER_CONTRACT,
 )
-from ..core import MemoryRecord, MemoryStore, ModuleSpec, Packet, Placement
+from ..core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Packet, Placement, _require_non_empty_text
 from ..interfaces import OrganizationModule
 
 from ..utils._graph_family import graph_metadata_for_unit, graph_metadata_from_record, normalize_graph_metadata
@@ -45,6 +46,9 @@ from ..utils._template import (
     resolve_records_from_prompt_metadata,
 )
 from ..utils._trace import copy_trace
+
+if TYPE_CHECKING:
+    from ..pipeline import MemoryPipeline
 
 
 def _merge_visible_records(*record_groups: list[MemoryRecord]) -> list[MemoryRecord]:
@@ -113,6 +117,86 @@ class AppendOrganization(OrganizationModule):
             "skipped_unit_count": skipped_units,
         }
         return replace(packet, placements=placements, trace=trace), store
+
+
+class FanoutIngestOrganization(OrganizationModule):
+    """Fan out observation metadata strings into a child pipeline's ingest path."""
+
+    spec = ModuleSpec(
+        name="fanout_ingest_organization",
+        slot="organization",
+        input_requirements=("observation",),
+        side_effects=("modify_store", "fanout_ingest"),
+    )
+
+    def __init__(self, *, field: str, pipeline: MemoryPipeline) -> None:
+        from ..pipeline import MemoryPipeline
+
+        self.field = _require_non_empty_text(field, "field")
+        if not isinstance(pipeline, MemoryPipeline):
+            raise TypeError("pipeline must be a MemoryPipeline instance.")
+        self.pipeline = pipeline
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        observation = packet.observation
+        if observation is None:
+            raise ValueError("FanoutIngestOrganization requires packet.observation.")
+
+        raw_items = observation.metadata.get(self.field)
+        if self.field not in observation.metadata:
+            raise ValueError(f"FanoutIngestOrganization requires observation.metadata[{self.field!r}].")
+        if isinstance(raw_items, (str, bytes)) or isinstance(raw_items, Mapping) or not isinstance(raw_items, Iterable):
+            raise ValueError(
+                f"FanoutIngestOrganization requires observation.metadata[{self.field!r}] "
+                "to be an iterable of strings."
+            )
+
+        child_traces: list[dict[str, Any]] = []
+        skipped_non_string = 0
+        skipped_empty_string = 0
+        fanout_count = 0
+
+        for index, raw_item in enumerate(raw_items):
+            if not isinstance(raw_item, str):
+                skipped_non_string += 1
+                continue
+            item_text = raw_item.strip()
+            if not item_text:
+                skipped_empty_string += 1
+                continue
+
+            child_observation = Observation(
+                text=item_text,
+                timestamp=observation.timestamp,
+                source=observation.source,
+                metadata=dict(observation.metadata),
+            )
+            self.pipeline.store = store
+            child_packet = self.pipeline.ingest(child_observation)
+            store = self.pipeline.store
+            fanout_count += 1
+            child_traces.append(
+                {
+                    "index": index,
+                    "text_preview": item_text[:200],
+                    "observation_id": child_observation.observation_id,
+                    "organization_trace": child_packet.trace.get("organization"),
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["organization"] = {
+            "module": self.spec.name,
+            "field": self.field,
+            "fanout_count": fanout_count,
+            "skipped_member_count": skipped_non_string + skipped_empty_string,
+            "skipped_reasons": {
+                "non_string": skipped_non_string,
+                "empty_string": skipped_empty_string,
+            },
+            "child_traces": child_traces,
+        }
+        return replace(packet, trace=trace), store
 
 
 def _append_records_for_placements(
@@ -1139,6 +1223,7 @@ class LLMFunctionCallOrganization(OrganizationModule):
 BASELINE_SLOT: Final[str] = "organization"
 BASELINE_CLASSES: Final[tuple[type[OrganizationModule], ...]] = (
     AppendOrganization,
+    FanoutIngestOrganization,
     GraphAppendOrganization,
     GraphDeduplicationAppendOrganization,
     GraphEntityDeduplicationAppendOrganization,
