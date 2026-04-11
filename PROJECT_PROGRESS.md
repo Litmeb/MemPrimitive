@@ -188,14 +188,21 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Current framework boundary:
   - mechanism-level repo-style reconstruction is feasible now without adding new baseline modules
   - fully first-class declarative support for "online-train the retriever whenever a memory is accepted" still does not exist as a primitive; that piece would need to live in wrapper/orchestration code unless a future trainable-retriever primitive is added
-- Paper-first audit note: the current example should still not be described as paper-aligned at the memory-transition level. The main paper-relevant mismatches are now clearer:
-  - long-term memory persists raw paragraph text rather than paragraph summaries
-  - long-term memory write timing is shifted: bootstrap does not persist the third generated paragraph into long-term memory at the same step, and later writes append the prior finalized paragraph on the next iteration
-  - the recurrent content state is human-extended before it is reused and later written to long-term memory, whereas the paper describes the previous timestep's generated paragraph/plan being reused, with the human simulator only selecting and revising the next plan
-- Upstream repo audit note: these three behaviors are not local deviations from `aiwaves-cn/RecurrentGPT`; they are how the released repo itself works. In upstream:
-  - `recurrentgpt.py` embeds and retrieves `self.long_memory` as raw paragraphs, not summary records
-  - `recurrentgpt.py` appends `self.input["output_paragraph"]` after each writer step, so long-memory persistence is one-step-lagged and bootstrap starts from only paragraph 1/2
-  - `human_simulator.py` returns an `Extended Paragraph`, and `gradio_server.py` feeds that extended paragraph back into `RecurrentGPT` as the next `input["output_paragraph"]`
+- That repo-consistent memory-only wiring now exists in `memprimitive/example/classics/memory_sharing_memory.py` and has deterministic coverage in `tests/test_classics_memory_sharing.py`.
+- The implemented scope is intentionally narrow and explicit:
+  - accepted examples are stored as prompt-answer memory records in a shared vector-backed pool
+  - write filtering is LLM-judge gated with a numeric threshold
+  - repo-style rubric selection is now represented too: the judge prompt resolves `Literature` / `Logic` / `Plan` / `Total` from explicit `grading_category` or from domain aliases such as `literal_creation`, `logic_problem_solving`, `plan_generation`, and `one_pool`
+  - recall builds a retrieval-conditioned prompt from the top-k retrieved memories
+  - online retriever training remains a documented example-level stub/hook rather than an implemented primitive or baseline family
+- Paper-first audit note: the current example should still not be described as paper-aligned at the memory-mechanism level. The main paper-relevant mismatches are now clearer:
+  - the paper makes domain-specific pre-established scoring rubrics a first-class part of memory selection, including per-rubric score ranges and a final aggregate score; the current example collapses that into one generic LLM score prompt plus threshold
+  - the paper makes accepted memories immediately participate in online retriever training via BM25 candidate mining, LLM contradiction-style scoring, positive/negative labeling, and retriever optimization; the current example only logs accepted record ids in `pending_retriever_updates` and performs no retriever update
+  - the paper explicitly supports prompt-less answer-only memories for initial bootstrap and manually seeded initial pools; the current example only accepts non-empty prompt-answer pairs and has no dedicated bootstrap path
+  - the paper's experimental setup allocates separate memory pools per domain, while the current example exposes one shared layer and only carries `domain` as metadata unless wrapper code partitions stores manually
+- Upstream/reconstruction boundary note:
+  - `memprimitive/example/classics/memory_sharing_memory.py` intentionally targets a narrow repo-consistent memory slice rather than the full paper loop
+  - the file header already states that multi-agent orchestration is out of scope and retriever online training is left as an explicit placeholder hook
 
 ### Other Boundary Papers
 
