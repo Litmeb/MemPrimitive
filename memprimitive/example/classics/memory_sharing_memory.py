@@ -37,6 +37,7 @@ from memprimitive.baselines import (
     BasicRepresentation,
     EmbeddingSimilarityRetrieval,
     LLMJudgeTrigger,
+    MetadataRetrieval,
     TemplateReadout,
 )
 from memprimitive.utils._runtime import get_runtime
@@ -175,6 +176,10 @@ DEFAULT_PROMPT_TEMPLATE = text_prompt(
 )
 
 
+def resolve_pool_domain(*, grading_category: str | None = None, domain: str | None = None) -> str:
+    return resolve_grading_category(grading_category=grading_category, domain=domain)
+
+
 def format_prompt_answer_memory(*, prompt_text: str, answer_text: str) -> str:
     normalized_prompt = str(prompt_text).strip()
     normalized_answer = str(answer_text).strip()
@@ -240,19 +245,13 @@ def build_memory_sharing_memory_system(
         organization=AppendOrganization(target_layer=memory_layer),
         store=store,
     )
-    recall_pipeline = MemoryPipeline(
-        retrieval=EmbeddingSimilarityRetrieval(top_k=retrieval_top_k, layer=memory_layer),
-        readout=TemplateReadout(prompt=prompt_template),
-        store=store,
-    )
-
     return {
         "store": store,
         "write_pipeline": write_pipeline,
-        "recall_pipeline": recall_pipeline,
         "memory_layer": memory_layer,
         "retrieval_top_k": int(retrieval_top_k),
         "score_threshold": float(score_threshold),
+        "prompt_template": prompt_template,
     }
 
 
@@ -263,6 +262,42 @@ def build_memory_sharing_query(query_text: str) -> Query:
     return Query(
         text=normalized_query,
         embedding=list(get_runtime().embed(normalized_query)),
+    )
+
+
+def build_domain_locked_recall_pipeline(
+    system: dict[str, object],
+    *,
+    domain: str | None = None,
+    grading_category: str | None = None,
+) -> MemoryPipeline:
+    store = system["store"]
+    assert isinstance(store, MemoryStore)
+    memory_layer = str(system["memory_layer"])
+    retrieval_top_k = int(system["retrieval_top_k"])
+    prompt_template = system["prompt_template"]
+    if str(domain or "").strip() or str(grading_category or "").strip():
+        pool_domain = resolve_pool_domain(grading_category=grading_category, domain=domain)
+        retrieval = (
+            MetadataRetrieval(
+                top_k=max(store.count(memory_layer), 1),
+                field="pool_domain",
+                target=pool_domain,
+                layer=memory_layer,
+                source="store",
+            ),
+            EmbeddingSimilarityRetrieval(
+                top_k=retrieval_top_k,
+                layer=memory_layer,
+                source="retrieved",
+            ),
+        )
+    else:
+        retrieval = EmbeddingSimilarityRetrieval(top_k=retrieval_top_k, layer=memory_layer)
+    return MemoryPipeline(
+        retrieval=retrieval,
+        readout=TemplateReadout(prompt=prompt_template),
+        store=store,
     )
 
 
@@ -314,6 +349,7 @@ def store_prompt_answer_memory(
             "domain": "" if domain is None else str(domain),
             "agent_type": "" if agent_type is None else str(agent_type),
             "grading_category": resolve_grading_category(grading_category=grading_category, domain=domain),
+            "pool_domain": resolve_pool_domain(grading_category=grading_category, domain=domain),
             "prompt_text": str(prompt_text),
             "answer_text": str(answer_text),
             **({} if extra_metadata is None else dict(extra_metadata)),
@@ -333,9 +369,14 @@ def build_memory_sharing_prompt(
     system: dict[str, object],
     *,
     query_text: str,
+    domain: str | None = None,
+    grading_category: str | None = None,
 ) -> Any:
-    recall_pipeline = system["recall_pipeline"]
-    assert isinstance(recall_pipeline, MemoryPipeline)
+    recall_pipeline = build_domain_locked_recall_pipeline(
+        system,
+        domain=domain,
+        grading_category=grading_category,
+    )
     return recall_pipeline.recall(build_memory_sharing_query(query_text))
 
 
@@ -343,9 +384,14 @@ def recall_memory_examples(
     system: dict[str, object],
     *,
     query_text: str,
+    domain: str | None = None,
+    grading_category: str | None = None,
 ) -> Any:
-    recall_pipeline = system["recall_pipeline"]
-    assert isinstance(recall_pipeline, MemoryPipeline)
+    recall_pipeline = build_domain_locked_recall_pipeline(
+        system,
+        domain=domain,
+        grading_category=grading_category,
+    )
     packet = recall_pipeline.retrieval.run(
         Packet(query=build_memory_sharing_query(query_text)),
         recall_pipeline.store,
@@ -378,6 +424,7 @@ def main() -> None:
     readout = build_memory_sharing_prompt(
         system,
         query_text="How should I organize a beginner-friendly weekly exercise plan?",
+        domain="plan_generation",
     )
 
     print("records per layer:")

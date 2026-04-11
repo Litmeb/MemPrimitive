@@ -194,7 +194,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
   - accepted examples are stored as prompt-answer memory records in a shared vector-backed pool
   - write filtering is LLM-judge gated with a numeric threshold
   - repo-style rubric selection is now represented too: the judge prompt resolves `Literature` / `Logic` / `Plan` / `Total` from explicit `grading_category` or from domain aliases such as `literal_creation`, `logic_problem_solving`, `plan_generation`, and `one_pool`
-  - recall builds a retrieval-conditioned prompt from the top-k retrieved memories
+  - recall now follows a single-layer, repo-style pool-locking approximation: records stay in one shared layer, then retrieval first uses `MetadataRetrieval` to lock candidates to the resolved pool/domain (`Literature` / `Logic` / `Plan` / `Total`) and only then applies `EmbeddingSimilarityRetrieval(source="retrieved")` within that candidate subset
   - online retriever training remains a documented example-level stub/hook rather than an implemented primitive or baseline family
 - Paper-first audit note: the current example should still not be described as paper-aligned at the memory-mechanism level. The main paper-relevant mismatches are now clearer:
   - the paper makes domain-specific pre-established scoring rubrics a first-class part of memory selection, including per-rubric score ranges and a final aggregate score; the current example collapses that into one generic LLM score prompt plus threshold
