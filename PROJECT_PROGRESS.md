@@ -22,6 +22,7 @@ The project is past the concept stage and now in a "framework expansion" phase.
 - Documentation is in much better shape and is broadly aligned with the executable surface.
 - The repository has shifted from design prose to reusable baseline modules plus executable paper-style examples.
 - Literature work has broadened beyond a few showcase systems and is now being used to judge what is already expressible, what is only approximate, and what still needs new primitive families.
+- `evaluate.md` 中列出的大部分目标论文现已批量下载到 `paper/`，并在 `paper/DOWNLOAD_MANIFEST.md` 里维护了一份来源清单；当前唯一明确留空的是 `Ego-LLaVA`，因为还没有稳定定位到同名开放论文 PDF。
 
 ## What To Treat As Established
 
