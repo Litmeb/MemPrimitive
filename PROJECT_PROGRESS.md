@@ -39,6 +39,12 @@ Avoid re-documenting these in detail unless something materially changes.
 ## Important Recent Progress
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
+- Raw benchmark assets are now staged locally under `benchmarks/` for evaluation prototyping:
+  - `benchmarks/LoCoMo/` contains the core LoCoMo benchmark files copied from `snap-research/locomo` (`locomo10.json` plus persona source JSON and repo metadata/license)
+  - `benchmarks/MSC/` contains the `nayohan/multi_session_chat` train/validation/test parquet shards
+  - `benchmarks/DMR/` contains MemGPT's `MSC-Self-Instruct` JSONL benchmark data
+  - `benchmarks/LongMemEval/` contains the cleaned LongMemEval splits, including the large `longmemeval_m_cleaned.json`
+  This closes the "data not downloaded yet" part of benchmark setup, but there is still no benchmark harness or unified runner wired into the repo.
 - Organization baselines now also include `FanoutIngestOrganization`, a reusable ingest-time helper that reads an iterable string field from `Observation.metadata` and fans those strings out through a child `MemoryPipeline.ingest(...)` path while aggregating child ingest trace.
 - `FanoutIngestOrganization` now also supports reading that iterable string field from `packet.units[0].metadata["representation"]` when the field is not already present on `Observation.metadata`, so representation-driven extraction pipelines can fan out directly into child ingest paths without extra example glue.
 - Retrieval baselines now also include `MetadataRetrieval`, a simple metadata-field filter that supports case-insensitive exact match by default plus regex matching, with one-level iterable-member matching for list/tuple/set-style metadata fields.
