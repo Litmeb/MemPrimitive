@@ -188,24 +188,6 @@ class RecurrentGPTState:
     step_index: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
 
-
-def _extract_between(text: str, start: str, end_markers: tuple[str, ...]) -> str:
-    start_idx = text.find(start)
-    if start_idx < 0:
-        return ""
-    content_start = start_idx + len(start)
-    end_positions = [text.find(marker, content_start) for marker in end_markers if text.find(marker, content_start) >= 0]
-    content_end = min(end_positions) if end_positions else len(text)
-    return text[content_start:content_end].strip()
-
-
-def _extract_after(text: str, start: str) -> str:
-    start_idx = text.find(start)
-    if start_idx < 0:
-        return ""
-    return text[start_idx + len(start) :].strip()
-
-
 def _sanitize_model_output(text: str) -> str:
     normalized = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
     replacements = {
@@ -231,54 +213,100 @@ def _sanitize_model_output(text: str) -> str:
     return normalized
 
 
-def _extract_labeled_section(text: str, labels: tuple[str, ...], next_labels: tuple[str, ...]) -> str:
-    for label in labels:
-        value = _extract_between(text, label, next_labels)
-        if value:
-            return value
-    return ""
-
-
-def _parse_instruction_list(text: str) -> list[str]:
+def _parse_labeled_sections(text: str, labels: tuple[str, ...]) -> tuple[str, dict[str, str]]:
     normalized = _sanitize_model_output(text)
-    instructions = [
-        _extract_labeled_section(normalized, ("Instruction 1:",), ("Instruction 2:", "Instruction 3:")),
-        _extract_labeled_section(normalized, ("Instruction 2:",), ("Instruction 3:",)),
-        _extract_after(normalized, "Instruction 3:"),
-    ]
-    return [item.strip() for item in instructions if item.strip()]
+    positions: list[tuple[int, str, str]] = []
+    for label in labels:
+        marker = f"{label}:"
+        index = normalized.find(marker)
+        if index >= 0:
+            positions.append((index, label, marker))
+    positions.sort()
+
+    sections: dict[str, str] = {}
+    for position_index, (start, label, marker) in enumerate(positions):
+        content_start = start + len(marker)
+        content_end = positions[position_index + 1][0] if position_index + 1 < len(positions) else len(normalized)
+        sections[label] = normalized[content_start:content_end].strip()
+    return normalized, sections
+
+
+def _require_labeled_sections(
+    sections: dict[str, str],
+    *,
+    required: tuple[str, ...],
+    error_message: str,
+    normalized_text: str,
+) -> None:
+    missing = [label for label in required if not sections.get(label, "").strip()]
+    if not missing:
+        return
+    preview = normalized_text[:1200]
+    raise ValueError(f"{error_message}\nMissing sections: {missing}.\nResponse preview:\n{preview}")
 
 
 def _parse_init_output(text: str) -> dict[str, Any]:
+    normalized, sections = _parse_labeled_sections(
+        text,
+        (
+            "Name",
+            "Outline",
+            "Paragraph 1",
+            "Paragraph 2",
+            "Paragraph 3",
+            "Summary",
+            "Instruction 1",
+            "Instruction 2",
+            "Instruction 3",
+        ),
+    )
+    _require_labeled_sections(
+        sections,
+        required=("Name", "Outline", "Paragraph 1", "Paragraph 2", "Paragraph 3", "Summary"),
+        error_message="Failed to parse initialization output with the expected RecurrentGPT format.",
+        normalized_text=normalized,
+    )
+    instructions = [
+        sections.get("Instruction 1", "").strip(),
+        sections.get("Instruction 2", "").strip(),
+        sections.get("Instruction 3", "").strip(),
+    ]
+    instructions = [item for item in instructions if item]
     parsed = {
-        "name": _extract_between(text, "Name:", ("Outline:",)),
-        "outline": _extract_between(text, "Outline:", ("Paragraph 1:",)),
-        "paragraph_1": _extract_between(text, "Paragraph 1:", ("Paragraph 2:",)),
-        "paragraph_2": _extract_between(text, "Paragraph 2:", ("Paragraph 3:",)),
-        "paragraph_3": _extract_between(text, "Paragraph 3:", ("Summary:",)),
-        "summary": _extract_between(text, "Summary:", ("Instruction 1:",)),
-        "instructions": _parse_instruction_list(text),
+        "name": sections["Name"],
+        "outline": sections["Outline"],
+        "paragraph_1": sections["Paragraph 1"],
+        "paragraph_2": sections["Paragraph 2"],
+        "paragraph_3": sections["Paragraph 3"],
+        "summary": sections["Summary"],
+        "instructions": instructions,
     }
-    if not all(parsed[key] for key in ("name", "outline", "paragraph_1", "paragraph_2", "paragraph_3", "summary")):
-        raise ValueError("Failed to parse initialization output with the expected RecurrentGPT format.")
     if len(parsed["instructions"]) != 3:
         raise ValueError("Initialization output must contain exactly 3 instructions.")
     return parsed
 
 
 def _parse_writer_output(text: str) -> dict[str, Any]:
-    normalized = _sanitize_model_output(text)
-    paragraph = _extract_labeled_section(
-        normalized,
-        ("Output Paragraph:",),
-        ("Output Memory:", "Updated Memory:", "Output Instruction:"),
+    normalized, sections = _parse_labeled_sections(
+        text,
+        (
+            "Output Paragraph",
+            "Output Memory",
+            "Updated Memory",
+            "Output Instruction",
+            "Instruction 1",
+            "Instruction 2",
+            "Instruction 3",
+        ),
     )
-    updated_memory = _extract_labeled_section(
-        normalized,
-        ("Updated Memory:", "Output Memory:"),
-        ("Output Instruction:", "Instruction 1:"),
-    )
-    instructions = _parse_instruction_list(normalized)
+    paragraph = sections.get("Output Paragraph", "").strip()
+    updated_memory = sections.get("Updated Memory", "").strip() or sections.get("Output Memory", "").strip()
+    instructions = [
+        sections.get("Instruction 1", "").strip(),
+        sections.get("Instruction 2", "").strip(),
+        sections.get("Instruction 3", "").strip(),
+    ]
+    instructions = [item for item in instructions if item]
     if not paragraph or not updated_memory or len(instructions) != 3:
         preview = normalized[:1200]
         raise ValueError(
@@ -295,9 +323,10 @@ def _parse_writer_output(text: str) -> dict[str, Any]:
 
 
 def _parse_selected_plan(text: str) -> str:
-    plan = _extract_between(text, "Selected Plan:", ("Reason:",))
+    normalized, sections = _parse_labeled_sections(text, ("Selected Plan", "Reason"))
+    plan = sections.get("Selected Plan", "").strip()
     if not plan:
-        first_line = text.strip().splitlines()[0] if text.strip() else ""
+        first_line = normalized.strip().splitlines()[0] if normalized.strip() else ""
         if first_line.startswith("Selected Plan:"):
             plan = first_line[len("Selected Plan:") :].strip()
     if not plan:
@@ -306,15 +335,17 @@ def _parse_selected_plan(text: str) -> str:
 
 
 def _parse_human_output(text: str) -> dict[str, str]:
-    extended_paragraph = _extract_between(text, "Extended Paragraph:", ("Selected Plan:",))
-    revised_plan = _extract_after(text, "Revised Plan:")
-    selected_plan = _extract_between(text, "Selected Plan:", ("Revised Plan:",))
-    if not extended_paragraph or not revised_plan:
-        raise ValueError("Failed to parse human-simulator output.")
+    normalized, sections = _parse_labeled_sections(text, ("Extended Paragraph", "Selected Plan", "Revised Plan"))
+    _require_labeled_sections(
+        sections,
+        required=("Extended Paragraph", "Revised Plan"),
+        error_message="Failed to parse human-simulator output.",
+        normalized_text=normalized,
+    )
     return {
-        "extended_paragraph": extended_paragraph,
-        "selected_plan": selected_plan,
-        "revised_plan": revised_plan,
+        "extended_paragraph": sections["Extended Paragraph"],
+        "selected_plan": sections.get("Selected Plan", "").strip(),
+        "revised_plan": sections["Revised Plan"],
         "raw_response": text,
     }
 

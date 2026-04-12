@@ -49,6 +49,9 @@ Avoid re-documenting these in detail unless something materially changes.
   - tag-overlap retrieval -> other existing retrieval families such as `KeywordCountRetrieval`, `EntityRetrieval`, `EmbeddingSimilarityRetrieval`, or `LayerAwareRetrieval`
 - PromptPlan-driven tool visibility is now implemented for `LLMFunctionCallOrganization` / `LLMFunctionCallEvolution`: prompt-side recall branches can report retrieved record provenance, select which recall branches contribute to `visible_records`, and expose that visibility in trace metadata.
 - PromptPlan labeled sub-recall now degrades cleanly on per-label empty recall-query overrides: an override that renders to `""` records `disabled_reason="empty_rendered_recall_query"` in prompt/readout metadata instead of failing `Query(text=...)` validation.
+- `DSL_REFERENCE.zh-CN.md` is being reworked into a code-aligned detailed API-style reference organized by slot/module IO rather than compact tables, so future agents can audit module behavior against real packet/store fields more reliably.
+- A new concise local skill entry now exists at `.cursor/skills/memprimitive-dsl-brief/SKILL.md` so agents can start from a short MemPrimitive DSL guide and fall back to `DSL_REFERENCE.zh-CN.md` only for exact parameter/edge-case detail.
+- That DSL skill now also contains a `references/` split of `DSL_REFERENCE.zh-CN.md` into per-section documents, and `SKILL.md` explicitly routes agents to the relevant section file before they load the full monolithic reference.
 - Integration smoke coverage for real LLM / embedding baselines exists in `tests/test_smoke_real_model_modules.py` and can exercise the main LLM-backed baseline families when runtime credentials are configured.
 - Embedding first-stage downshift is now implemented: ordinary record-level text embeddings can be declared per layer in `StoreLayerSpec.settings["embedding"]`, and `MemoryStore.append()` / `replace_record()` now auto-generate or refresh `record.embedding` for those layers.
 - The implemented policy boundary is intentionally narrow: stage 1 only handles `mode="text"` with refresh on semantic text change. Entity embeddings, note-payload-derived embeddings, query embeddings, and the broader `UNIT_EMBEDDING_CONTRACT` redesign are still deliberately left in their existing specialized paths.
@@ -101,6 +104,13 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - `mem0g_memory.py` has moved closer to upstream structure by keeping both a profile/vector branch and a graph branch, but it is still only partially aligned.
 - Mem0g now uses the same prompt-controlled visible-domain path for both its profile/vector tools and graph-maintenance tools.
 - Mem0g's profile/vector branch now follows the same extraction-plus-fanout organization as Mem0: outer fact extraction via `fact_list`, then per-fact child ingest through `FanoutIngestOrganization` rather than helper-side multi-fact recall assembly.
+- Mem0g no longer does a separate example-level pre-pass for contextual graph hint extraction before graph ingest. The graph branch now feeds the dialogue pair directly into `TripleRepresentation`, so graph entity/triple extraction is expressed by the existing baseline representation path rather than by extra helper-side LLM JSON glue.
+- Mem0g dual recall is now also expressed as one reusable pipeline surface: `TemplateReadout` drives labeled sub-recall through the existing profile and graph recall pipelines, replacing the old example-level `recall_all()` string-concatenation wrapper.
+- Additional classics cleanup landed in the example layer rather than the baseline surface:
+  - `tim_simple_memory.py` now caches its candidate recall pipeline and `LLMFunctionCallEvolution` module in the built system instead of rebuilding them for every thought update
+  - `tim_memory.py` no longer computes query embeddings / hash buckets redundantly across `build_tim_query()` and `build_tim_recall_pipeline()`
+  - `memory_sharing_memory.py` now reuses module-level default prompt constants instead of duplicating the same default judge/readout prompts inline
+  - `recurrentgpt_memory.py` still uses repo-style labeled plain-text outputs, but its parsing path is now centralized around one generic labeled-section parser instead of several bespoke substring helpers
 - The biggest remaining Mem0g gaps are graph-native storage semantics, relation-level invalidation/update behavior, and full repo-style recall behavior.
 
 ### RET-LLM / MemLLM
@@ -237,6 +247,19 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 ### Other Boundary Papers
 
+- `MemGPT`: latest paper + upstream repo audit suggests the current framework can cover a mechanism-level, memory-only reconstruction without adding new baseline primitive families if scope is limited to the storage/retrieval/update surfaces and allows thin example-level orchestration.
+- The clean reusable mapping is:
+  - editable in-context core memory blocks -> ordinary layers plus single-record/low-budget retention and `LLMFunctionCallEvolution` / `UPDATE`-style rewrites
+  - recall memory -> append-only conversation/history layer with recency or metadata/date-filtered retrieval
+  - archival memory -> append-only semantic layer with vector retrieval
+  - prompt assembly -> `TemplateReadout` / `PromptPlan`-style explicit reconstruction of visible memory blocks and recalled context
+- The main blocker to paper/repo-faithful MemGPT memory remains the queue-manager side, not the storage backends:
+  - there is no first-class primitive for a FIFO in-context message queue with head-pinned recursive summary plus explicit reinsertion of retrieved recall results into the active queue
+  - memory-pressure warnings / warning-threshold vs flush-threshold behavior are not first-class declarative trigger surfaces
+  - recursive compaction of evicted queue spans into the special summary slot can be approximated with existing evolution/readout building blocks, but is not currently one clean primitive path
+- Therefore MemGPT should currently be treated like RecurrentGPT / Reflexion in spirit but with a stricter caveat:
+  - mechanism-level memory reconstruction is feasible now with example-level glue
+  - stronger paper/repo fidelity would likely benefit from one dedicated queue-manager / compaction family rather than only more prompt wiring
 - `HippoRAG`: still highlights graph retrieval / propagation gaps.
 - `AriGraph`: still highlights semantic + episodic graph maintenance gaps.
 - `HiAgent`: still highlights hierarchical working-memory management gaps.

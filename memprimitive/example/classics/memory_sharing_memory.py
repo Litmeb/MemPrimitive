@@ -195,30 +195,8 @@ def build_memory_sharing_memory_system(
     memory_layer: str = DEFAULT_MEMORY_LAYER,
     retrieval_top_k: int = 2,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
-    judge_prompt=text_prompt(
-        "You are judging whether a prompt-answer example should be stored in a shared in-context memory pool.\n"
-        "Score the candidate from 0 to 100.\n"
-        "High scores should mean the example is clear, useful for future prompts, and helpful beyond the single current turn.\n"
-        "Prefer examples that are broadly reusable by agents working on similar tasks in the same domain.\n"
-        "Penalize examples that are unclear, low-quality, too trivial, too narrow, or unlikely to help later retrieval.\n\n"
-        "Selected grading category:\n"
-        "{{ grading_category }}\n\n"
-        "Rubric:\n"
-        "{{ rubric }}\n\n"
-        "Candidate metadata:\n"
-        "domain={{ observation.metadata.domain | default('') }}\n"
-        "agent_type={{ observation.metadata.agent_type | default('') }}\n"
-        "original_query={{ observation.metadata.original_query | default('') }}\n\n"
-        "Candidate prompt-answer example:\n"
-        "{{ observation.text }}",
-        context_builder=_judge_prompt_context,
-    ),
-    prompt_template=text_prompt(
-        "Retrieved shared memories:\n"
-        "{{ retrieved.items | join_text }}\n\n"
-        "Now, based on these question and answer examples, what is the answer of question:\n"
-        "{{ query.text }}"
-    ),
+    judge_prompt=DEFAULT_JUDGE_PROMPT,
+    prompt_template=DEFAULT_PROMPT_TEMPLATE,
 ) -> dict[str, object]:
     if retrieval_top_k <= 0:
         raise ValueError("retrieval_top_k must be positive.")

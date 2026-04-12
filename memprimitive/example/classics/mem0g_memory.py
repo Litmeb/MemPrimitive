@@ -86,6 +86,7 @@ from memprimitive.baselines import (
     QueryRewriteRetrieval,
     RecencyRetrieval,
     SummaryRewriteEvolution,
+    TemplateReadout,
     TripleRepresentation,
     VectorGraphSeedAndExpandRetrieval,
 )
@@ -98,96 +99,9 @@ from memprimitive.utils._mem0_family import (
     snapshot_dialogue_turn,
 )
 from memprimitive.utils._template import structured_prompt, text_prompt
-from memprimitive.utils._runtime import get_runtime
 
 _graph_pair_context = build_graph_pair_context
 _profile_pair_context = build_profile_pair_context
-
-
-def _normalize_graph_hints(payload: object) -> tuple[list[str], list[tuple[str, str, str]]]:
-    if not isinstance(payload, dict):
-        return [], []
-
-    raw_entities = payload.get("entities", [])
-    entities = []
-    if isinstance(raw_entities, list):
-        for item in raw_entities:
-            text = str(item).strip()
-            if text and text not in entities:
-                entities.append(text)
-
-    triples: list[tuple[str, str, str]] = []
-    raw_triples = payload.get("triples", [])
-    if isinstance(raw_triples, list):
-        for item in raw_triples:
-            if not isinstance(item, dict):
-                continue
-            subject = str(item.get("subject", "")).strip()
-            predicate = str(item.get("predicate", "")).strip()
-            obj = str(item.get("object", "")).strip()
-            triple = (subject, predicate, obj)
-            if all(triple) and triple not in triples:
-                triples.append(triple)
-
-    return entities, triples
-
-
-def _render_graph_memory_text(
-    *,
-    entities: list[str],
-    triples: list[tuple[str, str, str]],
-    fallback_text: str,
-) -> str:
-    normalized_entities = [str(item).strip() for item in entities if str(item).strip()]
-    normalized_triples = [
-        (str(subject).strip(), str(predicate).strip(), str(obj).strip())
-        for subject, predicate, obj in triples
-        if str(subject).strip() and str(predicate).strip() and str(obj).strip()
-    ]
-    lines: list[str] = []
-    if normalized_entities:
-        lines.append("entities:")
-        lines.extend(f"- {entity}" for entity in normalized_entities)
-    if normalized_triples:
-        lines.append("triples:")
-        lines.extend(f"- {subject} | {predicate} | {obj}" for subject, predicate, obj in normalized_triples)
-    rendered = "\n".join(lines).strip()
-    return rendered or fallback_text.strip()
-
-
-def _contextual_graph_hints(
-    *,
-    pair_text: str,
-    user_message: str,
-    assistant_message: str,
-    recent_messages: str,
-    conversation_summary: str,
-) -> tuple[list[str], list[tuple[str, str, str]]]:
-    runtime = get_runtime()
-    runtime.require_llm(capability="Mem0g contextual graph extraction")
-    payload = runtime.json(
-        system=(
-            "Extract grounded graph memories from a conversational interaction.\n"
-            "Use the historical context only to resolve references and maintain continuity.\n"
-            "Prioritize facts stated or updated in the current interaction pair.\n"
-            "Return strict JSON with keys 'entities' and 'triples'.\n"
-            "'entities' must be a list of canonical entity strings.\n"
-            "'triples' must be a list of objects with non-empty 'subject', 'predicate', and 'object'."
-        ),
-        user=json.dumps(
-            {
-                "conversation_summary": conversation_summary,
-                "recent_messages": recent_messages,
-                "current_pair": {
-                    "pair_text": pair_text,
-                    "user_message": user_message,
-                    "assistant_message": assistant_message,
-                },
-            },
-            ensure_ascii=False,
-        ),
-    )
-    return _normalize_graph_hints(payload)
 
 
 def build_mem0g_memory_system(
@@ -636,6 +550,43 @@ def build_mem0g_memory_system(
         readout=ConcatenateReadout(separator="\n"),
         store=store,
     )
+    dual_recall_pipeline = MemoryPipeline(
+        retrieval=RecencyRetrieval(top_k=1, layer="recent_dialogue"),
+        readout=TemplateReadout(
+            prompt=structured_prompt(
+                {
+                    "blocks": [
+                        {
+                            "id": "profile_memories",
+                            "title": "Memories",
+                            "condition": "profile_memories | length",
+                            "template": "{{ profile_memories }}",
+                        },
+                        {
+                            "id": "graph_relations",
+                            "title": "Relations",
+                            "condition": "graph_relations | length",
+                            "template": "{{ graph_relations }}",
+                        },
+                    ]
+                },
+                labeled_recall_plans={
+                    "profile_memories": text_prompt("{{ profile_memories }}", metadata_mode="readout"),
+                    "graph_relations": text_prompt("{{ graph_relations }}", metadata_mode="readout"),
+                },
+                labeled_sub_recall_pipelines={
+                    "profile_memories": profile_recall_pipeline,
+                    "graph_relations": graph_recall_pipeline,
+                },
+                labeled_recall_query_builders={
+                    "profile_memories": (lambda packet, store, context: packet.query),
+                    "graph_relations": (lambda packet, store, context: packet.query),
+                },
+                metadata_mode="readout",
+            )
+        ),
+        store=store,
+    )
 
     return {
         "store": store,
@@ -648,6 +599,7 @@ def build_mem0g_memory_system(
         "mem0g_write_pipeline": mem0g_write_pipeline,
         "graph_recall_pipeline": graph_recall_pipeline,
         "profile_recall_pipeline": profile_recall_pipeline,
+        "dual_recall_pipeline": dual_recall_pipeline,
     }
 
 
@@ -669,18 +621,6 @@ def ingest_message_pair(
         session_id=session_id,
         turn_id=turn_id,
     )
-    entities, triples = _contextual_graph_hints(
-        pair_text=turn.pair_text,
-        user_message=turn.user_text,
-        assistant_message=turn.assistant_text,
-        recent_messages=turn.recent_messages,
-        conversation_summary=turn.conversation_summary,
-    )
-    graph_memory_text = _render_graph_memory_text(
-        entities=entities,
-        triples=triples,
-        fallback_text=turn.pair_text,
-    )
 
     profile_write_pipeline.ingest(
         Observation(
@@ -691,12 +631,10 @@ def ingest_message_pair(
     )
     mem0g_write_pipeline.ingest(
         Observation(
-            text=graph_memory_text,
+            text=turn.pair_text,
             source="dialogue_pair",
             metadata=turn.pair_metadata(
                 pair_text=turn.pair_text,
-                entities=entities,
-                triples=triples,
             ),
         )
     )
@@ -712,27 +650,8 @@ def recall_graph(system: dict[str, object], *, user_query: str) -> str:
 
 
 def recall_all(system: dict[str, object], *, user_query: str) -> str:
-    """Dual-approach recall mirroring the original repo's ``Memory.search()``.
-
-    Runs both the profile-layer vector recall and the graph recall pipeline,
-    then merges the results into a single string with labelled sections
-    (``Memories`` for profile vector results, ``Relations`` for graph
-    relations), analogous to the upstream ``{"results": …, "relations": …}``
-    return shape.
-    """
-    profile_recall_pipeline = system["profile_recall_pipeline"]
-    graph_recall_pipeline = system["graph_recall_pipeline"]
-
-    query = Query(text=user_query)
-    profile_result = profile_recall_pipeline.recall(query)
-    graph_result = graph_recall_pipeline.recall(query)
-
-    parts: list[str] = []
-    if profile_result.text.strip():
-        parts.append("Memories:\n" + profile_result.text.strip())
-    if graph_result.text.strip():
-        parts.append("Relations:\n" + graph_result.text.strip())
-    return "\n\n".join(parts)
+    """Dual-approach recall mirroring the original repo's ``Memory.search()``."""
+    return system["dual_recall_pipeline"].recall(Query(text=user_query)).text
 
 
 def main() -> None:

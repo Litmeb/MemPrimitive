@@ -325,8 +325,9 @@ def store_thought(
 def recall_thoughts(system: dict[str, object], *, user_query: str) -> list[dict[str, Any]]:
     """Recall TiM thoughts with hash-bucket prefilter plus within-bucket top-k."""
 
-    recall_pipeline = build_tim_recall_pipeline(system, query_text=user_query)
-    packet = Packet(query=build_tim_query(system, query_text=user_query))
+    query = build_tim_query(system, query_text=user_query)
+    recall_pipeline = build_tim_recall_pipeline(system, query=query)
+    packet = Packet(query=query)
     for module in recall_pipeline.retrieval:
         packet, recall_pipeline.store = module.run(packet, recall_pipeline.store)
     retrieved = packet.retrieved.items if packet.retrieved is not None else []
@@ -346,26 +347,37 @@ def recall_thoughts(system: dict[str, object], *, user_query: str) -> list[dict[
 def build_tim_prompt(system: dict[str, object], *, query_text: str):
     """Render a retrieval-conditioned prompt from recalled TiM thoughts."""
 
-    return build_tim_recall_pipeline(system, query_text=query_text).recall(
-        build_tim_query(system, query_text=query_text)
-    )
+    query = build_tim_query(system, query_text=query_text)
+    return build_tim_recall_pipeline(system, query=query).recall(query)
 
 
 def build_tim_query(system: dict[str, object], *, query_text: str) -> Query:
     normalized_query = str(query_text).strip()
     if not normalized_query:
         raise ValueError("query_text must be non-empty.")
+    embedding = list(get_runtime().embed(normalized_query))
     return Query(
         text=normalized_query,
-        embedding=list(get_runtime().embed(normalized_query)),
-        metadata={"hash_bucket": compute_hash_bucket(system, normalized_query)},
+        embedding=embedding,
+        metadata={"hash_bucket": compute_hash_bucket(system, embedding=embedding)},
     )
 
 
-def build_tim_recall_pipeline(system: dict[str, object], *, query_text: str) -> MemoryPipeline:
+def build_tim_recall_pipeline(
+    system: dict[str, object],
+    *,
+    query: Query | None = None,
+    query_text: str | None = None,
+) -> MemoryPipeline:
     """Build a TiM recall pipeline for one query using the query's hash bucket."""
 
-    hash_bucket = compute_hash_bucket(system, query_text)
+    if query is None:
+        if query_text is None:
+            raise ValueError("build_tim_recall_pipeline requires query or query_text.")
+        query = build_tim_query(system, query_text=query_text)
+    hash_bucket = str(query.metadata.get("hash_bucket", "")).strip() if isinstance(query.metadata, dict) else ""
+    if not hash_bucket:
+        hash_bucket = compute_hash_bucket(system, query.text)
     return _build_bucket_recall_pipeline(
         system,
         hash_bucket=hash_bucket,
@@ -377,11 +389,11 @@ def build_tim_recall_pipeline(system: dict[str, object], *, query_text: str) -> 
     )
 
 
-def compute_hash_bucket(system: dict[str, object], text: str) -> str:
+def compute_hash_bucket(system: dict[str, object], text: str | None = None, embedding: list[float] | None = None) -> str:
     """Compute the example-level TiM hash bucket for one text."""
 
-    embedding = list(get_runtime().embed(str(text).strip()))
-    bucket_index = _bucket_index_for_embedding(system, embedding)
+    current_embedding = list(embedding) if embedding is not None else list(get_runtime().embed(str(text).strip()))
+    bucket_index = _bucket_index_for_embedding(system, current_embedding)
     return f"bucket-{bucket_index}"
 
 

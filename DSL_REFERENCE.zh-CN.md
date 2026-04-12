@@ -1,241 +1,1620 @@
-# MemPrimitive DSL 参考（当前实现面）
+# MemPrimitive DSL 参考（当前实现面，详细版）
 
-本文档描述当前仓库里已经公开实现、且可直接用于 `MemoryPipeline` 的 baseline surface。内容以 `memprimitive.baselines`、`memprimitive.utils._template`、`memprimitive.utils._llm_function_tools` 的现状为准，目标是提供一份偏 API Reference 风格的中文索引，而不是设计草案。
+本文档按当前仓库代码重写，目标是把它当成一份可直接查阅的 API / DSL 参考，而不是设计草案。内容以 `memprimitive.pipeline`、`memprimitive.baselines`、`memprimitive.utils._template`、`memprimitive.utils._llm_function_tools`、`memprimitive.utils._mid_decoding_tools` 的现状为准。
 
-本文档重点覆盖：
+本文档覆盖三类内容：
 
-1. Pipeline 八个 slot 当前有哪些 baseline module。
-2. `tool call` 写路径里的九种默认工具与自定义工具协议。
-3. 如何使用模板系统编写 template prompt。
+1. `MemoryPipeline` 的真实 slot 顺序与 `Packet`/`MemoryStore` I/O 约定。
+2. 当前公开 baseline surface 中每个 module 的功能、输入、输出、关键参数、特殊行为。
+3. 与 module 紧密耦合的两套协议：
+   1. 写路径 tool call 协议。
+   2. `PromptPlan` / 模板系统。
 
-## Pipeline Slots
+## 1. Pipeline 总览
 
-标准执行顺序：
+### 1.1 标准 slot 顺序
 
-```text
-unit_formation
--> representation
--> write_trigger
--> organization
--> evolution_trigger
--> memory_evolution
--> retrieval
--> readout
-```
+`MemoryPipeline` 的执行顺序固定为：
 
-## 通用约定
+1. `unit_formation`
+2. `representation`
+3. `write_trigger`
+4. `organization`
+5. `evolution_trigger`
+6. `memory_evolution`
+7. `retrieval`
+8. `readout`
 
-- 本文档中的“构造参数”只列常用公开参数；更细节的内部 helper 不在这里展开。
-- 同一个 trigger 类通过 `slot="write_trigger"` 或 `slot="evolution_trigger"` 绑定到不同 slot。
-- 模板相关模块统一接受 `PromptPlan | str`；`str` 会被当作简单文本模板处理。
-- retrieval 的 query 输入当前有两个公开入口：
-  - `packet.query: Query | None`
-  - `packet.queries: list[Query] | None`
-- retrieval 的 query 解析优先级是：
-  - 若 `packet.queries` 非空，则使用 `packet.queries`
-  - 否则回退到 `packet.query`
-- tool-call 写路径当前公开入口是：
-  - `LLMFunctionCallOrganization`
-  - `LLMFunctionCallEvolution`
+其中：
 
-## `unit_formation`
+1. `ingest(observation)` 只跑前六个 slot。
+2. `recall(query)` 只跑后两个 slot。
+3. `run_round(observation, query)` 先 ingest 再 recall，并把 ingest trace 塞进最终 `Readout.metadata["ingest_trace"]`。
 
-把输入 `Observation` 切成一个或多个 `MemoryUnit`。
+### 1.2 `Packet` 是所有 module 的共享 I/O 容器
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `PassThroughUnitFormation` (`pass_through_unit_formation`) | 无额外参数 | 不切分输入；一条 observation 直接变成一个 unit。 |
-| `SentenceSplitUnitFormation` (`sentence_split_unit_formation`) | 无额外参数 | 按句子边界切分成长短更合适的 unit。 |
+当前 `Packet` 主要字段如下：
 
-## `representation`
+1. `packet.observation: Observation | None`
+   ingest 入口输入。
+2. `packet.units: list[MemoryUnit] | None`
+   unit 级中间表示。
+3. `packet.decisions: list[bool] | None`
+   当前 trigger 生成的 active mask。
+4. `packet.decisions_store: dict[str, dict[str, Any]] | None`
+   trigger 选中的“已有 store records”的并行结果。
+5. `packet.placements: list[Placement] | None`
+   organization 为每个 unit 规划的目标 layer。
+6. `packet.query: Query | None`
+   recall 单 query 入口。
+7. `packet.queries: list[Query] | None`
+   recall 多 query 入口。
+8. `packet.retrieved: RetrievedSet | None`
+   retrieval 输出。
+9. `packet.readout: Readout | None`
+   readout 输出。
+10. `packet.trace: dict[str, Any]`
+   每个 slot 的 trace 都写在这里。
 
-为 unit 生成后续组织、检索、图结构和提示词可能会使用的表示字段。
+### 1.3 `decisions` 和 `decisions_store` 的区别
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `BasicRepresentation` (`basic_representation`) | `elements=("text", "embedding")`, `embedding_model=None`, `api_key=None`, `base_url=None`, `model=None` | 生成基础表示，适合文本和 embedding 等轻量字段。 |
-| `TripleRepresentation` (`triple_representation`) | `method="direct"`, `prompt=None`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None`, `embed_extracted=False`, `embed_entities=False` | 用 LLM 抽取 `(subject, relation, object)` triples；`embed_extracted=True` 时给整份抽取出的 `entities + triples` 生成一个 graph-object embedding 写回 `unit.embedding`，`embed_entities=True` 时额外把每个 entity 的 embedding 写入 `metadata["representation"]["entity_embeddings"]`。 |
-| `LLMRepresentation` (`llm_representation`) | `field`, `prompt`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 prompt 驱动的方式为 unit 生成一个语义字段，并回写到 `metadata["representation"]` 等标准位置。 |
+这两个字段经常一起出现，但语义不同：
 
-补充说明：`LLMRepresentation.value_type` 当前支持 `str`、`list[str]`、`dict[str, str]`、`list[dict[str, str]]`。其中 `list[dict[str, str]]` 适合写入仅存放在 `metadata["representation"][field]` 的结构化字段。
-| `ConfigurableEmbeddingRepresentation` (`configurable_embedding_representation`) | `embedding_text=None`, `embedding_version="content_context_keywords_tags_v2"`, `embedding_model=None` | 基于可配置文本或模板渲染文本生成 embedding，并记录 embedding 输入来源。 |
+1. `packet.decisions`
+   面向“当前这批 unit”。
+   典型用途是告诉 organization / memory_evolution 哪些 unit 当前激活。
+2. `packet.decisions_store`
+   面向“store 里已有 records”。
+   典型用途是告诉层级聚合、演化、tool-call 维护阶段，哪些历史记录被选中。
+
+### 1.4 retrieval 的 query 解析优先级
+
+所有支持多 query 的 retrieval module 都遵守同一套规则：
+
+1. 如果 `packet.queries` 非空，则逐个 query 跑检索。
+2. 否则回退到 `packet.query`。
+3. 多 query 合并策略固定为 `query_order_dedupe`：
+   1. 先保留每个 query 自己的排序。
+   2. 按 query 顺序拼接结果。
+   3. 用 `record_id` 去重，重复命中只保留第一次出现的那条。
+
+合并后，`packet.retrieved.trace` 会额外带上：
+
+1. `query_count`
+2. `query_ids`
+3. `merge_strategy`
+4. `per_query`
+5. `final_returned_count`
+
+### 1.5 文档里的“输入 / 输出”怎么读
+
+后面每个 module 都按下面四个维度介绍：
+
+1. 功能
+2. 读取哪些变量
+3. 写回哪些变量
+4. 主要参数与特殊行为
+
+这里的“写回”默认指：
+
+1. 是否改 `packet`
+2. 是否改 `store`
+3. 是否写 trace
+
+## 2. `unit_formation`
+
+当前公开 module：
+
+1. `PassThroughUnitFormation`
+2. `SentenceSplitUnitFormation`
+
+### 2.1 `PassThroughUnitFormation`
+
+1. 功能
+   把一条 `Observation` 原样转成一个 `MemoryUnit`，不做切分。
+2. 读取
+   读取 `packet.observation`。
+3. 写回
+   写 `packet.units`，长度恒为 1。
+   写 `packet.trace["unit_formation"]`。
+   不改 `store`。
+4. 重要输出位置
+   输出 unit 的文本在 `packet.units[0].text`。
+   unit id 在 `packet.units[0].unit_id`。
+5. 特殊行为
+   这是 `MemoryPipeline` 的默认 `unit_formation`。
+   适合所有“不需要先切分文本”的场景。
+
+### 2.2 `SentenceSplitUnitFormation`
+
+1. 功能
+   按句子边界把 `Observation.text` 拆成多个 `MemoryUnit`。
+2. 读取
+   读取 `packet.observation`。
+3. 写回
+   写 `packet.units`，每个句子一个 unit。
+   写 `packet.trace["unit_formation"]`，包括切分后的 unit 数量。
+   不改 `store`。
+4. 特殊行为
+   如果原始文本只包含一条句子，结果可能仍然只有一个 unit。
+   适合句子级写入、句子级筛选、句子级摘要的 pipeline。
+
+## 3. `representation`
+
+当前公开 module：
+
+1. `BasicRepresentation`
+2. `TripleRepresentation`
+3. `LLMRepresentation`
+4. `ConfigurableEmbeddingRepresentation`
+
+### 3.1 `BasicRepresentation`
+
+1. 功能
+   为 unit 构造基础表示，支持文本归一化、embedding、关键词、时间锚点、来源类型。
+2. 读取
+   读取 `packet.units`。
+   可能读取每个 unit 的已有字段和 `unit.metadata` 中的提示值，比如 `metadata["keywords"]`、`metadata["time_anchor"]`、`metadata["source"]`。
+3. 写回
+   回写 `packet.units` 中每个 unit 的：
+   1. `normalized_text`
+   2. `embedding`
+   3. `representation_elements`
+   4. `metadata["representation"]`
+   写 `packet.trace["representation"]`。
+   不改 `store`。
+4. 主要参数
+   1. `elements`
+      控制要生成哪些表示元素。当前合法值是：
+      1. `text`
+      2. `embedding`
+      3. `keywords`
+      4. `time_anchor`
+      5. `source_type`
+   2. `embedding_model`
+      文本 embedding 模型。默认读环境变量，否则回退到 `sentence-transformers/all-MiniLM-L6-v2`。
+   3. `api_key` / `base_url` / `model`
+      当前这个类本身主要用于统一 runtime 配置来源；真正用到的是 embedding 路径。
+5. 输出字段说明
+   1. `unit.normalized_text`
+      当前是 `unit.text.strip().casefold()`。
+   2. `unit.embedding`
+      如果启用了 `embedding`，这里会写入向量。
+   3. `unit.metadata["representation"]`
+      会同步写入紧凑摘要，至少包含：
+      1. `elements`
+      2. `text`
+      3. `normalized_text`
+      如果有 embedding，还会带 `embedding.dim`。
+6. 特殊行为
+   1. `keywords`
+      如果 `unit.metadata["keywords"]` 已经给出列表，会优先用它；否则从文本里抽取高频词。
+   2. `time_anchor`
+      优先用 `unit.metadata["time_anchor"]`，否则从 `unit.timestamp` 生成。
+   3. `source_type`
+      读的是 `unit.metadata["source"]`，不是 `Observation.source` 直读。
+   4. 如果重复运行，不会清空已有 triples / entities，只是在已有 unit 上补字段。
+
+### 3.2 `TripleRepresentation`
+
+1. 功能
+   用 LLM 或 metadata hint 抽取图谱三元组表示，把结果写到 unit 的 `entities`、`triples`、可选 embedding 中。
+2. 读取
+   读取 `packet.units`。
+   可能读取：
+   1. `unit.metadata["triples"]`
+   2. `unit.metadata["entities"]`
+   3. `self.prompt` 对应的模板上下文
+3. 写回
+   回写每个 unit 的：
+   1. `unit.entities`
+   2. `unit.triples`
+   3. `unit.embedding`（可选）
+   4. `unit.representation_elements`
+   5. `unit.metadata["representation"]`
+   写 `packet.trace["representation"]`。
+   不改 `store`。
+4. 主要参数
+   1. `method`
+      取值只能是：
+      1. `direct`
+         一次 LLM 调用同时抽 entities 和 relationships。
+      2. `two_stage`
+         先抽 entities，再以这些 entities 为 anchor 抽 relationships。
+   2. `prompt`
+      可选。可以是字符串模板或完整 `PromptPlan`。传入后会影响三元组抽取标准。
+   3. `embed_extracted`
+      是否对“抽取出的 entities + triples 组合文本”再做一次 embedding，并把结果写到 `unit.embedding`。
+   4. `embed_entities`
+      是否给每个 entity 单独做 embedding，并写入 `unit.metadata["representation"]["entity_embeddings"]`。
+   5. `embedding_model` / `api_key` / `base_url` / `model`
+      控制 LLM 与 embedding runtime。
+5. 输出字段说明
+   1. `unit.entities`
+      去重后的实体字符串列表。
+   2. `unit.triples`
+      标准三元组列表，元素是 `(subject, predicate, object)`。
+   3. `unit.metadata["representation"]["entity_embeddings"]`
+      只有 `embed_entities=True` 才会出现，结构是 `{entity_text: vector}`。
+6. 特殊行为
+   1. 如果 `unit.metadata["triples"]` 已经提供了合法 triples，会直接走 `metadata_hint` 路径，不再调用 LLM。
+   2. `embed_extracted=True` 生成的是“图对象 embedding”，不是逐实体 embedding。
+   3. `embed_entities=True` 时，后续 `GraphEntityDeduplicationAppendOrganization` 才能直接用到这些 entity embedding。
+   4. trace 里会记录 `source`，可能是：
+      1. `metadata_hint`
+      2. `llm_direct`
+      3. `llm_two_stage`
+
+### 3.3 `LLMRepresentation`
+
+1. 功能
+   用 prompt 驱动的方式，为 unit 生成一个指定字段。
+2. 读取
+   读取 `packet.units`。
+   读取当前 unit 的：
+   1. `text`
+   2. `unit_type`
+   3. `timestamp`
+   4. `tags`
+   5. `entities`
+   6. `description`
+   7. `metadata`
+   还会读取 `self.prompt`。
+3. 写回
+   一定会更新：
+   1. `unit.representation_elements`
+   2. `unit.metadata["representation"]`
+   根据 `field` 具体不同，还可能写：
+   1. `unit.tags`
+   2. `unit.entities`
+   3. `unit.kv`
+   4. `unit.description`
+   写 `packet.trace["representation"]`。
+   不改 `store`。
+4. 主要参数
+   1. `field`
+      要生成的字段名。不能为空。
+   2. `prompt`
+      该字段的抽取 prompt，可以是 `str` 或 `PromptPlan`。
+   3. `value_type`
+      显式声明输出结构。当前只支持：
+      1. `str`
+      2. `list[str]`
+      3. `dict[str, str]`
+      4. `list[dict[str, str]]`
+   4. `embedding_model` / `api_key` / `base_url` / `model`
+      控制底层 runtime。
+5. 字段落点规则
+   1. `field == "tags"`
+      写到 `unit.tags`。
+   2. `field == "entities"`
+      写到 `unit.entities`。
+   3. `field == "kv"`
+      写到 `unit.kv`。
+   4. `field == "description"`
+      写到 `unit.description`。
+   5. 其他字段
+      写到 `unit.metadata["representation"][field]`。
+6. 特殊行为
+   1. 如果 `value_type` 不写，会按 `field` 推断输出类型。
+      例如 `tags`/`entities`/`keywords` 默认按 `list` 处理，`kv`/`time_anchor` 默认按 `dict` 处理。
+   2. `list[dict[str, str]]` 是最近扩展出来的能力，适合抽像 `thoughts` 这种结构化列表。
+   3. trace 里会记录：
+      1. `field`
+      2. `kind`
+      3. `declared_value_type`
+      4. 实际 `value`
+
+### 3.4 `ConfigurableEmbeddingRepresentation`
+
+1. 功能
+   用可配置文本生成 embedding，不强制把 unit 的主文本改掉。
+2. 读取
+   读取 `packet.units`。
+   读取 `embedding_text` 对应的 prompt / template 上下文。
+3. 写回
+   回写每个 unit 的：
+   1. `unit.embedding`
+   2. `unit.representation_elements`
+   3. `unit.metadata["representation"]`
+   写 `packet.trace["representation"]`。
+   不改 `store`。
+4. 主要参数
+   1. `embedding_text`
+      决定送给 embedding 模型的文本。
+      可以是：
+      1. 普通字符串
+      2. 模板字符串
+      3. 完整 `PromptPlan`
+      不传时默认等价于 `{{ unit.text }}`。
+   2. `embedding_version`
+      只做 provenance 标记，记录在 trace 和 representation metadata 中。
+   3. `embedding_model`
+      底层 embedding 模型。
+5. 重要输出位置
+   1. 向量写在 `unit.embedding`
+   2. 输入文本写在 `unit.metadata["representation"]["embedding_input_text"]`
+   3. 版本写在 `unit.metadata["representation"]["embedding_version"]`
+6. 特殊行为
+   1. 它不会改 `unit.text`，这点和某些“先重写文本再 embed”的表示模块不同。
+   2. 很适合 A-MEM / note 风格写法：先用多个 `LLMRepresentation` 生成 `context`、`keywords`、`tags` 等，再用这个类生成面向检索的 embedding。
+
+## 4. `write_trigger`
+
+当前公开 module：
+
+1. `AlwaysTrigger`
+2. `StoreAllTrigger`
+3. `BoundaryEventTrigger`
+4. `RuntimeEventTrigger`
+5. `ScalarRuleTrigger`
+6. `LLMJudgeTrigger`
+
+公共约定：
+
+1. 这些 trigger 都写 `packet.trace["write_trigger"]`。
+2. 这些 trigger 的 `slot` 参数虽然存在，但这里的正常用法是 `slot="write_trigger"` 或留空使用默认值。
+3. 大多数 trigger 都会写 `packet.decisions`。
+4. `StoreAllTrigger` 主要写 `packet.decisions_store`。
+
+### 4.1 `AlwaysTrigger`
+
+1. 功能
+   所有 unit 都通过。
+2. 读取
+   读取 `packet.units`。
+3. 写回
+   把 `packet.decisions` 设成全 `True`。
+   写 `packet.trace["write_trigger"]`。
+   不改 `store`。
+4. 特殊行为
+   它是 `MemoryPipeline` 默认的 write trigger。
+
+### 4.2 `StoreAllTrigger`
+
+1. 功能
+   选择 store 里所有现有 records，但不主动重写当前 `packet.decisions`。
+2. 读取
+   读取 `packet.units` 只是为了保持 trigger 接口一致。
+   读取整个 `store`。
+3. 写回
+   主要写 `packet.decisions_store`。
+   trace 中会说明：
+   1. 哪些 layer 被选中
+   2. 每层有多少 record ids
+   如果 `packet.decisions` 原本已存在，则会原样保留。
+4. 特殊行为
+   适合“组织 / 演化阶段想拿到整层历史 records”而不是只关心当前 unit 的场景。
+
+### 4.3 `BoundaryEventTrigger`
+
+1. 功能
+   根据边界事件触发，比如 `session`、`turn`、`chunk`、`subgoal`、`episode`。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.events`
+   3. `packet.observation.metadata`
+   4. trigger payload 中的边界信息
+3. 写回
+   1. 写 `packet.decisions`
+   2. 如果能解析出边界匹配键和值，还会写 `packet.decisions_store`
+      这时会把 store 中 metadata 同样命中该边界键值的记录选出来
+   3. 写 `packet.trace["write_trigger"]`
+4. 主要参数
+   1. `accepted_events`
+      需要匹配的事件名元组。
+   2. `match_mode`
+      `any` 或 `all`。
+   3. `default_decision`
+      没有观察到事件时的默认判定。
+   4. `invert`
+      是否反转结果。
+5. 特殊行为
+   1. 它不只是“看 event 名字”，还会尝试把边界事件映射到 metadata 键，例如：
+      1. `session -> session_id`
+      2. `turn -> turn_id`
+      3. `chunk -> chunk_id`
+   2. 只有在成功解析出 `match_key` 和 `match_value` 后，`decisions_store` 才会被填充。
+
+### 4.4 `RuntimeEventTrigger`
+
+1. 功能
+   根据运行时事件触发，典型场景是维护、后台整理、内存压力触发。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.events`
+   3. `store` 当前 layer 压力信息
+3. 写回
+   1. 写 `packet.decisions`
+   2. 如果命中了 `memory_pressure`，还可能写 `packet.decisions_store`
+      这时通常会把目标 layer 的所有 records 选出来
+   3. 写 `packet.trace["write_trigger"]`
+4. 主要参数
+   1. `accepted_events`
+      接受的运行时事件，例如 `idle`、`memory_pressure` 等。
+   2. `match_mode`
+      `any` 或 `all`。
+   3. `default_decision`
+      没事件时的默认值。
+   4. `invert`
+      是否反转。
+   5. `target_layer`
+      计算 memory pressure 时使用的目标 layer。
+   6. `pressure_threshold`
+      如果设置了，并且 `accepted_events` 包含 `memory_pressure`，会先根据 layer 压力计算是否自动生成一个 `memory_pressure` runtime event。
+5. 特殊行为
+   1. `memory_pressure` 事件可以来自外部，也可以由该模块内部根据 store 容量状态推导出来。
+   2. 对 write trigger 而言，如果要按 `memory_pressure` 算压力，通常需要显式传 `target_layer`。
+
+### 4.5 `ScalarRuleTrigger`
+
+1. 功能
+   根据显式数值信号和阈值做规则触发。
+2. 读取
+   可能读取：
+   1. `packet.units[*].metadata[signal_key]`
+   2. `packet.observation.metadata["trigger"]["signals"]`
+   3. `packet.trace["signals"]`
+   4. `store.metadata["trigger_signals"]`
+   5. store 的 layer pressure 快照
+3. 写回
+   1. 写 `packet.decisions`
+   2. 某些情况下写 `packet.decisions_store`
+      尤其是 `signal_key == "memory_pressure"` 时
+   3. 写 `packet.trace["write_trigger"]`
+4. 主要参数
+   1. `signal_key`
+      要读取的信号名。
+   2. `threshold`
+      阈值。
+   3. `comparator`
+      支持 `>`, `>=`, `<`, `<=`, `==`。
+   4. `signal_source`
+      取值有：
+      1. `auto`
+      2. `observation`
+      3. `trace`
+      4. `store`
+      5. `unit_metadata`
+   5. `aggregate`
+      取值有：
+      1. `broadcast`
+      2. `per_unit`
+      3. `any_unit`
+      4. `all_units`
+   6. `missing_value`
+      信号缺失时可替代使用的默认值。
+   7. `target_layer`
+      当 `signal_key == "memory_pressure"` 时，用于指定要看的 layer。
+5. 特殊行为
+   1. `memory_pressure` 是这个类的一个特殊信号，不是简单从 metadata 里取值。
+   2. 当按 memory pressure 判定为真时，通常会把对应 layer 的全部 records 放进 `packet.decisions_store`，方便后续维护模块直接处理整层。
+
+### 4.6 `LLMJudgeTrigger`
+
+1. 功能
+   用真实 LLM 判断当前是否应触发。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.observation`
+   3. `packet.placements`（演化 trigger 时）
+   4. `store` 的 layer 总结
+   5. `packet.trace`
+   6. `self.prompt`
+3. 写回
+   1. 写 `packet.decisions`
+   2. 写 `packet.trace["write_trigger"]`
+   不改 `store`。
+4. 主要参数
+   1. `prompt`
+      Judge prompt，可为 `PromptPlan`。
+   2. `decision_mode`
+      取值：
+      1. `bool`
+      2. `score`
+      3. `label`
+   3. `threshold`
+      对 `score` 模式或者可转 score 的输出生效。
+   4. `per_unit`
+      为 `True` 时逐 unit 调用 judge。
+      为 `False` 时只判一次，然后广播给所有 unit。
+5. 特殊行为
+   1. LLM 输出不是固定只能有一个字段，它可以带 `reason`、`confidence` 等辅助字段。
+   2. 但最终决定只按 `decision_mode` 的规则归一化。
+
+## 5. `organization`
+
+当前公开 module：
+
+1. `AppendOrganization`
+2. `FanoutIngestOrganization`
+3. `GraphAppendOrganization`
+4. `GraphDeduplicationAppendOrganization`
+5. `GraphEntityDeduplicationAppendOrganization`
+6. `HierarchicalOrganization`
+7. `LLMFunctionCallOrganization`
+
+### 5.1 `AppendOrganization`
+
+1. 功能
+   把被 `write_trigger` 选中的 unit 直接 append 到固定 layer。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.decisions`
+3. 写回
+   1. 为每个 unit 都写 `packet.placements`
+   2. 对 `decision=True` 的 unit 调用 `store.append(...)`
+   3. 写 `packet.trace["organization"]`
+4. 主要参数
+   1. `target_layer`
+      目标 layer 名。
+5. 输出变量位置
+   1. `packet.placements[i].target_layer`
+   2. trace 中的 `written_record_ids`
+6. 特殊行为
+   1. 即使某个 unit 没通过 trigger，也仍然会有 placement，只是不会写 store。
+   2. 它是 `MemoryPipeline` 默认 organization。
+
+### 5.2 `FanoutIngestOrganization`
+
+1. 功能
+   从某个 iterable string 字段里取出多条文本，逐条喂给一个子 `MemoryPipeline.ingest(...)`。
+2. 读取
+   优先读取 `packet.observation.metadata[field]`。
+   如果 observation metadata 没有该字段，则会回退读取：
+   `packet.units[0].metadata["representation"][field]`。
+3. 写回
+   1. 不写 `packet.placements`
+   2. 会实际修改 `store`，因为子 pipeline 会执行 ingest
+   3. 写 `packet.trace["organization"]`
+4. 主要参数
+   1. `field`
+      要 fanout 的字段名。
+   2. `pipeline`
+      子 `MemoryPipeline`。
+5. 特殊行为
+   1. 只有字符串成员会被 fanout；非字符串会跳过。
+   2. 空字符串也会跳过。
+   3. trace 会带：
+      1. `fanout_count`
+      2. `skipped_reasons`
+      3. `child_traces`
+   4. 这个类非常适合“先抽 facts / thoughts / triples，再逐条进子 pipeline”的组织方式。
+
+### 5.3 `GraphAppendOrganization`
+
+1. 功能
+   把 unit 追加到 Graph layer，并补齐标准化 graph metadata。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.decisions`
+   3. unit 上已有的 `entities`、`triples`、embedding、note payload 等
+3. 写回
+   1. 写 `packet.placements`
+   2. 向 `store` 写 graph record
+   3. 写 `packet.trace["organization"]`
+4. 主要参数
+   1. `target_layer`
+      必须是 Graph shape 的 layer。
+   2. `separate`
+      为 `True` 时，原文本与 triple graph 记录分层写。
+   3. `separate_layer`
+      `separate=True` 时原文本写入的 side layer。
+5. 输出字段说明
+   graph record 的 `record.metadata["graph"]` 至少会标准化出：
+   1. `graph.layer`
+   2. `graph.shape`
+   3. `graph.entities`
+   4. `graph.triples`
+   5. `graph.links`
+   6. `graph.node_count`
+   7. `graph.link_count`
+   8. `graph.last_linked_at`
+   9. `graph.link_history`
+6. 特殊行为
+   1. `separate=False` 时，一个 unit 只写一条 graph record。
+   2. `separate=True` 时，会先写 source 文本 record 到 `separate_layer`，再写 triple graph record 到 `target_layer`。
+   3. 它保留 unit 上已有 metadata，所以也可承接 A-MEM / note-graph 风格写入。
+
+### 5.4 `GraphDeduplicationAppendOrganization`
+
+1. 功能
+   图写入前先做 top-1 embedding 相似度去重；超过阈值就 merge，否则 append。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.decisions`
+   3. `target_layer` 现有 graph records
+   4. unit 自身 embedding，或者 store/runtime 补出来的 embedding
+3. 写回
+   1. 写 `packet.placements`
+   2. 对命中的记录走 `store.replace_record(...)`
+   3. 对未命中的记录走 `store.append(...)`
+   4. 写 `packet.trace["organization"]`
+4. 主要参数
+   1. `target_layer`
+      Graph layer。
+   2. `threshold`
+      top-1 相似度严格大于该值时才 merge。
+   3. `separate`
+      是否额外保留原始 source 记录。
+   4. `separate_layer`
+      `separate=True` 时 source record 的 layer。
+5. 特殊行为
+   1. 如果 unit 自身没有 embedding，会尝试：
+      1. `store.embedding_for_record(...)`
+      2. 再退回 runtime 实时 embed
+   2. merge 时会：
+      1. 更新 text
+      2. 更新 embedding
+      3. 合并 triples
+      4. 保留已有 graph links
+   3. trace 的 `effects` 会区分：
+      1. `merge`
+      2. `append`
+      3. `skipped`
+
+### 5.5 `GraphEntityDeduplicationAppendOrganization`
+
+1. 功能
+   不是以整条 unit 为粒度 dedup，而是按 entity 粒度逐个 merge-or-append。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.decisions`
+   3. `unit.entities`
+   4. `unit.metadata["representation"]["entity_embeddings"]`
+   5. 目标 graph layer 的现有 records
+3. 写回
+   1. 写 `packet.placements`
+   2. 逐 entity 更新或新增 graph records
+   3. 写 `packet.trace["organization"]`
+4. 主要参数
+   与 `GraphDeduplicationAppendOrganization` 相同：
+   1. `target_layer`
+   2. `threshold`
+   3. `separate`
+   4. `separate_layer`
+5. 特殊行为
+   1. 只有存在 entity embedding 的 entity 才能参与 dedup。
+   2. 某个 entity 没 embedding 时，会记录 `skipped_entity_missing_embedding`。
+   3. 新写入的 record 文本可能直接是 entity 文本，而不是原始整句 unit 文本。
+   4. 非常适合“每个实体一条节点”的图谱写入。
+
+### 5.6 `HierarchicalOrganization`
+
+1. 功能
+   对 source layer 中被选中的记录做分组、抽取、聚合，再写到更高层记忆。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.decisions`
+   3. `packet.decisions_store` 或 source layer 扫描结果
+   4. `store`
+   5. 可选 `prompt`
+   6. 可选 `memory_pipeline`
+3. 写回
+   1. 会生成 `packet.placements`
+   2. 会通过子 `memory_pipeline.ingest(...)` 或内部层级写入逻辑修改 `store`
+   3. 写 `packet.trace["organization"]`
+4. 主要参数
+   1. `source_layer`
+      从哪一层取原始 records。
+   2. `extract_mode`
+      控制如何抽取聚合内容。
+   3. `extract_fields`
+      抽取哪些字段。
+   4. `group_by`
+      按哪些字段分组。
+   5. `prompt`
+      可选，用于 LLM / 模板驱动的聚合。
+   6. `target_layer`
+      高层结果写入层。
+   7. `memory_pipeline`
+      如果提供，就把抽出的高层结果交给这个子 pipeline 去 ingest。
+5. 特殊行为
+   1. 这个类的核心不是“把当前 unit 原样写进去”，而是“基于 source layer 做高层抽象”。
+   2. trace 会记录：
+      1. `selection_source`
+      2. `selected_record_count`
+      3. `group_count`
+      4. `sub_ingest_trace`
+      5. `prompt_trace`
+
+### 5.7 `LLMFunctionCallOrganization`
+
+1. 功能
+   在 organization 阶段让 LLM 通过 write tools 决定 add / update / delete / graph link 操作。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.decisions`
+   3. 当前 `store`
+   4. `prompt`
+   5. tool specs
+3. 写回
+   1. 一定会写 `packet.placements`
+   2. 根据 tool call 实际修改 `store`
+   3. 写 `packet.trace["organization"]`
+4. 主要参数
+   1. `prompt`
+      给 LLM 的主 prompt，可是 `PromptPlan`。
+   2. `tools`
+      可以是内置字符串工具名，也可以是 `WriteToolSpec`。
+   3. `target_layer`
+      没有在 tool 参数里显式给出 layer 时的默认落点。
+   4. `max_turns`
+      最多几轮 tool-calling。
+   5. `strict_tools`
+      tool 执行失败时是否直接抛异常。
+   6. `allow_no_tool_call`
+      是否允许 LLM 一次 tool 都不调。
+   7. `api_key` / `base_url` / `model` / `embedding_model`
+      runtime 配置。
+5. 重要上下文变量
+   prompt 渲染时会额外提供：
+   1. `unit`
+   2. `tools`
+   3. `default_target_layer`
+   4. `visible_records`
+6. 特殊行为
+   1. organization 阶段的 `visible_records` 默认是整个 store。
+   2. 如果 prompt 里配置了 recall plan / visible record label，它还能在渲染 prompt 时先做一轮 recall，再把 recall 命中的 records 并入 `visible_records`。
+   3. 每个 unit 单独跑一遍 tool-calling，因此 trace 里是 `per_unit` 结构。
+
+## 6. `evolution_trigger`
+
+当前公开 module：
+
+1. `NeverTrigger`
+2. `StoreAllTrigger`
+3. `BoundaryEventTrigger`
+4. `RuntimeEventTrigger`
+5. `ScalarRuleTrigger`
+6. `LLMJudgeTrigger`
+7. `PeriodicMaintenanceTrigger`
+8. `IdleMaintenanceTrigger`
 
 说明：
 
-- A-MEM / note-graph 风格的富表示现在推荐直接组合多个 `LLMRepresentation`，分别生成 `context`、`keywords`、`tags`、`category`、`attributes`，再接 `ConfigurableEmbeddingRepresentation`。
+1. 除了 `PeriodicMaintenanceTrigger` 和 `IdleMaintenanceTrigger`，其余语义和 write_trigger 版相同，只是 trace key 改为 `packet.trace["evolution_trigger"]`。
+2. evolution trigger 阶段通常要求 `packet.placements` 已经存在并与 `packet.units` 对齐。
 
-## `write_trigger`
+### 6.1 `NeverTrigger`
 
-决定当前输入 unit 是否进入写入/组织阶段。
+1. 功能
+   所有 unit 都不进入演化。
+2. 读取
+   读取 `packet.units`，以及演化阶段需要的 `packet.placements` 对齐关系。
+3. 写回
+   写 `packet.decisions = [False, ...]`。
+   写 `packet.trace["evolution_trigger"]`。
+   不改 `store`。
+4. 特殊行为
+   它是 `MemoryPipeline` 默认的 evolution trigger。
 
-说明：
+### 6.2 `StoreAllTrigger`
 
-- 所有 trigger 都有 `slot` 参数，必须是 `write_trigger` 或 `evolution_trigger`。
-- `packet.decisions` 仍然是下游最稳定的布尔决策接口。
-- `packet.decisions_store` 是并行的 store 级选择结果，用于“选中已有 records 而不是只选中当前输入 unit”的场景。
-- `StoreAllTrigger` 只补 `packet.decisions_store`，不主动生成新的 `packet.decisions`。
+1. 功能
+   与 write 阶段同名类相同，用于选出 store 中全部历史 records。
+2. 读取
+   读取 `store`。
+3. 写回
+   主写 `packet.decisions_store`，并保留已有 `packet.decisions`。
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `AlwaysTrigger` | `slot="write_trigger"` | 所有 unit 均触发。 |
-| `NeverTrigger` | `slot="write_trigger"` | 所有 unit 均不触发。 |
-| `StoreAllTrigger` | `slot="write_trigger"` | 不改 `packet.decisions`，只把所有非空 layer 的全部 records 写入 `packet.decisions_store`。 |
-| `BoundaryEventTrigger` | `slot="write_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False` | 根据 `session/turn/chunk/subgoal/episode` 等结构边界事件触发，并可映射到同类 store records。 |
-| `RuntimeEventTrigger` | `slot="write_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False`, `target_layer=None`, `pressure_threshold=None` | 根据 runtime 事件或 `memory_pressure` 触发。 |
-| `ScalarRuleTrigger` | `slot="write_trigger"`, `signal_key`, `threshold`, `comparator=">="`, `signal_source="auto"`, `aggregate="broadcast"`, `missing_value=None`, `target_layer=None` | 根据显式标量信号触发，如分数、预算压力、置信度。 |
-| `LLMJudgeTrigger` | `slot="write_trigger"`, `prompt`, `decision_mode="bool"`, `threshold=0.5`, `per_unit=True` | 用真实模型和 `PromptPlan` 风格 prompt 做触发判断。 |
-| `PeriodicMaintenanceTrigger` | `slot="write_trigger"`, `every_n`, `counter_key="ingest_count"`, `decision_mode="broadcast"` | 按计数周期触发。 |
-| `IdleMaintenanceTrigger` | `slot="write_trigger"`, `min_idle_seconds=None`, `accepted_events=("idle", "sleep", "background_idle")`, `decision_mode="broadcast"` | 在空闲维护窗口触发。 |
+### 6.3 `BoundaryEventTrigger`
 
-## `organization`
+1. 功能
+   根据 session / turn / episode 等边界触发维护。
+2. 特殊行为
+   如果能解析出边界匹配值，会把同边界的历史 records 放进 `decisions_store`，这在层级汇总和周期性维护里很常见。
 
-决定当前 unit 写到哪个 layer，以及以什么写入形状落库。
+### 6.4 `RuntimeEventTrigger`
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `AppendOrganization` (`append_organization`) | `target_layer="default"` | 直接 append 到固定 layer。 |
-| `GraphAppendOrganization` (`graph_append_organization`) | `target_layer="knowledge_graph"`, `separate=False`, `separate_layer=None` | 向图层追加记录，并维护 graph metadata；保留 unit 上已有的 note payload 等 metadata，因而也可承接 A-MEM 风格的 note graph 写入；`separate=True` 时原文本与 triple 记录可分层落库。 |
-| `GraphDeduplicationAppendOrganization` (`graph_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 向图层写入前先与同 layer 现有 graph records 做 embedding top-1 相似度匹配；若 `similarity > threshold`，则原地合并节点并更新 text / embedding / triples，否则正常 append；`separate=True` 时 source 文本仍可单独落到 side layer。 |
-| `GraphEntityDeduplicationAppendOrganization` (`graph_entity_deduplication_append_organization`) | `target_layer="knowledge_graph"`, `threshold`, `separate=False`, `separate_layer=None` | 保持 `GraphDeduplicationAppendOrganization` 的阈值去重与 provenance 语义，但按 entity 独立执行 merge-or-append：每个 entity 用自己的 entity embedding 与现有 graph records 比较，相似度超过阈值时合并到命中节点，否则追加一个新的 entity 节点；缺少该 entity embedding 时只跳过该 entity。 |
-| `HierarchicalOrganization` (`hierarchical_organization`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 对选中的 source-layer records 做抽象聚合，再通过子 `MemoryPipeline.ingest()` 写入高层记忆。 |
-| `LLMFunctionCallOrganization` (`llm_function_call_organization`) | `prompt`, `tools`, `target_layer=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM tool call 在 organization 阶段执行 `add / update / delete` 等写操作。 |
+1. 功能
+   根据运行时事件或内存压力触发维护。
+2. 特殊行为
+   在演化阶段，如果按 `memory_pressure` 计算且 `packet.placements` 可解析出目标层，就可以不显式写 `target_layer`。
 
-## `evolution_trigger`
+### 6.5 `ScalarRuleTrigger`
 
-决定是否继续执行 `memory_evolution`。
+1. 功能
+   根据分数、预算、压力等标量信号触发维护。
+2. 特殊行为
+   如果 `aggregate` 不是 `broadcast`，则会按 unit 或 layer 细分判定。
 
-说明：
+### 6.6 `LLMJudgeTrigger`
 
-- 可用 trigger 类与 `write_trigger` 相同，只是 `slot` 取值不同。
-- 某些 trigger 更常见于维护/演化，如 `PeriodicMaintenanceTrigger`、`IdleMaintenanceTrigger`。
+1. 功能
+   用 LLM 判断当前是否值得做演化。
+2. 特殊行为
+   演化阶段 prompt 里还会多拿到 placement 信息，便于判断目标层与演化需求。
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `AlwaysTrigger` | `slot="evolution_trigger"` | 所有 unit 进入演化。 |
-| `NeverTrigger` | `slot="evolution_trigger"` | 所有 unit 不进入演化。 |
-| `StoreAllTrigger` | `slot="evolution_trigger"` | 补 `packet.decisions_store`，不改 `packet.decisions`。 |
-| `BoundaryEventTrigger` | `slot="evolution_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False` | 根据结构边界事件触发演化。 |
-| `RuntimeEventTrigger` | `slot="evolution_trigger"`, `accepted_events`, `match_mode="any"`, `default_decision=False`, `invert=False`, `target_layer=None`, `pressure_threshold=None` | 根据 runtime 事件或 `memory_pressure` 触发演化。 |
-| `ScalarRuleTrigger` | `slot="evolution_trigger"`, `signal_key`, `threshold`, `comparator=">="`, `signal_source="auto"`, `aggregate="broadcast"`, `missing_value=None`, `target_layer=None` | 根据显式标量规则触发演化。 |
-| `LLMJudgeTrigger` | `slot="evolution_trigger"`, `prompt`, `decision_mode="bool"`, `threshold=0.5`, `per_unit=True` | 用模型判断哪些 unit 或阶段需要演化。 |
-| `PeriodicMaintenanceTrigger` | `slot="evolution_trigger"`, `every_n`, `counter_key="ingest_count"`, `decision_mode="broadcast"` | 周期性触发维护。 |
-| `IdleMaintenanceTrigger` | `slot="evolution_trigger"`, `min_idle_seconds=None`, `accepted_events=("idle", "sleep", "background_idle")`, `decision_mode="broadcast"` | 空闲维护窗口触发。 |
+### 6.7 `PeriodicMaintenanceTrigger`
 
-## `memory_evolution`
+1. 功能
+   只有在周期调度命中时，才调用一个“被包裹的 trigger”。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.observation.metadata["trigger"]["schedule"]`
+   3. `store.metadata[counter_key]`
+3. 写回
+   1. 周期未命中时，不重写 `packet.decisions`，只补 trace。
+   2. 周期命中时，转而运行内部 `trigger`，并把其结果写回 packet。
+4. 主要参数
+   1. `every_n`
+      每多少 tick 触发一次。
+   2. `counter_key`
+      默认 `ingest_count`。
+   3. `trigger`
+      真正被包裹执行的 trigger，slot 必须一致。
+5. 特殊行为
+   1. 这是一个 wrapper，不自己做最终判断。
+   2. trace 会同时带：
+      1. 周期调度信息
+      2. 内部 trigger 的结果
 
-在组织完成后，对新写入内容或旧记录做追加、重写、迁移、连边、反思生成等演化。
+### 6.8 `IdleMaintenanceTrigger`
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `AppendOnlyEvolution` (`append_only_evolution`) | 无额外参数 | 不额外改 store，只沿用组织阶段结果。 |
-| `TraceOnlyEvolution` (`trace_only_evolution`) | 无额外参数 | 不改 store，只在 trace 中保留显式占位信息。 |
-| `SummaryRewriteEvolution` (`summary_rewrite_evolution`) | `target_layer="default"` | 为激活内容生成摘要并写入目标层。 |
-| `LayerMoveEvolution` (`layer_move_evolution`) | `target_layer="default"` | 把激活记录复制/迁移到另一层。 |
-| `GraphLinkEvolution` (`graph_link_evolution`) | `target_layer="knowledge_graph"`, `neighbor_limit=2`, `bidirectional=True`, `min_score=0.1`, `rewrite_neighbor_metadata=False` | 在图层记录间建立或更新 links。 |
-| `GraphNeighborContextTraceEvolution` (`graph_neighbor_context_trace_evolution`) | `target_layer="knowledge_graph"`, `rewrite_metadata=False` | 跟踪图邻居上下文，并可保守回写 metadata。 |
-| `HierarchicalEvolution` (`hierarchical_evolution`) | `source_layer`, `extract_mode`, `extract_fields`, `group_by=()`, `prompt=None`, `target_layer=None`, `memory_pipeline=None` | 基于 `packet.decisions_store` 或 source-layer 扫描，做高层抽象和分层持久化。 |
-| `LLMFunctionCallEvolution` (`llm_function_call_evolution`) | `prompt`, `tools`, `source_layer=None`, `target_layer=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 用 LLM tool call 对已有 records 做新增、更新、删除等演化操作。 |
+1. 功能
+   在系统空闲窗口触发维护。
+2. 读取
+   读取：
+   1. `packet.events`
+   2. `packet.observation.metadata["trigger"]["schedule"]["idle_seconds"]`
+3. 写回
+   写 `packet.decisions`。
+   写 `packet.trace["evolution_trigger"]`。
+4. 主要参数
+   1. `min_idle_seconds`
+      空闲秒数阈值。
+   2. `accepted_events`
+      哪些 runtime event 算作 idle 窗口。
+   3. `decision_mode`
+      当前只影响 trace 语义，公开可选值是 `broadcast` / `per_unit`。
+5. 特殊行为
+   1. 只要“观察到 idle event”或者“idle_seconds 超阈值”任一成立，就会触发。
 
-## `retrieval`
+## 7. `memory_evolution`
 
-从 store 取回和 query 相关的记录。
+当前公开 module：
 
-说明：
+1. `AppendOnlyEvolution`
+2. `TraceOnlyEvolution`
+3. `SummaryRewriteEvolution`
+4. `LayerMoveEvolution`
+5. `GraphLinkEvolution`
+6. `GraphNeighborContextTraceEvolution`
+7. `HierarchicalEvolution`
+8. `LLMFunctionCallEvolution`
 
-- 对“以 query 驱动”的 retrieval module，如果 `packet.queries` 非空，则默认按 query 顺序逐个执行检索，再合并回一个扁平的 `packet.retrieved`。
-- `QueryRewriteRetrieval` 是一个 retrieval wrapper：它先把 `packet.query` 改写成一个或多个 query，再把改写后的 `packet.query` / `packet.queries` 交给内部 retriever。
-- 默认合并策略是 `query_order_dedupe`：
-  - 先保留每个 query 自己的原始排序语义
-  - 合并时按 query 顺序拼接
-  - 以 `record_id` 去重；同一 record 被多个 query 命中时保留第一次出现的那一份
-- 合并后的 `packet.retrieved.trace` 会额外包含：
-  - `query_count`
-  - `query_ids`
-  - `merge_strategy`
-  - `per_query`
-  - `final_returned_count`
-- `DispatchRetrieval` 仍然只表示“多 retrieval module 分发”；它不会额外改变上述多 query 默认语义。
+### 7.1 `AppendOnlyEvolution`
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `RecencyRetrieval` (`recency_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按时间新近性检索。 |
-| `KeywordCountRetrieval` (`keyword_count_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 按 token 命中数排序。 |
-| `MetadataRetrieval` (`metadata_retrieval`) | `top_k=3`, `field`, `target`, `match_mode="exact"`, `layer=None`, `source="store"` | 按 `record.metadata[field]` 过滤记录；默认做大小写不敏感的 exact match，`match_mode="regex"` 时按正则匹配；若字段值是 `list` / `tuple` / `set` 等 iterable，则逐成员匹配，命中任一成员即可。 |
-| `EmbeddingSimilarityRetrieval` (`embedding_similarity_retrieval`) | `top_k=3`, `layer=None`, `embedding_model="sentence-transformers/all-MiniLM-L6-v2"`, `source="store"` | 按 embedding 相似度检索。 |
-| `EntityRetrieval` (`entity_retrieval`) | `top_k=3`, `layer=None` | 按 query 与 entities 的重叠度检索。 |
-| `BM25Retrieval` (`bm25_retrieval`) | `top_k=3`, `layer=None`, `source="store"` | 对文本和关键词做 BM25 排序。 |
-| `GraphNeighborRetrieval` (`graph_neighbor_retrieval`) | `top_k=3`, `layer="knowledge_graph"`, `include_seed_records=False` | 从 seed 记录出发扩展图邻居。 |
-| `ExpandRetrievedGraphNeighbors` (`expand_retrieved_graph_neighbors`) | `top_k=3`, `layer="knowledge_graph"`, `include_seed_records=True`, `per_seed_top_k=None`, `dedupe=True` | 以当前 `packet.retrieved.items` 为种子继续做一跳图邻居扩展。 |
-| `VectorGraphSeedAndExpandRetrieval` (`vector_graph_seed_and_expand_retrieval`) | `top_k=3`, `layer="knowledge_graph"`, `candidate_k=5`, `neighbor_expansion_k=3`, `note_namespace="note"`, `default_category="Uncategorized"`, `agentic_search=False`, `query_expand_with_llm=False`, `prompt=None` | 一个 retrieval wrapper：先用 `EmbeddingSimilarityRetrieval` 做 graph-vector layer 的 seed 检索，再把 seed 交给 `ExpandRetrievedGraphNeighbors` 扩邻居；外层只额外负责 note payload 投影、可选 LLM query expansion 和可选 agentic rerank。 |
-| `LayerAwareRetrieval` (`layer_aware_retrieval`) | `default_retriever=None`, `retriever_by_layer=None`, `active_layers=None`, `top_k=3`, `top_k_by_layer=None`, `merge_weight_by_layer=None`, `merge_strategy="global_rank"` | 分层调用不同 retriever，再合并结果。 |
-| `BufferRetrieval` (`buffer_retrieval`) | `top_k=3`, `layer="reflections"`, `chronological=True` | 读取某个 layer 的有界 recency window。 |
-| `QueryRewriteRetrieval` (`query_rewrite_retrieval`) | `retriever`, `strategy="llm"`, `prompt=None`, `allow_multi_query=False`, `regex_rules=None`, `include_original=False`, `max_queries=None`, `strip_queries=True`, `drop_empty_queries=True` | 先做 query rewrite，再委托内部 retriever 执行。`strategy="llm"` 时要求 `prompt`，返回严格 JSON 的单 query 或多 query；`strategy="regex"` 时按顺序应用 `regex_rules`，当前只产出单 query。 |
+1. 功能
+   一个显式 no-op 演化模块，只记录哪些 unit 在演化阶段是 active 的。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.placements`
+   3. `packet.decisions`
+3. 写回
+   只写 `packet.trace["memory_evolution"]`。
+   不改 `store`。
+4. 特殊行为
+   适合“组织阶段已经写完，演化阶段先不开启真实维护”的 pipeline。
 
-## `readout`
+### 7.2 `TraceOnlyEvolution`
 
-把 retrieval 结果整理成最终输出。
+1. 功能
+   也是 no-op，但会显式写出每个 active unit 的 effect placeholder。
+2. 读取
+   读取 `packet.units`、`packet.placements`、`packet.decisions`。
+3. 写回
+   只写 `packet.trace["memory_evolution"]["effects"]`。
+   不改 `store`。
+4. 特殊行为
+   适合测试、trace 占位、调试下游逻辑。
 
-| Module | 构造参数 | 效果 |
-| --- | --- | --- |
-| `ConcatenateReadout` (`concatenate_readout`) | `separator="\n"` | 直接拼接 retrieval items。 |
-| `JSONReadout` (`json_readout`) | 无额外参数 | 输出 JSON 字符串。 |
-| `GraphReadout` (`graph_readout`) | `include_links=True` | 展示图记录及 links。 |
-| `PromptContextReadout` (`prompt_context_readout`) | `memory_layer="reflections"`, `default_strategy="reflexion"`, `top_k=3` | 把 recall 结果整理成 prompt context。 |
-| `NoteRenderReadout` (`note_render_readout`) | `note_namespace="note"`, `default_category="Uncategorized"`, `include_context=True`, `include_tags=True` | 渲染富 note payload。 |
-| `MidDecodingMemoryReadout` (`mid_decoding_memory_readout`) | `prompt`, `retrieve_pipeline`, `tools=None`, `max_turns=6`, `strict_tools=True`, `allow_no_tool_call=True`, `runtime_now_factory=None`, `api_key=None`, `base_url=None`, `model=None`, `embedding_model=None` | 在 readout 阶段复用 `Runtime.run_agent(..., tools=..., max_turns=...)` 做多轮 tool-calling answer generation。第一版默认只内建 `MEM_READ`：LLM 可在生成中途用 JSON 参数触发一次子 recall，再继续完成最终答案。最终仍返回标准 `Readout(text, source_ids, metadata)`，其中 `source_ids` 汇总所有 `MEM_READ` 命中的 `record_id`。 |
-| `TemplateReadout` (`template_readout`) | `prompt`, `filters=None`, `missing_value=""`, `note_namespace="note"`, `default_category="Uncategorized"`, `runtime_now_factory=None` | 通过模板系统把 recall 结果渲染成可控文本，是当前 template prompt/readout 的统一公开入口。 |
+### 7.3 `SummaryRewriteEvolution`
 
-## Tool Call 写路径
+1. 功能
+   对 active units 生成摘要版本，并把摘要作为新 record append 到目标层。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.placements`
+   3. `packet.decisions`
+   4. `unit.metadata["representation"]["summary"]`
+   5. `unit.metadata["representation"]["description"]`
+   6. `unit.description`
+3. 写回
+   向 `store` append 新 record。
+   写 `packet.trace["memory_evolution"]`。
+4. 主要参数
+   1. `target_layer`
+      摘要写到哪一层。
+5. 特殊行为
+   摘要文本来源优先级是：
+   1. `representation.summary`
+   2. `representation.description`
+   3. `unit.description`
+   4. `unit.text`
 
-### 适用模块
+### 7.4 `LayerMoveEvolution`
 
-当前支持 tool call 写操作的 baseline module：
+1. 功能
+   把 active units 复制写入另一个 layer。
+2. 读取
+   读取 `packet.units`、`packet.placements`、`packet.decisions`。
+3. 写回
+   向 `target_layer` append 新 record。
+   写 `packet.trace["memory_evolution"]`。
+4. 主要参数
+   1. `target_layer`
+      新 record 的 layer。
+5. 特殊行为
+   1. 当前是 copy-append，不删除原记录。
+   2. 新 record metadata 会带：
+      1. `evolution_source_unit_id`
+      2. `move_style = "copy_append"`
 
-- `LLMFunctionCallOrganization`
-- `LLMFunctionCallEvolution`
+### 7.5 `GraphLinkEvolution`
 
-二者共享同一套工具协议、参数校验规则和 trace 结构。
+1. 功能
+   在 graph layer 内，为当前 active graph record 自动寻找邻居并建立 links。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.placements`
+   3. `packet.decisions`
+   4. `target_layer` 当前所有 graph records
+3. 写回
+   1. 对目标 graph record 调用 `store.add_graph_links(...)`
+   2. 可选地 rewrite 当前目标 record 的 `neighbor_context`
+   3. 写 `packet.trace["memory_evolution"]`
+4. 主要参数
+   1. `target_layer`
+      必须是 graph layer。
+   2. `neighbor_limit`
+      最多保留多少个邻居候选。
+   3. `bidirectional`
+      是否建立双向 link。
+   4. `min_score`
+      候选邻居的最小总分阈值。
+   5. `rewrite_neighbor_metadata`
+      是否把邻居上下文快照写回目标 record metadata。
+5. 特殊行为
+   候选邻居总分由两部分组成：
+   1. 结构分
+      由 entity overlap 和文本 token overlap 构成。
+   2. embedding 分
+      当前 record embedding 和候选 embedding 的 cosine。
 
-### 九种默认工具
+### 7.6 `GraphNeighborContextTraceEvolution`
 
-当前内置九种 built-in write tools，传给 `tools=[...]` 时使用字符串名字即可：
+1. 功能
+   读取 graph record 的已连接邻居，记录邻居上下文快照。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.placements`
+   3. `packet.decisions`
+   4. graph 邻居关系
+3. 写回
+   1. 默认只写 trace
+   2. `rewrite_metadata=True` 时，会把 `neighbor_context` 回写到目标 graph record
+4. 主要参数
+   1. `target_layer`
+   2. `rewrite_metadata`
+5. 特殊行为
+   适合只想“追踪邻居上下文”而不想主动重连边的场景。
 
-| 工具名 | 作用 | 参数 schema 概要 | 备注 |
-| --- | --- | --- | --- |
-| `ADD` | 新增一条普通 memory record | `text` 必填；可带 `target_layer`、`metadata`、`unit_id`、`timestamp` | 若未传 `target_layer`，可回退到模块构造时的默认目标层。 |
-| `UPDATE` | 更新一条已有 record | `record_id` 必填；可带 `text`、`metadata_patch` | 按 `record_id` 全局查找。 |
-| `DELETE` | 删除一条已有 record | `record_id` 必填；可带 `reason` | 调用 `MemoryStore.delete_record(...)`。 |
-| `GRAPH_ADD` | 新增一条 graph record | 与 `ADD` 相同 | 目标层必须是 `Graph`；会规范化 `metadata["graph"]`。 |
-| `GRAPH_UPDATE` | 更新一条 graph record | 与 `UPDATE` 相同 | 记录所在层必须是 `Graph`；会规范化 graph metadata。 |
-| `GRAPH_DELETE` | 删除一条 graph record | 与 `DELETE` 相同 | 删除后会清理同层 dangling graph links。 |
-| `GRAPH_ADD_LINK` | 给一条 graph record 追加 outgoing links | `record_id`、`links` 必填 | 只改 `metadata["graph"]["links"]`，不会改节点文本、entities、triples。 |
-| `GRAPH_UPDATE_LINK` | 全量替换一条 graph record 的 outgoing links | `record_id`、`links` 必填 | 只改边；当前语义是“replace whole outgoing link list”。 |
-| `GRAPH_DELETE_LINK` | 从一条 graph record 删除部分 outgoing links | `record_id`、`links` 必填 | 只删指定边；未命中的 link 会被忽略。 |
+### 7.7 `HierarchicalEvolution`
 
-### 默认工具的行为约定
+1. 功能
+   在 organization 完成后，对已有 records 做层级抽象、生成高层记录，并可做目标层保留窗口裁剪。
+2. 读取
+   读取：
+   1. `packet.units`
+   2. `packet.placements`
+   3. `packet.decisions`
+   4. `packet.decisions_store`
+   5. `store`
+3. 写回
+   1. 向高层写新 records
+   2. `retention_size` 生效时还会直接裁剪 `store.layers[target_layer]`
+   3. 写 `packet.trace["memory_evolution"]`
+4. 主要参数
+   1. `source_layer`
+   2. `extract_mode`
+   3. `extract_fields`
+   4. `group_by`
+   5. `prompt`
+   6. `target_layer`
+   7. `memory_pipeline`
+   8. `selection_mode`
+      当前重要取值：
+      1. `decisions_store_or_scan`
+      2. `latest_active_units`
+   9. `record_text_field`
+      允许生成 richer payload，但指定某个字段作为落库的 `record.text`。
+   10. `retention_size`
+      目标层最多保留最近多少条记录。
+5. 特殊行为
+   1. `latest_active_units` 很适合 Reflexion / RecurrentGPT 这类“刚写完原始记录，立刻只对这批新记录做高层抽象”的模式。
+   2. `retention_size` 不是逻辑标记，而是直接裁剪内存中的 layer 列表。
+   3. trace 会记录：
+      1. `selection_mode`
+      2. `record_text_field`
+      3. `pruned_record_ids`
+      4. `retained_record_ids`
 
-- 所有 built-in tool 都要求 arguments 是 JSON object。
-- 参数校验基于每个工具自己的 `parameters_json_schema`，并执行最小 JSON type 检查。
-- 三个 `GRAPH_*_LINK` built-in 只允许修改 `metadata["graph"]["links"]` / `link_count` / `last_linked_at`，不改节点内容，也不自动维护反向边。
-- 执行结果统一落到 trace：
-  - `tool_calls`
-  - `effects`
-  - `written_record_ids`
-  - `updated_record_ids`
-  - `deleted_record_ids`
-- built-in tool 写出的记录会自动补充 `metadata["llm_tool"]`，记录动作类型、来源模块和模块 slot。
+### 7.8 `LLMFunctionCallEvolution`
 
-### 自定义工具协议
+1. 功能
+   在演化阶段使用 LLM tool-calling 对已有 records 做增删改。
+2. 读取
+   读取：
+   1. `packet.decisions_store`
+   2. 或 `packet.units` + `packet.placements` + `packet.decisions`
+   3. 或 `source_layer`
+   4. 或整个 `store`
+   5. `prompt`
+   6. tool specs
+3. 写回
+   1. 根据 tool 调用修改 `store`
+   2. 写 `packet.trace["memory_evolution"]`
+4. 主要参数
+   1. `prompt`
+   2. `tools`
+   3. `source_layer`
+      如果提供，会限制 selected records 的来源层。
+   4. `target_layer`
+      tool 未显式指定目标层时的默认值。
+   5. `max_turns`
+   6. `strict_tools`
+   7. `allow_no_tool_call`
+   8. `api_key` / `base_url` / `model` / `embedding_model`
+5. 选 record 逻辑
+   selected records 的优先级是：
+   1. 如果 `packet.decisions_store` 有值，优先按它选。
+   2. 否则如果有 `packet.units + placements + decisions`，按 active units 找对应最新 record。
+   3. 再否则，如果设了 `source_layer`，扫该层全部 records。
+   4. 否则扫整个 store。
+6. 特殊行为
+   1. evolution 阶段的 prompt 上下文里有：
+      1. `selected_records`
+      2. `visible_records`
+      3. `source_layer`
+      4. `tools`
+      5. `default_target_layer`
+   2. `visible_records` 默认至少包含 `selected_records`，如果 prompt recall 又命中了别的记录，会并入可见集。
 
-自定义工具通过 `WriteToolSpec` 暴露给 `LLMFunctionCallOrganization` / `LLMFunctionCallEvolution`。
+## 8. `retrieval`
 
-公开类型已在顶层导出：
+当前公开 module：
+
+1. `RecencyRetrieval`
+2. `KeywordCountRetrieval`
+3. `MetadataRetrieval`
+4. `EmbeddingSimilarityRetrieval`
+5. `EntityRetrieval`
+6. `TripleMemoryRetrieval`
+7. `BM25Retrieval`
+8. `GraphNeighborRetrieval`
+9. `ExpandRetrievedGraphNeighbors`
+10. `VectorGraphSeedAndExpandRetrieval`
+11. `LayerAwareRetrieval`
+12. `BufferRetrieval`
+13. `QueryRewriteRetrieval`
+
+### 8.1 `RecencyRetrieval`
+
+1. 功能
+   纯按时间新近性返回最近 `top_k` 条记录。
+2. 读取
+   读取 `packet.query`，但 query 文本只为接口一致性保留，不参与排序。
+   读取 `store` 或 `packet.retrieved`，取决于 `source`。
+3. 写回
+   写 `packet.retrieved` 与 `packet.trace["retrieval"]`。
+   不改 `store`。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `source`
+      只能是：
+      1. `store`
+      2. `retrieved`
+5. 特殊行为
+   1. `source="retrieved"` 时，会对已有 `packet.retrieved.items` 再做一次重排和裁剪。
+
+### 8.2 `KeywordCountRetrieval`
+
+1. 功能
+   按 query token 与 record 文本/关键词的命中数量排序。
+2. 读取
+   读取：
+   1. `packet.query.text`
+   2. `record.text`
+   3. `record.metadata["representation"]["keywords"]`
+3. 写回
+   写 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `source`
+5. 特殊行为
+   同分时按 recency 作为稳定 tie-break。
+
+### 8.3 `MetadataRetrieval`
+
+1. 功能
+   按 metadata 某个字段筛记录。
+2. 读取
+   读取：
+   1. `record.metadata[field]`
+   2. `packet.query`
+      这里只是接口要求，实际不会从 query 自动推 `target`
+3. 写回
+   写 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `top_k`
+   2. `field`
+   3. `target`
+   4. `match_mode`
+      当前支持：
+      1. `exact`
+      2. `regex`
+   5. `layer`
+   6. `source`
+5. 特殊行为
+   1. `exact` 匹配默认大小写不敏感。
+   2. 如果 metadata 字段值是 `list` / `tuple` / `set` 或其他 iterable，会逐成员匹配，只要有一个成员命中就算匹配。
+
+### 8.4 `EmbeddingSimilarityRetrieval`
+
+1. 功能
+   用 query embedding 与 record embedding 做 cosine 相似度检索。
+2. 读取
+   读取：
+   1. `packet.query.embedding`
+   2. 若 query 没 embedding，则读取 `packet.query.text` 现场编码
+   3. `record.embedding`
+3. 写回
+   1. 写 `packet.retrieved`
+   2. 如果 query 原本没有 embedding，会把生成的 embedding 回写到 `packet.query.embedding`
+   3. 写 trace
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `embedding_model`
+   4. `source`
+5. 特殊行为
+   1. 没 embedding 的 record 不参与评分。
+   2. 向量维度不一致的 record 会被跳过，trace 会记录 `skipped_dim_mismatch_count`。
+
+### 8.5 `EntityRetrieval`
+
+1. 功能
+   按 query 实体与 record 实体的重叠度排序。
+2. 读取
+   读取：
+   1. `packet.query.text`
+   2. `record.metadata["representation"]["entities"]`
+3. 写回
+   写 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+5. 特殊行为
+   1. 首先把 query 中首字母大写的 token 当成实体候选。
+   2. 如果实体重叠为 0，再退回普通 token overlap。
+
+### 8.6 `TripleMemoryRetrieval`
+
+1. 功能
+   面向三元组记忆的检索器，先 exact match，不命中时再做 fuzzy slot similarity。
+2. 读取
+   读取：
+   1. `packet.query.text`
+   2. 或 `packet.query.metadata["triple_query"]`
+   3. `record.metadata["representation"]["triples"]`
+   4. `record.metadata["graph"]["triples"]`
+3. 写回
+   写 `packet.retrieved` 和 trace。
+   不改 `store`。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `source`
+   4. `embedding_model`
+   5. `candidate_similarity_threshold`
+      fuzzy 阶段每个 slot 的最小相似度。
+   6. `final_similarity_threshold`
+      fuzzy 阶段 grounded slots 平均分的最小阈值。
+5. Query 结构
+   支持两种写法：
+   1. `Query.metadata["triple_query"] = {"subject": ..., "relation": ..., "object": ...}`
+   2. `query.text = "subject >> relation >> object"`
+   空字符串或 `*` 会被当成 wildcard。
+6. 特殊行为
+   1. exact 阶段只要有结果，就不会进入 fuzzy。
+   2. fuzzy 阶段是逐 grounded slot 算语义相似度，而不是整句相似度。
+   3. score 里会保留 `matched_triples`，便于下游读出真实命中的 triplets。
+
+### 8.7 `BM25Retrieval`
+
+1. 功能
+   用 BM25 对文本和表示层关键词做排序。
+2. 读取
+   读取：
+   1. `packet.query.text`
+   2. `record.text`
+   3. `record.metadata["representation"]["keywords"]`
+3. 写回
+   写 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `source`
+5. 特殊行为
+   1. 如果 query token 对所有文档都没有 overlap，会退回 recency fallback。
+   2. trace 会记录 `used_recency_fallback`。
+
+### 8.8 `GraphNeighborRetrieval`
+
+1. 功能
+   从 query 指定的 graph seed record ids 出发，取一跳邻居。
+2. 读取
+   读取：
+   1. `packet.query.metadata["graph_seed_record_ids"]`
+   2. 或 `packet.query.metadata["graph"]["seed_record_ids"]`
+   3. 可选 `graph_candidate_record_ids`
+   4. graph layer 的 links
+3. 写回
+   写 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `include_seed_records`
+5. 特殊行为
+   1. 结果默认按 graph link 展开顺序返回。
+   2. 如果 query 里给了 candidate filter，只会返回 filter 内的 records。
+
+### 8.9 `ExpandRetrievedGraphNeighbors`
+
+1. 功能
+   不从 query seed ids 出发，而是从当前 `packet.retrieved.items` 继续扩一跳邻居。
+2. 读取
+   读取 `packet.retrieved.items` 作为 seeds。
+3. 写回
+   覆盖写新的 `packet.retrieved`。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `include_seed_records`
+   4. `per_seed_top_k`
+   5. `dedupe`
+5. 特殊行为
+   1. 只有 `packet.retrieved.items` 中 layer 正好等于 `self.layer` 的记录会被当成 seeds。
+   2. `dedupe=True` 时，同一 record 被多个 seed 扩到也只保留一份。
+
+### 8.10 `VectorGraphSeedAndExpandRetrieval`
+
+1. 功能
+   先用向量检索 graph notes 作为 seeds，再扩一跳 graph neighbors，最后可选做 agentic rerank。
+2. 读取
+   读取：
+   1. `packet.query`
+   2. graph vector layer
+   3. note payload
+   4. 可选 query expansion prompt
+3. 写回
+   1. 写 `packet.retrieved`
+   2. 可能回写 `packet.query.embedding`
+   3. 写 trace
+4. 主要参数
+   1. `top_k`
+      最终返回条数。
+   2. `layer`
+      graph+vector layer。
+   3. `candidate_k`
+      第一阶段向量 seed 检索的候选数。
+   4. `neighbor_expansion_k`
+      每个 seed 扩多少一跳邻居。
+   5. `note_namespace`
+      从 record 中读取 note payload 的命名空间。
+   6. `default_category`
+      note payload 修复时的默认分类。
+   7. `agentic_search`
+      是否让 runtime 做二次 agentic rerank。
+   8. `query_expand_with_llm`
+      是否先用 LLM 把 query 改写成适合 note 检索的增强 payload。
+   9. `prompt`
+      query expansion 的 prompt。
+5. 特殊行为
+   1. 这是一个 wrapper，不是新的底层索引结构。
+   2. `query_expand_with_llm=True` 时，embedding 文本不再只是原 query，而是增强后的 note-like 文本。
+   3. `agentic_search=True` 时，最终排序由 runtime.rerank 决定，不再只是 seed+expand 的原始顺序。
+
+### 8.11 `LayerAwareRetrieval`
+
+1. 功能
+   每层用不同 retriever 分别检索，再做全局合并。
+2. 读取
+   读取：
+   1. `packet.query`
+   2. 所有 active layers
+   3. 每层对应 retriever 的输出
+3. 写回
+   写统一的 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `default_retriever`
+      未显式覆盖的层默认用哪个 retriever。
+      不传时默认是同 `top_k` 的 `RecencyRetrieval`。
+   2. `retriever_by_layer`
+      每层专用 retriever。
+   3. `active_layers`
+      不传则用 store topology 全部层。
+   4. `top_k`
+      全局最终返回条数。
+   5. `top_k_by_layer`
+      覆盖单层 retriever 的 top_k。
+   6. `merge_weight_by_layer`
+      合并排序时每层的权重。
+   7. `merge_strategy`
+      目前只支持 `global_rank`。
+5. 特殊行为
+   1. 有数值 score 的结果优先于只有 rank 的结果。
+   2. 数值 score 会乘上 `merge_weight_by_layer[layer]` 后再参加全局排序。
+   3. 每层 retriever 是在 layer-scoped store 视图上运行的。
+
+### 8.12 `BufferRetrieval`
+
+1. 功能
+   从某一层直接读一个有界 recency window，而不是做 query 搜索。
+2. 读取
+   读取 `store.iter_records(layer)`。
+3. 写回
+   写 `packet.retrieved` 和 trace。
+4. 主要参数
+   1. `top_k`
+   2. `layer`
+   3. `chronological`
+      取最近 `top_k` 条后，是否按时间正序返回。
+5. 特殊行为
+   1. 虽然仍要求 `packet.query` 存在，但 query 文本不参与排名。
+   2. 很适合 Reflexion 这类“读最近几条 reflection”。
+
+### 8.13 `QueryRewriteRetrieval`
+
+1. 功能
+   先改写 query，再把改写结果交给内部 retriever。
+2. 读取
+   读取：
+   1. `packet.query`
+   2. `prompt` 或 `regex_rules`
+   3. 内部 retriever
+3. 写回
+   1. 可能写新的 `packet.query`
+   2. 可能写 `packet.queries`
+   3. 最终写 `packet.retrieved`
+   4. 写 trace，并把内部 retriever trace 包在 `query_rewrite` 下
+4. 主要参数
+   1. `retriever`
+      被包装的检索器。
+   2. `strategy`
+      `llm` 或 `regex`。
+   3. `prompt`
+      `strategy="llm"` 时必填。
+   4. `allow_multi_query`
+      是否允许 LLM 一次返回多个 query。
+   5. `regex_rules`
+      `strategy="regex"` 时的改写规则。
+   6. `include_original`
+      是否把原始 query 也并入改写结果。
+   7. `max_queries`
+   8. `strip_queries`
+   9. `drop_empty_queries`
+5. 特殊行为
+   1. 改写后的 query metadata 会带 `rewrite.source`、`rewrite.from_query_id`、`rewrite.index`。
+   2. 多 query 最终仍遵守统一的 `query_order_dedupe` 合并规则。
+
+## 9. `readout`
+
+当前公开 module：
+
+1. `ConcatenateReadout`
+2. `JSONReadout`
+3. `GraphReadout`
+4. `GraphRelationReadout`
+5. `PromptContextReadout`
+6. `NoteRenderReadout`
+7. `MidDecodingMemoryReadout`
+8. `TemplateReadout`
+
+### 9.1 `ConcatenateReadout`
+
+1. 功能
+   直接把 retrieval items 的 `record.text` 拼起来。
+2. 读取
+   读取 `packet.retrieved.items`。
+3. 写回
+   写 `packet.readout` 和 `packet.trace["readout"]`。
+   不改 `store`。
+4. 主要参数
+   1. `separator`
+5. 输出位置
+   1. `readout.text`
+   2. `readout.source_ids`
+
+### 9.2 `JSONReadout`
+
+1. 功能
+   把 retrieval items 渲染成 JSON 字符串。
+2. 读取
+   读取 `packet.retrieved.items`。
+3. 写回
+   写 `readout.text` 为 JSON 字符串。
+4. 特殊行为
+   输出 payload 当前只包含：
+   1. `record_id`
+   2. `layer`
+   3. `text`
+   4. `timestamp`
+   5. `source_ids`
+
+### 9.3 `GraphReadout`
+
+1. 功能
+   用稳定的可读文本格式渲染 graph records。
+2. 读取
+   读取 `packet.retrieved.items` 和每条 record 的 graph metadata。
+3. 写回
+   写 `packet.readout` 和 trace。
+4. 主要参数
+   1. `include_links`
+5. 特殊行为
+   1. 它可以消费 mixed retrieval results，但设计目标是 graph layer。
+   2. `include_links=True` 且没有 links 时会显式输出 `links=<none>`。
+
+### 9.4 `GraphRelationReadout`
+
+1. 功能
+   把“已连接 graph records”的 triples 渲染成关系句子。
+2. 读取
+   读取：
+   1. `packet.retrieved.items`
+   2. `record.metadata["graph"]["links"]`
+   3. `record.metadata["graph"]["triples"]`
+3. 写回
+   写 `packet.readout` 和 trace。
+4. 特殊行为
+   1. 只有 links 非空的 graph records 才会贡献 relation sentence。
+   2. 句子全局去重。
+   3. 如果一条关系句都渲染不出来，会退回直接拼原始 `record.text`。
+
+### 9.5 `PromptContextReadout`
+
+1. 功能
+   把 retrieval 结果整理成下一轮 prompt context，主要服务 Reflexion 风格使用。
+2. 读取
+   读取：
+   1. `packet.query`
+   2. 可选 `packet.retrieved`
+   3. `query.metadata` 中的 strategy / last attempt 信息
+3. 写回
+   写 `packet.readout` 和 trace。
+4. 主要参数
+   1. `memory_layer`
+      从 retrieval items 中哪些 layer 记作“reflections”。
+   2. `default_strategy`
+      默认上下文拼装策略。
+   3. `top_k`
+5. 特殊行为
+   1. `strategy` 允许被 `query.metadata` 覆盖。
+   2. 只有 `reflexion` 和 `last_trial_and_reflexion` 这类策略，`source_ids` 才会包含 reflection records。
+
+### 9.6 `NoteRenderReadout`
+
+1. 功能
+   把 note payload 渲染成更适合人读的 note 视图。
+2. 读取
+   读取：
+   1. `packet.query`
+   2. `packet.retrieved`
+   3. note payload
+3. 写回
+   写 `packet.readout` 和 trace。
+4. 主要参数
+   1. `note_namespace`
+   2. `default_category`
+   3. `include_context`
+   4. `include_tags`
+5. 特殊行为
+   1. 输出里会先放一行 `Query: ...`。
+   2. 如果没取到任何 note，会显式输出 `No enriched notes retrieved.`。
+
+### 9.7 `MidDecodingMemoryReadout`
+
+1. 功能
+   在 readout 阶段再跑一个多轮 tool-calling answer generation，允许模型在生成中途调用记忆检索工具。
+2. 读取
+   读取：
+   1. `packet.query`
+   2. `packet.retrieved`
+   3. `prompt`
+   4. `retrieve_pipeline`
+   5. readout tool specs
+3. 写回
+   1. 写 `packet.readout`
+   2. `readout.source_ids` 会汇总所有 `MEM_READ` 命中的 `record_id`
+   3. 写 `packet.trace["readout"]`
+   4. 可能更新 `store`
+      因为 child recall pipeline 自己也可能有副作用
+4. 主要参数
+   1. `prompt`
+   2. `retrieve_pipeline`
+      mid-decoding 工具真正调用的子 recall pipeline。
+   3. `tools`
+      默认为 `["MEM_READ"]`。
+   4. `max_turns`
+   5. `strict_tools`
+   6. `allow_no_tool_call`
+   7. `runtime_now_factory`
+   8. `api_key` / `base_url` / `model` / `embedding_model`
+5. 特殊行为
+   1. 这是 readout 里的 agentic 模式，不是简单模板渲染。
+   2. `MEM_READ` 的结果不会直接覆盖最终答案，而是作为工具结果回给 LLM，LMM 再继续生成最终自然语言回答。
+
+### 9.8 `TemplateReadout`
+
+1. 功能
+   通过模板系统把 retrieval 结果渲染成最终文本。
+2. 读取
+   读取：
+   1. `packet.retrieved`
+   2. `packet.query`
+   3. `prompt`
+   4. `PromptPlan` recall 相关配置
+3. 写回
+   写 `packet.readout` 和 trace。
+4. 主要参数
+   1. `prompt`
+      可以是普通模板字符串，也可以是完整 `PromptPlan`。
+   2. `filters`
+      当前不支持自定义 filters，传非空会报错。
+   3. `missing_value`
+      模板变量缺失时的替代文本。
+   4. `note_namespace`
+   5. `default_category`
+   6. `runtime_now_factory`
+5. 特殊行为
+   1. `readout.source_ids` 取自模板解析 metadata 里的 `used_record_ids`，不是简单等于 `retrieved.items`。
+   2. 因此一个模板如果只引用了部分 records，`source_ids` 也会更精确。
+
+## 10. 写路径 Tool Call 协议
+
+适用模块：
+
+1. `LLMFunctionCallOrganization`
+2. `LLMFunctionCallEvolution`
+
+### 10.1 写路径上下文对象
+
+公开类型如下：
 
 ```python
 from memprimitive import WriteToolSpec, WriteToolCallContext, WriteToolResult
 ```
 
-协议如下：
+#### `WriteToolSpec`
 
 ```python
 @dataclass(slots=True, frozen=True)
@@ -244,7 +1623,11 @@ class WriteToolSpec:
     description: str
     parameters_json_schema: dict[str, Any]
     executor: Callable[[WriteToolCallContext, dict[str, Any]], WriteToolResult]
+    requires_contracts: tuple[str, ...] = ()
+    produces_contracts: tuple[str, ...] = ()
 ```
+
+#### `WriteToolCallContext`
 
 ```python
 @dataclass(slots=True)
@@ -253,8 +1636,19 @@ class WriteToolCallContext:
     store: MemoryStore
     module_slot: Literal["organization", "memory_evolution"]
     default_target_layer: str | None
+    selected_records: list[MemoryRecord]
     visible_records: list[MemoryRecord]
 ```
+
+注意这里有两个容易混淆的变量：
+
+1. `selected_records`
+   当前演化 / 维护明确选中的 records。
+2. `visible_records`
+   模型在 prompt 里可以看到、也允许当作工具决策参考的 records。
+   它通常包含 `selected_records`，也可能包含 prompt recall 额外召回的记录。
+
+#### `WriteToolResult`
 
 ```python
 @dataclass(slots=True)
@@ -263,296 +1657,249 @@ class WriteToolResult:
     store: MemoryStore
 ```
 
-### 自定义工具实现要求
+### 10.2 九个内置 write tools
 
-- `name` 必须是非空字符串，且在当前模块的 `tools=[...]` 中不能与其他工具重名。
-- `description` 必须是非空字符串，供模型理解用途。
-- `parameters_json_schema` 必须是 object schema；当前运行时只支持顶层 JSON object 参数。
-- `executor(context, arguments)` 负责真正修改 `context.store`，然后返回 `WriteToolResult`。
-- `effects` 建议使用统一字段：
-  - `action`
-  - `record_id`
-  - `layer`
-  - `status`
-  - 以及你的自定义补充字段
+1. `ADD`
+   新增普通 memory record。
+   参数：
+   1. `text` 必填
+   2. `target_layer` 可选
+   3. `metadata` 可选
+   4. `unit_id` 可选
+   5. `timestamp` 可选
+2. `UPDATE`
+   更新已有 record。
+   参数：
+   1. `record_id` 必填
+   2. `text` 可选
+   3. `metadata_patch` 可选
+3. `DELETE`
+   删除已有 record。
+   参数：
+   1. `record_id` 必填
+   2. `reason` 可选
+4. `GRAPH_ADD`
+   新增 graph record，并标准化 `metadata["graph"]`。
+5. `GRAPH_UPDATE`
+   更新 graph record，并重新标准化 graph metadata。
+6. `GRAPH_DELETE`
+   删除 graph record，并清理同层 dangling links。
+7. `GRAPH_ADD_LINK`
+   给一条 graph record 追加 outgoing links。
+   参数：
+   1. `record_id`
+   2. `links`
+8. `GRAPH_UPDATE_LINK`
+   全量替换 outgoing links。
+9. `GRAPH_DELETE_LINK`
+   删除部分 outgoing links。
 
-### 自定义工具最小示例
+### 10.3 默认工具的行为要点
 
-下面是当前仓库演示脚本使用的自定义删除整层工具风格：
+1. 所有工具都要求参数是 JSON object。
+2. 参数检查基于 `parameters_json_schema` 做最小 JSON type 校验。
+3. graph link 三个工具只改：
+   1. `metadata["graph"]["links"]`
+   2. `link_count`
+   3. `last_linked_at`
+   不会顺便改文本或 triples。
+4. tool 执行结果会累计到 trace：
+   1. `tool_calls`
+   2. `effects`
+   3. `written_record_ids`
+   4. `updated_record_ids`
+   5. `deleted_record_ids`
+5. 内置工具写出的 record 会自动补：
+   `metadata["llm_tool"]`
 
-```python
-from memprimitive import WriteToolCallContext, WriteToolResult, WriteToolSpec
+## 11. Readout Tool 协议
 
-def build_delete_layer_tool() -> WriteToolSpec:
-    def _executor(context: WriteToolCallContext, arguments: dict[str, object]) -> WriteToolResult:
-        target_layer = str(arguments.get("target_layer", "")).strip()
-        if not target_layer:
-            raise ValueError("target_layer is required")
+适用模块：
 
-        effects = []
-        for record in list(context.store.iter_records(target_layer)):
-            removed = context.store.delete_record(target_layer, record.record_id)
-            effects.append(
-                {
-                    "action": "delete",
-                    "record_id": removed.record_id,
-                    "layer": removed.layer,
-                    "status": "applied",
-                }
-            )
-        return WriteToolResult(effects=effects, store=context.store)
+1. `MidDecodingMemoryReadout`
 
-    return WriteToolSpec(
-        name="DELETE_LAYER",
-        description="Delete every record in one target layer.",
-        parameters_json_schema={
-            "type": "object",
-            "properties": {
-                "target_layer": {"type": "string"},
-            },
-            "required": ["target_layer"],
-            "additionalProperties": False,
-        },
-        executor=_executor,
-    )
-```
-
-## Template Prompt 写法
-
-### 总览
-
-当前模板系统的统一抽象是 `PromptPlan`。公开构造函数有两个：
-
-```python
-from memprimitive.utils._template import text_prompt, structured_prompt
-```
-
-- `text_prompt(...)`
-  - 适合普通字符串 prompt。
-- `structured_prompt(...)`
-  - 适合“分 block 组织”的结构化 prompt / readout 模板。
-
-任何接受 `PromptPlan | str` 的模块，都可以直接传原始字符串；字符串内部如果包含 `{{ ... }}`，会按模板表达式渲染。
-
-### `text_prompt(...)`
-
-最简单的模板写法：
+### 11.1 公开类型
 
 ```python
-from memprimitive.utils._template import text_prompt
-
-prompt = text_prompt(
-    "Summarize this unit for long-term memory:\n"
-    "unit_id={{ unit.unit_id }}\n"
-    "text={{ unit.text }}\n"
-    "session={{ runtime.session_id }}"
+from memprimitive.utils._mid_decoding_tools import (
+    ReadoutToolSpec,
+    ReadoutToolCallContext,
+    ReadoutToolResult,
 )
 ```
 
-常用参数：
-
-- `template: str`
-- `context_builder=None`
-- `recall_plan=None`
-- `recall_query_builder=None`
-- `missing_value=""`
-- `metadata_mode="prompt"`
-- `sub_recall_pipeline=None`
-
-### `structured_prompt(...)`
-
-结构化模板适合写成“块式 prompt”，便于 API 文档风格地组织任务、上下文、可用工具、候选记录。
-
-基本写法：
+#### `ReadoutToolCallContext`
 
 ```python
-from memprimitive.utils._template import structured_prompt
-
-prompt = structured_prompt(
-    {
-        "blocks": [
-            {
-                "id": "task",
-                "title": "Task",
-                "template": "Decide whether to write the current unit.",
-            },
-            {
-                "id": "unit",
-                "title": "Incoming Unit",
-                "template": "unit_id={{ unit.unit_id }}\ntext={{ unit.text }}",
-            },
-        ]
-    }
-)
+@dataclass(slots=True)
+class ReadoutToolCallContext:
+    packet: Packet
+    store: MemoryStore
+    retrieve_pipeline: Any | None = None
 ```
 
-当前结构化 block 常用字段：
+### 11.2 当前唯一内置 readout tool：`MEM_READ`
 
-- `id`
-- `title`
-- `template`
-- `condition`
-- `repeat_over`
-- `item_template`
-- `separator`
-- `children`
+1. 功能
+   运行一个子 recall pipeline 做记忆读取。
+2. 参数
+   1. `query: str`
+3. 返回结果字段
+   1. `tool_name`
+   2. `query`
+   3. `matched`
+   4. `memory_text`
+   5. `source_ids`
+   6. `match_count`
+4. 特殊行为
+   1. `MEM_READ` 要求 `retrieve_pipeline` 非空。
+   2. 如果子 recall pipeline 没有自定义 readout，会使用一个默认 fallback readout plan：
+      `{{ retrieved.items | join_text }}`
 
-其中：
+## 12. `PromptPlan` 与模板系统
 
-- `condition`
-  - 为真时才渲染该 block。
-- `repeat_over`
-  - 对列表上下文做循环渲染。
-- `item_template`
-  - 循环项模板，循环变量名固定为 `item`。
+很多 module 都接受 `PromptPlan | str`。这是当前 DSL 里最重要的 prompt/render 统一抽象。
 
-### 模板上下文
-
-模板渲染时会自动注入一组稳定上下文。实际可用字段会因模块位置不同而增加，但基础字段包括：
-
-- `query`
-- `runtime`
-- `trace`
-- `recalled_prompt`
-
-常见模块还会额外注入：
-
-- `LLMRepresentation`
-  - 常见会有 `unit`
-- `LLMFunctionCallOrganization`
-  - 常见会有 `unit`、`tools`、`default_target_layer`、`visible_records`
-- `LLMFunctionCallEvolution`
-  - 常见会有 `selected_records`、`source_layer`、`tools`
-- `TemplateReadout`
-  - 常见会有 `retrieved` 以及投影后的 record/group/view 信息
-
-### 模板表达式
-
-模板表达式语法：
-
-```text
-{{ path.to.value }}
-{{ some_list | length }}
-{{ retrieved.items | join_text }}
-{{ visible_records | topk(5) }}
-```
-
-当前内置 filter：
-
-- `default(...)`
-- `join_text`
-- `join(...)`
-- `length`
-- `first`
-- `topk(...)`
-- `sort_by(field_name, reverse=False)`
-
-示例：
+### 12.1 `PromptPlan` 结构
 
 ```python
-"{{ selected_records | length }}"
-"{{ retrieved.items | topk(3) | join_text }}"
-"{{ visible_records | sort_by('timestamp', true) | first }}"
+@dataclass(slots=True, frozen=True)
+class PromptPlan:
+    mode: Literal["simple", "structured"]
+    template: str | dict[str, Any] | list[Any]
+    context_builder: ContextBuilder | None = None
+    recall_plan: PromptPlan | None = None
+    labeled_recall_plans: dict[str, PromptPlan] | None = None
+    recall_query_builder: RecallQueryBuilder | None = None
+    labeled_recall_query_builders: dict[str, RecallQueryBuilder] | None = None
+    missing_value: str = ""
+    metadata_mode: Literal["prompt", "readout"] = "prompt"
+    sub_recall_pipeline: Any | None = None
+    labeled_sub_recall_pipelines: dict[str, Any] | None = None
+    visible_record_recall_labels: tuple[str, ...] | None = None
 ```
 
-### 用模板写 tool-call prompt
+### 12.2 两种模式
 
-推荐把“任务说明”“可用工具”“精确 record_id 映射”拆成不同 block。当前仓库示例采用的写法类似：
+1. `mode="simple"`
+   普通字符串模板，形如 `{{ query.text }}`。
+2. `mode="structured"`
+   结构化 block 模板，适合复杂 readout 组织。
 
-```python
-prompt = structured_prompt(
-    {
-        "blocks": [
-            {
-                "id": "task",
-                "title": "Task",
-                "template": (
-                    "If the memory should be saved, call ADD exactly once."
-                ),
-            },
-            {
-                "id": "existing_records",
-                "title": "Existing Records With Exact IDs",
-                "condition": "visible_records | length",
-                "repeat_over": "visible_records",
-                "item_template": "- record_id={{ item.record_id }} | layer={{ item.layer }} | text={{ item.text }}",
-                "separator": "\n",
-            },
-        ]
-    }
-)
-```
+辅助构造函数：
 
-这个模式的关键点是显式向模型展示 `record_id -> text` 映射，避免模型“猜”记录编号。
+1. `text_prompt(...)`
+2. `structured_prompt(...)`
+3. `ensure_prompt_plan(...)`
 
-### 模板子召回（sub recall）
+### 12.3 默认模板上下文
 
-`PromptPlan` 还支持在渲染主 prompt 前，先执行一次或多次子 recall，再把结果注入模板变量。
+`render_prompt_plan(...)` 至少会提供：
 
-核心参数：
+1. `query`
+2. `runtime`
+3. `trace.packet`
+4. `trace.retrieval`
 
-- `recall_plan`
-- `recall_query_builder`
-- `sub_recall_pipeline`
-- `labeled_recall_plans`
-- `labeled_sub_recall_pipelines`
-- `labeled_recall_query_builders`
+如果当前是 readout 或 packet 里已经有 retrieval 结果，还会额外提供 retrieval 上下文，例如：
 
-示意：
+1. `retrieved`
+2. note render 相关上下文
+3. 记录投影结果
 
-```python
-from memprimitive.utils._template import text_prompt
+各 module 还会用 `context_builder` 再往里补自己的局部变量，例如：
 
-prompt = text_prompt(
-    "Known related memory:\n{{ recalled_prompt }}\n\nNow process:\n{{ unit.text }}",
-    recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
-    recall_query_builder=lambda packet, store, context: context["unit"]["text"],
-    sub_recall_pipeline=recall_pipeline,
-)
-```
+1. `unit`
+2. `selected_records`
+3. `visible_records`
+4. `tools`
+5. `default_target_layer`
 
-说明：
+### 12.4 recall plan 的作用
 
-- 子 recall 始终对当前 live store 执行。
-- 没有 recall 结果时，`{{ recalled_prompt }}` 会退化为空字符串。
-- 相关渲染信息会记录进 prompt trace。
+`PromptPlan` 可以在渲染 prompt 前先做子 recall，把 recall 输出文本再注入模板上下文。
 
-多 label 版本示意：
+相关字段：
 
-```python
-from memprimitive.utils._template import text_prompt
+1. `recall_plan`
+   单条未标记 recall。
+2. `labeled_recall_plans`
+   多条带 label 的 recall。
+3. `sub_recall_pipeline`
+   执行 recall 的子 pipeline。
+4. `labeled_sub_recall_pipelines`
+   每个 label 对应独立子 pipeline。
+5. `recall_query_builder`
+   根据当前 packet/store 动态构造 recall query。
+6. `labeled_recall_query_builders`
+   label 级 recall query builder。
 
-prompt = text_prompt(
-    "Profile:\n{{ profile }}\n\nHistory:\n{{ history }}\n\nNow process:\n{{ unit.text }}",
-    recall_query_builder=lambda packet, store, context: context["unit"]["text"],
-    labeled_recall_plans={
-        "profile": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
-        "history": text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
-    },
-    labeled_sub_recall_pipelines={
-        "profile": profile_recall_pipeline,
-        "history": history_recall_pipeline,
-    },
-)
-```
+### 12.5 visible record 控制
 
-补充说明：
+这是最近非常重要的一点：
 
-- 旧的单路 `{{ recalled_prompt }}`、`recall_plan`、`sub_recall_pipeline` 仍然完全兼容。
-- 多 label 模板变量直接使用 label 名本身，例如 `{{ profile }}`、`{{ history }}`。
-- 多 label 默认复用全局 `recall_query_builder`；若需要单独覆盖，可传 `labeled_recall_query_builders={"history": ...}`。
-- 每个 label 的 recall 结果与 trace 会分别记录在 metadata / prompt trace 的 `labeled_recalled_prompts` 和 `labeled_recall_prompts` 中。
+1. `visible_record_recall_labels`
+   用来声明哪些 labeled recall 的命中记录应该并入 `visible_records`。
+2. 这意味着 prompt side recall 不只是“拿回一段 recalled text”，还可以决定“哪些历史 records 对后续 tool-calling 真正可见”。
+3. 该机制已经被 `LLMFunctionCallOrganization` 和 `LLMFunctionCallEvolution` 使用。
 
-## 推荐示例文件
+### 12.6 空 recall query 的降级行为
 
-如果需要直接看可运行范式，优先参考：
+如果某个 labeled recall query builder 渲染出了空字符串，不会直接报错，而是记录：
 
-- `memprimitive/example/demonstration/llm_function_call_tools.py`
-- `memprimitive/example/demonstration/llm_function_call_graph_tools.py`
-- `memprimitive/example/demonstration/structured_template_readout.py`
-- `memprimitive/example/demonstration/recalled_prompt_template.py`
+1. `disabled_reason = "empty_rendered_recall_query"`
 
-## 备注
+这在 prompt/readout metadata 里可见。
 
-- 本文档描述的是“当前公开实现面”，不是历史设计稿。
-- 若 baseline module、PromptPlan、tool-call 协议继续演进，本文档应与代码同步更新。
+### 12.7 template / prompt metadata 里常见的字段
+
+1. `template_mode`
+2. `prompt_is_template`
+3. `rendered_prompt`
+4. `recalled_prompt`
+5. `resolved_variables`
+6. `missing_variables`
+7. `used_record_ids`
+8. `used_group_ids`
+9. `filter_trace`
+10. `labeled_recall_prompts`
+
+## 13. 默认 pipeline 与公开面说明
+
+### 13.1 `MemoryPipeline` 默认模块
+
+如果你不传 slot 参数，默认是：
+
+1. `unit_formation = PassThroughUnitFormation()`
+2. `representation = BasicRepresentation()`
+3. `write_trigger = AlwaysTrigger()`
+4. `organization = AppendOrganization()`
+5. `evolution_trigger = NeverTrigger()`
+6. `memory_evolution = AppendOnlyEvolution()`
+7. `retrieval = RecencyRetrieval()`
+8. `readout = ConcatenateReadout()`
+
+### 13.2 当前 baseline surface 的几个边界
+
+1. `DispatchRetrieval` 当前不是公开 baseline surface 的一部分。
+2. `NeverTrigger` 当前主要作为 evolution 默认值存在，但仍然是实际可用类。
+3. 文档中所有 module 顺序按当前 registry 导出的公开面书写，而不是按历史文档兼容项排列。
+
+## 14. 建议查阅路径
+
+如果你需要继续往下追实现，推荐按下面顺序查：
+
+1. `memprimitive/pipeline.py`
+2. `memprimitive/core.py`
+3. `memprimitive/baselines/*.py`
+4. `memprimitive/utils/_template.py`
+5. `memprimitive/utils/_llm_function_tools.py`
+6. `memprimitive/utils/_mid_decoding_tools.py`
+
+如果你要让 agent 自动使用这份文档，建议优先让它根据这几个关键词定位：
+
+1. module 所属 slot
+2. 读取的 `packet.*` 字段
+3. 写回的 `packet.*` / `store.*` / `trace.*`
+4. `PromptPlan` 是否参与
+5. 是否会真实修改 `store`

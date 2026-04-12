@@ -65,11 +65,28 @@ def build_tim_simple_memory_system(
         ]
     )
     store = MemoryStore(topology=topology)
+    candidate_recall_pipeline = MemoryPipeline(
+        retrieval=(
+            EmbeddingSimilarityRetrieval(
+                top_k=int(candidate_top_k),
+                layer=memory_layer,
+            ),
+        ),
+        readout=ConcatenateReadout(separator="\n"),
+        store=store,
+    )
+    evolution_module = _build_tim_simple_evolution_module(
+        memory_layer=memory_layer,
+        candidate_pipeline=candidate_recall_pipeline,
+    )
+
     return {
         "store": store,
         "memory_layer": memory_layer,
         "candidate_top_k": int(candidate_top_k),
         "recall_top_k": int(recall_top_k),
+        "candidate_recall_pipeline": candidate_recall_pipeline,
+        "evolution_module": evolution_module,
     }
 
 
@@ -236,7 +253,8 @@ def _run_tim_simple_thought_update(system: dict[str, object], *, thought: dict[s
     store = system["store"]
     assert isinstance(store, MemoryStore)
     memory_layer = str(system["memory_layer"])
-    evolution = _build_tim_simple_evolution_module(system)
+    evolution = system["evolution_module"]
+    assert isinstance(evolution, LLMFunctionCallEvolution)
     packet = Packet(
         units=[_build_tim_simple_update_unit(thought=thought)],
         decisions_store={memory_layer: {"record_ids": []}},
@@ -262,9 +280,11 @@ def _build_tim_simple_update_unit(*, thought: dict[str, Any]) -> MemoryUnit:
     )
 
 
-def _build_tim_simple_evolution_module(system: dict[str, object]) -> LLMFunctionCallEvolution:
-    memory_layer = str(system["memory_layer"])
-    candidate_pipeline = _build_tim_simple_candidate_recall_pipeline(system)
+def _build_tim_simple_evolution_module(
+    *,
+    memory_layer: str,
+    candidate_pipeline: MemoryPipeline,
+) -> LLMFunctionCallEvolution:
     return LLMFunctionCallEvolution(
         target_layer=memory_layer,
         tools=["ADD", "UPDATE", "DELETE"],
@@ -362,19 +382,9 @@ def _current_thought_prompt_context(packet: Packet) -> dict[str, str]:
 
 
 def _build_tim_simple_candidate_recall_pipeline(system: dict[str, object]) -> MemoryPipeline:
-    store = system["store"]
-    assert isinstance(store, MemoryStore)
-    memory_layer = str(system["memory_layer"])
-    return MemoryPipeline(
-        retrieval=(
-            EmbeddingSimilarityRetrieval(
-                top_k=int(system["candidate_top_k"]),
-                layer=memory_layer,
-            ),
-        ),
-        readout=ConcatenateReadout(separator="\n"),
-        store=store,
-    )
+    candidate_pipeline = system["candidate_recall_pipeline"]
+    assert isinstance(candidate_pipeline, MemoryPipeline)
+    return candidate_pipeline
 
 
 def main() -> None:
