@@ -49,6 +49,8 @@
 - GraphRAG（社群发现算法+根据来源找更多内容的算法）
 - MemTree（tree存储+tree插入）
 - HippoRAG（根据来源找更多内容的算法（PPR）+node specificity）
+- MemoChat（根据上层找下层+按照topic分出高层）
+
 ## 无法通过补模块复现
 
 - Nemori（带agent loop的memory）

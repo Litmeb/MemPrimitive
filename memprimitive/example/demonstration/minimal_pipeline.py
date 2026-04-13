@@ -44,7 +44,7 @@ def main() -> None:
     pipeline.ingest(Observation(text="The user likes concise examples.", source="dialogue"))
     pipeline.ingest(Observation(text="The user works on compositional memory.", source="notes"))
 
-    # Read path: query 鈫?retrieval 鈫?readout for the agent.
+    # Read path
     readout = pipeline.recall(Query(text="What does the user like?"))
 
     print(readout.text)

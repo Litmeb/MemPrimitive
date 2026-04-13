@@ -44,7 +44,16 @@ Avoid re-documenting these in detail unless something materially changes.
   - `benchmarks/MSC/` contains the `nayohan/multi_session_chat` train/validation/test parquet shards
   - `benchmarks/DMR/` contains MemGPT's `MSC-Self-Instruct` JSONL benchmark data
   - `benchmarks/LongMemEval/` contains the cleaned LongMemEval splits, including the large `longmemeval_m_cleaned.json`
-  This closes the "data not downloaded yet" part of benchmark setup, but there is still no benchmark harness or unified runner wired into the repo.
+  This closes the "data not downloaded yet" part of benchmark setup.
+- A first benchmark harness slice now exists in `memprimitive/benchmarking/minimal_baseline.py`:
+  - unified normalized sample adapters for `LoCoMo`, `LongMemEval`, and `DMR`
+  - a minimal one-layer pipeline baseline using `ingest(...)` + single `recall(...)`
+  - a thin outer answer runner that sends retrieved memory plus the query to the real OpenAI-compatible runtime
+  - a CLI entrypoint that can run limited smoke/debug jobs and write JSONL predictions
+- The benchmark harness is still intentionally narrow:
+  - baseline 1 is single-recall only, not a tool-calling `MEM_READ` loop
+  - `MSC` is not wired into this first baseline because its natural task shape is dialogue continuation rather than QA
+  - scoring/metrics aggregation is still not implemented beyond writing predictions and references
 - Organization baselines now also include `FanoutIngestOrganization`, a reusable ingest-time helper that reads an iterable string field from `Observation.metadata` and fans those strings out through a child `MemoryPipeline.ingest(...)` path while aggregating child ingest trace.
 - `FanoutIngestOrganization` now also supports reading that iterable string field from `packet.units[0].metadata["representation"]` when the field is not already present on `Observation.metadata`, so representation-driven extraction pipelines can fan out directly into child ingest paths without extra example glue.
 - Retrieval baselines now also include `MetadataRetrieval`, a simple metadata-field filter that supports case-insensitive exact match by default plus regex matching, with one-level iterable-member matching for list/tuple/set-style metadata fields.
@@ -95,7 +104,12 @@ The framework is expressive enough for mechanism-level reconstructions of severa
 
 ### 4. Evaluation infrastructure is incomplete
 
-There are targeted tests and runnable demos, but not yet a benchmark harness for systematic comparison, logging, and analysis across configurations.
+There are targeted tests, runnable demos, and now one thin benchmark baseline harness for `LoCoMo` / `LongMemEval` / `DMR`, but evaluation infrastructure is still far from complete:
+
+- only one very simple baseline is wired
+- `MSC` is still outside the runner
+- no benchmark-specific scoring or aggregate analysis is implemented yet
+- there is not yet a multi-baseline comparison framework or experiment logging surface
 
 ### 5. Motif discovery remains later-stage work
 
