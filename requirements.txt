@@ -1,5 +1,6 @@
 # Requires Python 3.11 or newer.
 pytest
+PyYAML
 python-dotenv
 rank-bm25
 sentence-transformers

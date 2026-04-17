@@ -26,6 +26,71 @@
 
 ---
 
+## Config Builder
+
+仓库现在提供了一个轻量的 declarative object-graph loader，可以从单个 `config.yml` 构建根 `MemoryPipeline`，并支持：
+
+- nested child `MemoryPipeline`
+- shared `MemoryStore`
+- `PromptPlan`
+- 通过 dotted import 引入命名 Python callable
+
+Python API:
+
+```python
+from memprimitive.config import load_pipeline_from_yaml
+
+pipeline = load_pipeline_from_yaml("memprimitive/example/config/simple_pipeline.yml")
+```
+
+CLI:
+
+```bash
+python -m memprimitive.config validate memprimitive/example/config/simple_pipeline.yml
+```
+
+配置文件固定使用三段式结构：
+
+```yaml
+version: 1
+root: pipeline
+objects:
+  shared_store:
+    $call: memprimitive.core.MemoryStore
+  pipeline:
+    $call: memprimitive.pipeline.MemoryPipeline
+    kwargs:
+      unit_formation: PassThroughUnitFormation
+      write_trigger: AlwaysTrigger
+      evolution_trigger: NeverTrigger
+      retrieval:
+        $call: RecencyRetrieval
+        kwargs:
+          top_k: 2
+      store:
+        $ref: shared_store
+```
+
+当前只保留三种特殊指令：
+
+- `$call`: 导入并调用一个 class / function / classmethod，可带 `args` / `kwargs`
+- `$import`: 只导入命名符号，不调用
+- `$ref`: 引用 `objects` 中已声明对象，并复用同一个实例
+
+`MemoryPipeline(kwargs=...)` 的 slot 位置额外支持两条 shorthand：
+
+- baseline class 默认前缀是 `memprimitive.baselines.`，所以可以直接写 `unit_formation: PassThroughUnitFormation`，也可以写 `$call: RecencyRetrieval`
+- `write_trigger` / `evolution_trigger` 会自动补 `slot=...`，不需要再手写
+
+现成示例：
+
+- `memprimitive/example/config/simple_pipeline.yml`
+- `memprimitive/example/config/recalled_prompt_pipeline.yml`
+
+第二个示例复用了 nested `sub_recall_pipeline + PromptPlan + imported query builder`。它使用 `LLMRepresentation`，因此真正运行 ingest 时仍需要配置好 LLM runtime；但 `python -m memprimitive.config validate ...` 可以先验证整张对象图是否能正确构建。
+
+---
+
 ## 核心主张
 
 本项目提出一个 **compositional memory DSL**，将 agent memory system 分解为一组可组合的 primitive。每个 primitive 对应 memory 流程中的一种基础机制，而不是某篇论文中的整体架构。
