@@ -23,6 +23,7 @@ The project is past the concept stage and now in a "framework expansion" phase.
 - The repository has shifted from design prose to reusable baseline modules plus executable paper-style examples.
 - Literature work has broadened beyond a few showcase systems and is now being used to judge what is already expressible, what is only approximate, and what still needs new primitive families.
 - `evaluate.md` 中列出的大部分目标论文现已批量下载到 `paper/`，并在 `paper/DOWNLOAD_MANIFEST.md` 里维护了一份来源清单；当前唯一明确留空的是 `Ego-LLaVA`，因为还没有稳定定位到同名开放论文 PDF。
+- 外部 memory 代码生态调研新增了一条重要判断：公开实现并不是清一色“不接数据库”。更产品化/平台化的 memory 项目（如 Mem0、Letta、LightMem）往往显式接向量库、SQL/pgvector、图库或 Redis；更典型的论文复现仓库（如 Reflexion、RecurrentGPT、InteractiveMemorySharingLLM）则通常只用文件、BM25 或进程内结构，最多把 SQLite 当缓存或轻量本地状态。
 
 ## What To Treat As Established
 
@@ -39,6 +40,13 @@ Avoid re-documenting these in detail unless something materially changes.
 ## Important Recent Progress
 
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
+- A first declarative config bridge now exists under `memprimitive/config/`:
+  - single-file YAML config with fixed `version/root/objects` shape
+  - recursive `$call` / `$import` / `$ref` object-graph resolution
+  - explicit shared-object reuse for `MemoryStore` and nested child `MemoryPipeline`
+  - `MemoryPipeline` slot-level shorthand now exists too: slot positions can use baseline short names such as `PassThroughUnitFormation` or `$call: RecencyRetrieval`, and trigger slots auto-fill `slot=...`
+  - root-loading APIs (`load_object_from_yaml`, `load_pipeline_from_yaml`) plus `python -m memprimitive.config validate ...`
+  - example configs under `memprimitive/example/config/` and dedicated tests in `tests/test_config_loader.py`
 - Raw benchmark assets are now staged locally under `benchmarks/` for evaluation prototyping:
   - `benchmarks/LoCoMo/` contains the core LoCoMo benchmark files copied from `snap-research/locomo` (`locomo10.json` plus persona source JSON and repo metadata/license)
   - `benchmarks/MSC/` contains the `nayohan/multi_session_chat` train/validation/test parquet shards
@@ -54,6 +62,20 @@ Avoid re-documenting these in detail unless something materially changes.
   - baseline 1 is single-recall only, not a tool-calling `MEM_READ` loop
   - `MSC` is not wired into this first baseline because its natural task shape is dialogue continuation rather than QA
   - scoring/metrics aggregation is still not implemented beyond writing predictions and references
+- Local upstream-repo survey now sharpens one strategic judgment for future framework planning:
+  - lightweight paper-style memory repos often keep the actual memory code simple (plain Python lists, JSONL/file append, in-process embedding similarity, prompt concatenation)
+  - the steep engineering cost usually appears later in one of two places:
+    - platform/runtime work such as durable storage, multi-backend vector or graph support, APIs, background jobs, and consistency concerns
+    - genuinely specialized memory algorithms such as explicit triple stores, graph propagation, or offline indexing/update pipelines
+  - so "memory code is easy" and "memory code is intrinsically hard" are both too coarse; the sampled ecosystem is clearly mixed
+- A follow-up survey focused specifically on lightweight vs algorithmic memory is now documented and expanded in `LIGHTWEIGHT_ALGORITHMIC_MEMORY_SURVEY.zh-CN.md`.
+  - the sampled space now looks more like a spectrum than a binary split:
+    - very light prompt/buffer systems (`Reflexion`, `RecurrentGPT`) are still usually cheaper to implement ad hoc for one-off use
+    - medium summary/profile/maintenance systems (`MemoChat`, `Memory Bank`, parts of `MOOM`) are now the clearest place where MemPrimitive could plausibly save real work
+    - heavy graph/probe/planning systems (`AriGraph`, `ComoRAG`, plus earlier `HippoRAG` / `MemLLM`) keep most of their difficulty in bespoke algorithms and controllers outside the generic slots
+  - the broader conclusion remains: MemPrimitive mainly removes mechanism/orchestration complexity, not bespoke algorithm complexity
+  - an additional strategic note now has code evidence too: a thin unified adapter/evaluation layer likely has better adoption potential than expecting outside authors to migrate whole memory systems into the full internal abstraction stack
+  - official public Think-in-Memory code was still not confirmed in this survey; only a community demo was found, so TiM code-level judgments remain low-confidence
 - Organization baselines now also include `FanoutIngestOrganization`, a reusable ingest-time helper that reads an iterable string field from `Observation.metadata` and fans those strings out through a child `MemoryPipeline.ingest(...)` path while aggregating child ingest trace.
 - `FanoutIngestOrganization` now also supports reading that iterable string field from `packet.units[0].metadata["representation"]` when the field is not already present on `Observation.metadata`, so representation-driven extraction pipelines can fan out directly into child ingest paths without extra example glue.
 - Retrieval baselines now also include `MetadataRetrieval`, a simple metadata-field filter that supports case-insensitive exact match by default plus regex matching, with one-level iterable-member matching for list/tuple/set-style metadata fields.
@@ -75,6 +97,8 @@ Avoid re-documenting these in detail unless something materially changes.
 - `ConfigurableEmbeddingRepresentation` is now the generic text-configurable embedding representation primitive: render configurable text (including template-based text) from the current unit, embed that text, and record embedding-input provenance in `metadata["representation"]` / trace without rewriting the unit's main text-facing fields.
 - `LLMRepresentation` now supports structured metadata-backed custom fields with `value_type=list[dict[str, str]]` in addition to `str`, `list[str]`, and `dict[str, str]`, using permissive normalization for JSON object lists.
 - TiM thought extraction now uses that structured `LLMRepresentation(field="thoughts", value_type=list[dict[str, str]])` path plus a thin example-level normalization helper, instead of a fully hand-written direct runtime JSON call.
+- Official Mnemis code is now confirmed public (`microsoft/Mnemis`), but the repo only includes the `global_selection` module plus figures/results/paper. There is no end-to-end reproduction or graph-construction pipeline, and the released code depends on Graphiti + Neo4j + external LLM credentials.
+- Paper-setting audit for reproduction now clarifies one important configuration detail: the paper's main embedding setup is not the repo-local MiniLM placeholder. The PDF states that the main experiments use `Qwen3-Embedding-0.6B` with its embedding dimension reduced from `1024` to `128` via MRL; `all-MiniLM-L6-v2` at dimension `384` appears only as an additional comparison embedding in the ablation-style evaluation.
 - `memprimitive/example/classics` now contains executable reconstructions rather than an empty placeholder. The most important current examples are:
   - COMEDY / compressive-memory style hierarchical maintenance
   - A-MEM / Agentic Memory
@@ -90,9 +114,14 @@ Avoid re-documenting these in detail unless something materially changes.
 
 ## Main Open Gaps
 
-### 1. DSL is still more documented than executable
+### 1. Declarative DSL bridge exists but is still partial
 
-There is still no clean end-to-end path from declarative config to validated runnable pipeline and back.
+There is now a clean v1 path from single-file declarative config to validated runnable root `MemoryPipeline`, but the broader DSL bridge is still incomplete:
+
+- no reverse serialization from live pipeline/store back into config
+- no finished config surface for multi-pipeline system dicts or full classics builders
+- no include/override/composition layer beyond one YAML file
+- no machine-readable search-space schema layered on top of the config bridge
 
 ### 2. Search-space formalization is incomplete
 
@@ -291,6 +320,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Trigger outputs are still easier to align to incoming units than to arbitrary store-side candidate subsets. This remains a real limitation for faithful maintenance/evolution modeling.
 - Retrieval output is still mostly a flat `RetrievedSet`; richer grouped or provenance-aware recall views remain underdeveloped.
 - Trigger work should be kept in proportion: literature review suggests triggers matter, but they are usually not the highest-leverage missing piece.
+- If future work adds durable storage backends, treat that as a separate runtime/backend-semantics layer rather than as evidence that current paper-style primitives already abstract over real databases. Current baseline code still assumes easy full scans and synchronous record mutation much more often than DB-backed repos do.
 
 ## Recommended Next Focus
 

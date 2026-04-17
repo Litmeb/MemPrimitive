@@ -1,0 +1,51 @@
+version: 1
+root: pipeline
+objects:
+  shared_store:
+    $call: memprimitive.core.MemoryStore
+
+  retrieve_pipeline:
+    $call: memprimitive.pipeline.MemoryPipeline
+    kwargs:
+      retrieval:
+        $call: RecencyRetrieval
+        kwargs:
+          top_k: 1
+          layer: default
+      readout: ConcatenateReadout
+      store:
+        $ref: shared_store
+
+  pipeline:
+    $call: memprimitive.pipeline.MemoryPipeline
+    kwargs:
+      unit_formation: PassThroughUnitFormation
+      representation:
+        $call: LLMRepresentation
+        kwargs:
+          field: summary
+          prompt:
+            $call: memprimitive.utils._template.text_prompt
+            kwargs:
+              template: |
+                Summarize the incoming memory for later retrieval.
+                Previously recalled context:
+                {{ recalled_prompt }}
+
+                Current memory:
+                {{ unit.text }}
+              recall_plan:
+                $call: memprimitive.utils._template.text_prompt
+                kwargs:
+                  template: "{{ retrieved.items | join_text }}"
+                  metadata_mode: readout
+              recall_query_builder:
+                $import: memprimitive.example.demonstration.recalled_prompt_template.build_recalled_prompt_query
+              sub_recall_pipeline:
+                $ref: retrieve_pipeline
+      organization:
+        $call: AppendOrganization
+        kwargs:
+          target_layer: default
+      store:
+        $ref: shared_store

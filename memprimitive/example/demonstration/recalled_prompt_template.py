@@ -43,6 +43,23 @@ def _seed_profile_memory(store: MemoryStore, text: str) -> None:
     store.append(MemoryRecord.from_unit(unit=unit, layer="default", sequence_id=store.next_sequence_id()))
 
 
+def build_recalled_prompt_query(packet, current_store, context) -> str:
+    """Named helper so YAML config can import the same recall-query builder."""
+
+    unit = context.get("unit", {})
+    unit_text = str(unit.get("text", "")).strip()
+    return f"profile context for {unit_text}"
+
+
+def build_recalled_readout_query(packet, current_store, context) -> str:
+    """Return the active query text for template-side sub recall."""
+
+    if packet.query is not None:
+        return packet.query.text
+    query = context.get("query", {})
+    return str(query.get("text", "")).strip()
+
+
 def build_pipeline() -> MemoryPipeline:
     retrieve_pipeline = MemoryPipeline(
         retrieval=RecencyRetrieval(top_k=1, layer="default"),
@@ -59,7 +76,7 @@ def build_pipeline() -> MemoryPipeline:
                     "Current memory:\n{{ unit.text }}"
                 ),
                 recall_plan=text_prompt("{{ retrieved.items | join_text }}", metadata_mode="readout"),
-                recall_query_builder=lambda packet, current_store, context: f"profile context for {context['unit']['text']}",
+                recall_query_builder=build_recalled_prompt_query,
                 sub_recall_pipeline=retrieve_pipeline,
             ),
         ),

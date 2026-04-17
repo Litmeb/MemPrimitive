@@ -1,0 +1,30 @@
+version: 1
+root: pipeline
+objects:
+  shared_store:
+    $call: memprimitive.core.MemoryStore
+
+  pipeline:
+    $call: memprimitive.pipeline.MemoryPipeline
+    kwargs:
+      unit_formation: PassThroughUnitFormation
+      representation:
+        $call: BasicRepresentation
+        kwargs:
+          elements:
+            - text
+      write_trigger: AlwaysTrigger
+      organization:
+        $call: AppendOrganization
+        kwargs:
+          target_layer: default
+      evolution_trigger: NeverTrigger
+      memory_evolution: AppendOnlyEvolution
+      retrieval:
+        $call: RecencyRetrieval
+        kwargs:
+          top_k: 2
+          layer: default
+      readout: ConcatenateReadout
+      store:
+        $ref: shared_store
