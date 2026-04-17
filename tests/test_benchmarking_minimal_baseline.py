@@ -68,6 +68,8 @@ def test_load_locomo_samples_normalizes_dialogue_and_qa(tmp_path: Path) -> None:
 
     assert len(samples) == 1
     assert samples[0].query.text == "What does Alice like?"
+    assert samples[0].history_turns[0].turn_id == "D1:1"
+    assert samples[0].history_turns[0].session_id == "session_1"
     assert [obs.text for obs in samples[0].history_observations] == ["Alice: I like tea.", "Bob: I like coffee."]
 
 
@@ -92,6 +94,7 @@ def test_load_longmemeval_samples_flattens_haystack_sessions(tmp_path: Path) -> 
     samples = list(load_benchmark_samples("longmemeval", benchmark_root=tmp_path, longmemeval_variant="s_cleaned"))
 
     assert len(samples) == 1
+    assert samples[0].history_turns[0].session_id == "1"
     assert samples[0].history_observations[0].text == "user: Alice likes tea."
     assert samples[0].reference_answer == "Alice"
 
@@ -136,3 +139,4 @@ def test_run_minimal_baseline_sample_uses_answer_runner() -> None:
 
     assert prediction.predicted_answer.startswith("ANSWER::")
     assert prediction.retrieved_source_ids
+    assert prediction.memory_adapter_name == "minimal_pipeline"

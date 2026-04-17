@@ -58,6 +58,12 @@ Avoid re-documenting these in detail unless something materially changes.
   - a minimal one-layer pipeline baseline using `ingest(...)` + single `recall(...)`
   - a thin outer answer runner that sends retrieved memory plus the query to the real OpenAI-compatible runtime
   - a CLI entrypoint that can run limited smoke/debug jobs and write JSONL predictions
+- That early harness has now been refactored into a more general adapter layer under `memprimitive/benchmarking/`:
+  - normalized shared benchmark types now include `ConversationTurn`, richer `BenchmarkSample`, `MemoryRecall`, and prediction/run-result containers
+  - official benchmark adapters now cover `LoCoMo` and `LongMemEval` through one common `BenchmarkAdapter` protocol
+  - memory-side evaluation can now wrap plain `MemoryPipeline`, `FreeMemoryPipeline`, YAML-loaded pipelines, helper-style system dicts, and pairwise dialogue-ingest systems through `MemoryAdapter` / `MemorySession`
+  - a ready-made `mem0` benchmark adapter preset now exists on top of that function/pairwise adapter layer
+  - `minimal_baseline.py` is now mainly a compatibility wrapper plus CLI entrypoint rather than the whole benchmarking implementation
 - The benchmark harness is still intentionally narrow:
   - baseline 1 is single-recall only, not a tool-calling `MEM_READ` loop
   - `MSC` is not wired into this first baseline because its natural task shape is dialogue continuation rather than QA
@@ -133,12 +139,12 @@ The framework is expressive enough for mechanism-level reconstructions of severa
 
 ### 4. Evaluation infrastructure is incomplete
 
-There are targeted tests, runnable demos, and now one thin benchmark baseline harness for `LoCoMo` / `LongMemEval` / `DMR`, but evaluation infrastructure is still far from complete:
+There are targeted tests, runnable demos, a unified benchmark adapter layer for `LoCoMo` / `LongMemEval`, and a backward-compatible minimal baseline path (with legacy `DMR` loading still preserved in that wrapper), but evaluation infrastructure is still far from complete:
 
-- only one very simple baseline is wired
+- only one very simple shared-answer baseline is wired end to end
 - `MSC` is still outside the runner
 - no benchmark-specific scoring or aggregate analysis is implemented yet
-- there is not yet a multi-baseline comparison framework or experiment logging surface
+- there is now a thin multi-system adapter surface, but not yet a richer experiment tracking / comparison workflow
 
 ### 5. Motif discovery remains later-stage work
 
