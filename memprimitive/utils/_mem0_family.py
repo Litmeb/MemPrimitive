@@ -315,9 +315,12 @@ def finalize_dialogue_turn(
     turn: DialogueTurnSnapshot,
 ) -> None:
     for message_index, message in enumerate(turn.messages, start=1):
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
         recent_dialogue_pipeline.ingest(
             Observation(
-                text=message["content"],
+                text=content,
                 source="dialogue_message",
                 metadata={
                     "session_id": turn.session_id,

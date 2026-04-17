@@ -1,12 +1,11 @@
-"""Minimal benchmark baseline: ingest history, retrieve once, answer with a real LLM."""
+"""Minimal benchmark baseline compatibility wrapper built on the new adapters."""
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterator
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
@@ -17,64 +16,45 @@ from memprimitive.baselines import (
     EmbeddingSimilarityRetrieval,
     PassThroughUnitFormation,
 )
-from memprimitive.utils._runtime import Runtime
 
-DEFAULT_BENCHMARK_ROOT = Path(__file__).resolve().parents[2] / "benchmarks"
+from ._bench_adapters import (
+    DEFAULT_BENCHMARK_ROOT,
+    VALID_LONGMEMEVAL_VARIANTS,
+    _iter_json_array_file,
+    create_benchmark_adapter,
+)
+from ._memory_adapters import PipelineMemoryAdapter
+from ._runner import SingleRecallLLMAnswerRunner, run_benchmark, write_predictions_jsonl
+from ._types import BenchmarkPrediction, BenchmarkSample
+
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[2] / "benchmarks" / "outputs" / "minimal_baseline_predictions.jsonl"
 VALID_BENCHMARKS = frozenset({"locomo", "longmemeval", "dmr"})
-VALID_LONGMEMEVAL_VARIANTS = frozenset({"oracle", "s_cleaned", "m_cleaned"})
 
 
-@dataclass(slots=True)
-class BenchmarkSample:
-    sample_id: str
-    benchmark_name: str
-    history_observations: list[Observation]
-    query: Query
-    reference_answer: str
-    metadata: dict[str, Any] = field(default_factory=dict)
+class _SingleSampleBenchmarkAdapter:
+    def __init__(self, sample: BenchmarkSample) -> None:
+        self.name = sample.benchmark_name
+        self.sample = sample
+
+    def iter_samples(self, *, limit: int | None = None) -> Iterator[BenchmarkSample]:
+        if limit == 0:
+            return
+        yield self.sample
 
 
-@dataclass(slots=True)
-class BenchmarkPrediction:
-    sample_id: str
-    benchmark_name: str
-    query_text: str
-    reference_answer: str
-    predicted_answer: str
-    retrieved_text: str
-    retrieved_source_ids: list[str]
-    metadata: dict[str, Any] = field(default_factory=dict)
+class _LegacyDMRBenchmarkAdapter:
+    name = "dmr"
 
-    def to_json_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def __init__(self, *, benchmark_root: Path | str = DEFAULT_BENCHMARK_ROOT) -> None:
+        self.benchmark_root = Path(benchmark_root)
 
-
-class SingleRecallLLMAnswerRunner:
-    """Answer from one retrieved memory block using the existing OpenAI-compatible runtime."""
-
-    def __init__(
-        self,
-        *,
-        runtime: Runtime | None = None,
-        system_prompt: str | None = None,
-    ) -> None:
-        self.runtime = runtime if runtime is not None else Runtime()
-        self.system_prompt = system_prompt or (
-            "You answer only from the provided retrieved memory and the user request. "
-            "If the retrieved memory is empty or insufficient, say that the memory does not contain enough information. "
-            "Do not invent facts that are not grounded in the retrieved memory."
-        )
-
-    def answer(self, *, sample: BenchmarkSample, retrieved_text: str) -> str:
-        retrieved_block = retrieved_text.strip() or "<no retrieved memory>"
-        user_prompt = (
-            f"Benchmark: {sample.benchmark_name}\n"
-            f"Sample ID: {sample.sample_id}\n\n"
-            f"User request:\n{sample.query.text}\n\n"
-            f"Retrieved memory:\n{retrieved_block}\n"
-        )
-        return self.runtime.text(system=self.system_prompt, user=user_prompt, temperature=0.0)
+    def iter_samples(self, *, limit: int | None = None) -> Iterator[BenchmarkSample]:
+        yielded = 0
+        for sample in _iter_dmr_samples(self.benchmark_root):
+            yield sample
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                return
 
 
 def create_minimal_benchmark_pipeline(*, top_k: int = 5) -> MemoryPipeline:
@@ -104,6 +84,29 @@ def create_minimal_benchmark_pipeline(*, top_k: int = 5) -> MemoryPipeline:
     )
 
 
+def _minimal_memory_adapter(*, top_k: int) -> PipelineMemoryAdapter:
+    return PipelineMemoryAdapter(
+        name="minimal_pipeline",
+        pipeline_factory=lambda: create_minimal_benchmark_pipeline(top_k=top_k),
+    )
+
+
+def _compat_benchmark_adapter(
+    name: str,
+    *,
+    benchmark_root: Path | str,
+    longmemeval_variant: str,
+):
+    benchmark_name = str(name).strip().casefold()
+    if benchmark_name == "dmr":
+        return _LegacyDMRBenchmarkAdapter(benchmark_root=benchmark_root)
+    return create_benchmark_adapter(
+        benchmark_name,
+        benchmark_root=benchmark_root,
+        longmemeval_variant=longmemeval_variant,
+    )
+
+
 def load_benchmark_samples(
     name: str,
     *,
@@ -114,23 +117,14 @@ def load_benchmark_samples(
     """Yield normalized samples for one supported benchmark."""
 
     benchmark_name = str(name).strip().casefold()
-    root = Path(benchmark_root)
     if benchmark_name not in VALID_BENCHMARKS:
         raise ValueError(f"Unsupported benchmark {name!r}. Choose from {sorted(VALID_BENCHMARKS)}.")
-
-    if benchmark_name == "locomo":
-        iterator = _iter_locomo_samples(root)
-    elif benchmark_name == "longmemeval":
-        iterator = _iter_longmemeval_samples(root, variant=longmemeval_variant)
-    else:
-        iterator = _iter_dmr_samples(root)
-
-    yielded = 0
-    for sample in iterator:
-        yield sample
-        yielded += 1
-        if limit is not None and yielded >= limit:
-            break
+    adapter = _compat_benchmark_adapter(
+        benchmark_name,
+        benchmark_root=benchmark_root,
+        longmemeval_variant=longmemeval_variant,
+    )
+    yield from adapter.iter_samples(limit=limit)
 
 
 def run_minimal_baseline_sample(
@@ -141,27 +135,20 @@ def run_minimal_baseline_sample(
 ) -> BenchmarkPrediction:
     """Run the one-recall baseline for a single normalized benchmark sample."""
 
-    pipeline = create_minimal_benchmark_pipeline(top_k=top_k)
-    for observation in sample.history_observations:
-        pipeline.ingest(observation)
-    readout = pipeline.recall(sample.query)
-    runner = answer_runner if answer_runner is not None else SingleRecallLLMAnswerRunner()
-    predicted_answer = runner.answer(sample=sample, retrieved_text=readout.text)
-    return BenchmarkPrediction(
-        sample_id=sample.sample_id,
-        benchmark_name=sample.benchmark_name,
-        query_text=sample.query.text,
-        reference_answer=sample.reference_answer,
-        predicted_answer=predicted_answer,
-        retrieved_text=readout.text,
-        retrieved_source_ids=list(readout.source_ids),
-        metadata={
-            **sample.metadata,
-            "history_observation_count": len(sample.history_observations),
-            "retrieved_item_count": len(readout.source_ids),
-            "readout_metadata": dict(readout.metadata),
-        },
+    result = run_benchmark(
+        _SingleSampleBenchmarkAdapter(sample),
+        _minimal_memory_adapter(top_k=top_k),
+        answer_runner=answer_runner,
+        limit=1,
     )
+    if not result.predictions:
+        raise RuntimeError("Single-sample benchmark run produced no predictions.")
+    prediction = result.predictions[0]
+    prediction.metadata = {
+        **prediction.metadata,
+        "retrieved_item_count": len(prediction.retrieved_source_ids),
+    }
+    return prediction
 
 
 def run_minimal_baseline(
@@ -175,152 +162,23 @@ def run_minimal_baseline(
 ) -> list[BenchmarkPrediction]:
     """Run the minimal baseline across one supported benchmark."""
 
-    predictions: list[BenchmarkPrediction] = []
-    for sample in load_benchmark_samples(
+    adapter = _compat_benchmark_adapter(
         benchmark_name,
         benchmark_root=benchmark_root,
         longmemeval_variant=longmemeval_variant,
-        limit=limit,
-    ):
-        predictions.append(
-            run_minimal_baseline_sample(
-                sample,
-                top_k=top_k,
-                answer_runner=answer_runner,
-            )
-        )
-    return predictions
-
-
-def _iter_locomo_samples(benchmark_root: Path) -> Iterator[BenchmarkSample]:
-    path = benchmark_root / "LoCoMo" / "data" / "locomo10.json"
-    conversations = json.loads(path.read_text(encoding="utf-8"))
-    for conversation_payload in conversations:
-        sample_prefix = str(conversation_payload["sample_id"]).strip()
-        observations = _locomo_history_observations(conversation_payload)
-        for qa_index, qa_payload in enumerate(conversation_payload.get("qa", []), start=1):
-            question = str(qa_payload.get("question", "")).strip()
-            answer = str(qa_payload.get("answer", "")).strip()
-            if not question or not answer:
-                continue
-            yield BenchmarkSample(
-                sample_id=f"{sample_prefix}-qa-{qa_index}",
-                benchmark_name="locomo",
-                history_observations=list(observations),
-                query=Query(text=question, metadata={"task": "question_answering"}),
-                reference_answer=answer,
-                metadata={
-                    "locomo_sample_id": sample_prefix,
-                    "qa_category": qa_payload.get("category"),
-                    "evidence": list(qa_payload.get("evidence", [])),
-                },
-            )
-
-
-def _locomo_history_observations(conversation_payload: dict[str, Any]) -> list[Observation]:
-    conversation = conversation_payload.get("conversation", {})
-    observations: list[Observation] = []
-    session_numbers = sorted(
-        int(key.split("_")[1])
-        for key in conversation
-        if key.startswith("session_") and key.count("_") == 1
     )
-    for session_number in session_numbers:
-        session_key = f"session_{session_number}"
-        session_timestamp = str(conversation.get(f"{session_key}_date_time", "")).strip()
-        for turn_index, turn in enumerate(conversation.get(session_key, []), start=1):
-            speaker = str(turn.get("speaker", "")).strip() or "speaker"
-            text = str(turn.get("text", "")).strip()
-            if not text:
-                continue
-            observations.append(
-                Observation(
-                    text=f"{speaker}: {text}",
-                    source="dialogue",
-                    metadata={
-                        "benchmark": "locomo",
-                        "session_id": session_key,
-                        "session_timestamp": session_timestamp,
-                        "turn_index": turn_index,
-                        "speaker": speaker,
-                        "dialogue_id": turn.get("dia_id"),
-                    },
-                )
-            )
-    return observations
-
-
-def _iter_longmemeval_samples(benchmark_root: Path, *, variant: str) -> Iterator[BenchmarkSample]:
-    normalized_variant = str(variant).strip().casefold()
-    if normalized_variant not in VALID_LONGMEMEVAL_VARIANTS:
-        raise ValueError(
-            f"Unsupported LongMemEval variant {variant!r}. Choose from {sorted(VALID_LONGMEMEVAL_VARIANTS)}."
-        )
-    path = benchmark_root / "LongMemEval" / _longmemeval_filename(normalized_variant)
-    for payload in _iter_json_array_file(path):
-        question = str(payload.get("question", "")).strip()
-        answer = str(payload.get("answer", "")).strip()
-        if not question or not answer:
-            continue
-        yield BenchmarkSample(
-            sample_id=str(payload.get("question_id", "")).strip() or f"longmemeval-{normalized_variant}",
-            benchmark_name="longmemeval",
-            history_observations=_longmemeval_history_observations(payload),
-            query=Query(
-                text=question,
-                metadata={
-                    "task": "question_answering",
-                    "question_type": payload.get("question_type"),
-                    "question_date": payload.get("question_date"),
-                },
-            ),
-            reference_answer=answer,
-            metadata={
-                "variant": normalized_variant,
-                "question_type": payload.get("question_type"),
-                "question_date": payload.get("question_date"),
-                "answer_session_ids": list(payload.get("answer_session_ids", [])),
-                "haystack_session_ids": list(payload.get("haystack_session_ids", [])),
-            },
-        )
-
-
-def _longmemeval_filename(variant: str) -> str:
-    mapping = {
-        "oracle": "longmemeval_oracle.json",
-        "s_cleaned": "longmemeval_s_cleaned.json",
-        "m_cleaned": "longmemeval_m_cleaned.json",
-    }
-    return mapping[variant]
-
-
-def _longmemeval_history_observations(payload: dict[str, Any]) -> list[Observation]:
-    observations: list[Observation] = []
-    session_ids = list(payload.get("haystack_session_ids", []))
-    session_dates = list(payload.get("haystack_dates", []))
-    sessions = list(payload.get("haystack_sessions", []))
-    for session_index, session in enumerate(sessions):
-        session_id = session_ids[session_index] if session_index < len(session_ids) else session_index
-        session_date = str(session_dates[session_index]).strip() if session_index < len(session_dates) else ""
-        for turn_index, turn in enumerate(session, start=1):
-            role = str(turn.get("role", "")).strip() or "speaker"
-            content = str(turn.get("content", "")).strip()
-            if not content:
-                continue
-            observations.append(
-                Observation(
-                    text=f"{role}: {content}",
-                    source="dialogue",
-                    metadata={
-                        "benchmark": "longmemeval",
-                        "session_id": session_id,
-                        "session_date": session_date,
-                        "turn_index": turn_index,
-                        "speaker": role,
-                    },
-                )
-            )
-    return observations
+    result = run_benchmark(
+        adapter,
+        _minimal_memory_adapter(top_k=top_k),
+        answer_runner=answer_runner,
+        limit=limit,
+    )
+    for prediction in result.predictions:
+        prediction.metadata = {
+            **prediction.metadata,
+            "retrieved_item_count": len(prediction.retrieved_source_ids),
+        }
+    return result.predictions
 
 
 def _iter_dmr_samples(benchmark_root: Path) -> Iterator[BenchmarkSample]:
@@ -415,58 +273,8 @@ def _dmr_query_text(payload: dict[str, Any], *, speaker_key: str) -> str:
     )
 
 
-def _iter_json_array_file(path: Path, *, chunk_size: int = 1 << 16) -> Iterator[dict[str, Any]]:
-    decoder = json.JSONDecoder()
-    buffer = ""
-    array_started = False
-    with path.open("r", encoding="utf-8") as handle:
-        while True:
-            chunk = handle.read(chunk_size)
-            if chunk:
-                buffer += chunk
-            end_of_file = chunk == ""
-
-            while True:
-                buffer = buffer.lstrip()
-                if not buffer:
-                    break
-                if not array_started:
-                    if buffer[0] != "[":
-                        raise ValueError(f"{path} is not a JSON array file.")
-                    array_started = True
-                    buffer = buffer[1:]
-                    continue
-                if buffer[0] == "]":
-                    return
-                try:
-                    payload, offset = decoder.raw_decode(buffer)
-                except json.JSONDecodeError:
-                    if end_of_file:
-                        raise
-                    break
-                if not isinstance(payload, dict):
-                    raise ValueError(f"{path} contains a non-object JSON array item.")
-                yield payload
-                buffer = buffer[offset:].lstrip()
-                if buffer.startswith(","):
-                    buffer = buffer[1:]
-                    continue
-                if buffer.startswith("]"):
-                    return
-
-            if end_of_file:
-                break
-    raise ValueError(f"JSON array file {path} ended unexpectedly.")
-
-
-def _write_predictions_jsonl(predictions: Iterable[BenchmarkPrediction], output_path: Path) -> int:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with output_path.open("w", encoding="utf-8") as handle:
-        for prediction in predictions:
-            handle.write(json.dumps(prediction.to_json_dict(), ensure_ascii=False) + "\n")
-            count += 1
-    return count
+def _write_predictions_jsonl(predictions, output_path: Path) -> int:
+    return write_predictions_jsonl(predictions, output_path)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
