@@ -39,6 +39,12 @@ Avoid re-documenting these in detail unless something materially changes.
 
 ## Important Recent Progress
 
+- A new root-level English `README.md` now exists and is aligned with the current repo surface:
+  - explains the project goal in terms of composable memory primitives rather than paper-specific pipelines
+  - documents config loading, shipped example configs, and the current benchmark CLI entrypoint
+  - clarifies that benchmark raw files must be placed by the user into the expected `benchmarks/` subfolders before CLI evaluation
+  - gives a concise architecture overview spanning `core` / `pipeline` / `baselines` / `config` / `example` / `benchmarking`
+  - now explicitly frames the architecture as LEGO-like slot composition, points readers to `DSL_REFERENCE.zh-CN.md`, and uses `memprimitive/example/demonstration/embedding_similarity_retrieval.py` as the small concrete assembly example
 - Retrieval, prompt, readout, graph, and tool-calling surfaces are now broad enough to build nontrivial paper-style reconstructions from shared primitives rather than ad hoc wrappers.
 - A first declarative config bridge now exists under `memprimitive/config/`:
   - single-file YAML config with fixed `version/root/objects` shape
