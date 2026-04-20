@@ -64,6 +64,11 @@ Avoid re-documenting these in detail unless something materially changes.
   - a minimal one-layer pipeline baseline using `ingest(...)` + single `recall(...)`
   - a thin outer answer runner that sends retrieved memory plus the query to the real OpenAI-compatible runtime
   - a CLI entrypoint that can run limited smoke/debug jobs and write JSONL predictions
+- The benchmark CLI can now filter LoCoMo by `--locomo-users` using comma-separated conversation indices, `sample_id`s, or speaker names, and can run either the legacy minimal pipeline or the classics Mem0 reconstruction via `--memory-adapter minimal|mem0`.
+- Mem0-style LoCoMo evaluation assets have been moved into `memprimitive/benchmarking/` as runnable local modules:
+  - `prompts.py` carries the Mem0 answer-prompt templates
+  - `evals.py` reads current benchmark JSONL predictions or grouped Mem0 JSON and writes BLEU1/F1 plus optional LLM-judge metrics
+  - `generate_scores.py` summarizes those metric files by category and overall
 - That early harness has now been refactored into a more general adapter layer under `memprimitive/benchmarking/`:
   - normalized shared benchmark types now include `ConversationTurn`, richer `BenchmarkSample`, `MemoryRecall`, and prediction/run-result containers
   - official benchmark adapters now cover `LoCoMo` and `LongMemEval` through one common `BenchmarkAdapter` protocol
@@ -162,7 +167,9 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 - `mem0_memory.py` is reasonably close at the mechanism level.
 - PromptPlan-controlled candidate visibility now closes the previous major update-scope mismatch: the Mem0 profile-update tools can be restricted to recalled profile candidates instead of the whole `profile` layer.
+- LoCoMo benchmark fidelity caveat: the current `--memory-adapter mem0` path is not timestamp-equivalent to upstream Mem0 evaluation. The LoCoMo dataset adapter preserves each turn's `session_timestamp`, but `PairwiseDialogueMemoryAdapter` calls `ingest_message_pair(...)` without passing it, so Mem0 profile records use ingestion-time timestamps. It also collapses both speakers into one local Mem0 profile and loses speaker labels in pairwise ingestion, whereas upstream Mem0 evaluation stores per-speaker memories with dataset timestamps in metadata and renders retrieved memories as `timestamp: memory`.
 - The Mem0 profile write path is now organized as extraction-plus-fanout rather than one multi-fact maintenance step: an outer pipeline extracts `fact_list`, then `FanoutIngestOrganization` fans each fact into a child single-fact profile pipeline for add/update/delete decisions. The old helper-side per-fact recall stitching path has been removed.
+- Mem0 profile UPDATE/DELETE tools now reject invisible or hallucinated record ids as explicit no-op tool effects instead of raising through the whole benchmark run. This keeps invalid model tool calls from mutating memory while allowing long LoCoMo-style runs to continue.
 - `mem0g_memory.py` has moved closer to upstream structure by keeping both a profile/vector branch and a graph branch, but it is still only partially aligned.
 - Mem0g now uses the same prompt-controlled visible-domain path for both its profile/vector tools and graph-maintenance tools.
 - Mem0g's profile/vector branch now follows the same extraction-plus-fanout organization as Mem0: outer fact extraction via `fact_list`, then per-fact child ingest through `FanoutIngestOrganization` rather than helper-side multi-fact recall assembly.

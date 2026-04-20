@@ -11,6 +11,11 @@ from memprimitive.benchmarking.minimal_baseline import (
     load_benchmark_samples,
     run_minimal_baseline_sample,
 )
+from memprimitive.benchmarking.evals import evaluate_file
+from memprimitive.benchmarking.generate_scores import summarize_scores
+from memprimitive.core import MemoryStore, Packet, StoreLayerSpec, StoreTopology
+from memprimitive.utils._llm_function_tools import WriteToolCallContext
+from memprimitive.utils._mem0_family import build_fixed_profile_tools
 from memprimitive.utils._runtime import Runtime
 
 
@@ -71,6 +76,39 @@ def test_load_locomo_samples_normalizes_dialogue_and_qa(tmp_path: Path) -> None:
     assert samples[0].history_turns[0].turn_id == "D1:1"
     assert samples[0].history_turns[0].session_id == "session_1"
     assert [obs.text for obs in samples[0].history_observations] == ["Alice: I like tea.", "Bob: I like coffee."]
+
+
+def test_load_locomo_samples_filters_by_user_values(tmp_path: Path) -> None:
+    data_dir = tmp_path / "LoCoMo" / "data"
+    data_dir.mkdir(parents=True)
+    payload = [
+        {
+            "sample_id": "conv-1",
+            "conversation": {
+                "speaker_a": "Alice",
+                "speaker_b": "Bob",
+                "session_1": [{"speaker": "Alice", "dia_id": "D1:1", "text": "I like tea."}],
+            },
+            "qa": [{"question": "What does Alice like?", "answer": "Tea", "category": 1}],
+        },
+        {
+            "sample_id": "conv-2",
+            "conversation": {
+                "speaker_a": "Carol",
+                "speaker_b": "Dave",
+                "session_1": [{"speaker": "Carol", "dia_id": "D2:1", "text": "I like jazz."}],
+            },
+            "qa": [{"question": "What does Carol like?", "answer": "Jazz", "category": 2}],
+        },
+    ]
+    (data_dir / "locomo10.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    by_index_and_id = list(load_benchmark_samples("locomo", benchmark_root=tmp_path, locomo_users="1,conv-2"))
+    by_speaker = list(load_benchmark_samples("locomo", benchmark_root=tmp_path, locomo_users="Carol"))
+
+    assert [sample.metadata["locomo_sample_id"] for sample in by_index_and_id] == ["conv-1", "conv-2"]
+    assert [sample.metadata["locomo_sample_id"] for sample in by_speaker] == ["conv-2"]
+    assert by_speaker[0].metadata["locomo_user_index"] == 2
 
 
 def test_load_longmemeval_samples_flattens_haystack_sessions(tmp_path: Path) -> None:
@@ -140,3 +178,52 @@ def test_run_minimal_baseline_sample_uses_answer_runner() -> None:
     assert prediction.predicted_answer.startswith("ANSWER::")
     assert prediction.retrieved_source_ids
     assert prediction.memory_adapter_name == "minimal_pipeline"
+
+
+def test_mem0_style_eval_reads_benchmark_jsonl(tmp_path: Path) -> None:
+    predictions_path = tmp_path / "predictions.jsonl"
+    metrics_path = tmp_path / "metrics.json"
+    predictions_path.write_text(
+        json.dumps(
+            {
+                "benchmark_name": "locomo",
+                "query_text": "What does Alice like?",
+                "reference_answer": "tea",
+                "predicted_answer": "Alice likes tea.",
+                "metadata": {"locomo_sample_id": "conv-1", "qa_category": 1},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    results = evaluate_file(
+        input_file=predictions_path,
+        output_file=metrics_path,
+        max_workers=1,
+        use_llm_judge=False,
+    )
+    summary = summarize_scores(metrics_path)
+
+    assert results["conv-1"][0]["f1_score"] > 0
+    assert summary["overall"]["count"] == 1
+    assert summary["by_category"]["1"]["count"] == 1
+
+
+def test_mem0_profile_tools_reject_invisible_update_without_mutation() -> None:
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    context = WriteToolCallContext(
+        packet=Packet(),
+        store=store,
+        module_slot="memory_evolution",
+        default_target_layer="profile",
+        selected_records=[],
+        visible_records=[],
+    )
+    update_tool = next(tool for tool in build_fixed_profile_tools(embed_on_add=False, embed_on_update=False) if tool.name == "UPDATE_PROFILE")
+
+    result = update_tool.executor(context, {"record_id": "unit-not-a-record", "text": "bad update"})
+
+    assert result.store.count("profile") == 0
+    assert result.effects[0]["status"] == "rejected"
+    assert result.effects[0]["record_id"] == "unit-not-a-record"
