@@ -104,6 +104,28 @@ def find_visible_record(context: WriteToolCallContext, record_id: str) -> Memory
     raise ValueError(f"Record {normalized!r} is not in the current profile candidate set.")
 
 
+def _rejected_tool_result(
+    context: WriteToolCallContext,
+    *,
+    tool: str,
+    record_id: str,
+    reason: str,
+) -> WriteToolResult:
+    return WriteToolResult(
+        effects=[
+            {
+                "action": tool.removesuffix("_PROFILE").lower(),
+                "record_id": str(record_id).strip(),
+                "layer": "profile",
+                "status": "rejected",
+                "reason": reason,
+                "tool": tool,
+            }
+        ],
+        store=context.store,
+    )
+
+
 def build_fixed_profile_tools(
     *,
     embed_on_add: bool,
@@ -158,7 +180,16 @@ def build_fixed_profile_tools(
         )
 
     def _update_executor(context: WriteToolCallContext, arguments: dict[str, object]) -> WriteToolResult:
-        record = find_visible_record(context, str(arguments.get("record_id", "")))
+        requested_record_id = str(arguments.get("record_id", ""))
+        try:
+            record = find_visible_record(context, requested_record_id)
+        except ValueError as exc:
+            return _rejected_tool_result(
+                context,
+                tool="UPDATE_PROFILE",
+                record_id=requested_record_id,
+                reason=str(exc),
+            )
         text = record.text
         if "text" in arguments:
             text = str(arguments.get("text", "")).strip()
@@ -192,7 +223,16 @@ def build_fixed_profile_tools(
         )
 
     def _delete_executor(context: WriteToolCallContext, arguments: dict[str, object]) -> WriteToolResult:
-        record = find_visible_record(context, str(arguments.get("record_id", "")))
+        requested_record_id = str(arguments.get("record_id", ""))
+        try:
+            record = find_visible_record(context, requested_record_id)
+        except ValueError as exc:
+            return _rejected_tool_result(
+                context,
+                tool="DELETE_PROFILE",
+                record_id=requested_record_id,
+                reason=str(exc),
+            )
         removed = context.store.delete_record(record.layer, record.record_id)
         return WriteToolResult(
             effects=[

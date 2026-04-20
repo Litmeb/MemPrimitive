@@ -23,7 +23,7 @@ from ._bench_adapters import (
     _iter_json_array_file,
     create_benchmark_adapter,
 )
-from ._memory_adapters import PipelineMemoryAdapter
+from ._memory_adapters import PipelineMemoryAdapter, create_mem0_memory_adapter
 from ._runner import SingleRecallLLMAnswerRunner, run_benchmark, write_predictions_jsonl
 from ._types import BenchmarkPrediction, BenchmarkSample
 
@@ -49,6 +49,8 @@ class _LegacyDMRBenchmarkAdapter:
         self.benchmark_root = Path(benchmark_root)
 
     def iter_samples(self, *, limit: int | None = None) -> Iterator[BenchmarkSample]:
+        if limit == 0:
+            return
         yielded = 0
         for sample in _iter_dmr_samples(self.benchmark_root):
             yield sample
@@ -91,11 +93,21 @@ def _minimal_memory_adapter(*, top_k: int) -> PipelineMemoryAdapter:
     )
 
 
+def _create_cli_memory_adapter(name: str, *, top_k: int):
+    adapter_name = str(name).strip().casefold()
+    if adapter_name == "minimal":
+        return _minimal_memory_adapter(top_k=top_k)
+    if adapter_name == "mem0":
+        return create_mem0_memory_adapter()
+    raise ValueError("Unsupported memory adapter. Choose from ['mem0', 'minimal'].")
+
+
 def _compat_benchmark_adapter(
     name: str,
     *,
     benchmark_root: Path | str,
     longmemeval_variant: str,
+    locomo_users: str | list[str] | tuple[str, ...] | None = None,
 ):
     benchmark_name = str(name).strip().casefold()
     if benchmark_name == "dmr":
@@ -104,6 +116,7 @@ def _compat_benchmark_adapter(
         benchmark_name,
         benchmark_root=benchmark_root,
         longmemeval_variant=longmemeval_variant,
+        locomo_users=locomo_users,
     )
 
 
@@ -112,6 +125,7 @@ def load_benchmark_samples(
     *,
     benchmark_root: Path | str = DEFAULT_BENCHMARK_ROOT,
     longmemeval_variant: str = "s_cleaned",
+    locomo_users: str | list[str] | tuple[str, ...] | None = None,
     limit: int | None = None,
 ) -> Iterator[BenchmarkSample]:
     """Yield normalized samples for one supported benchmark."""
@@ -123,6 +137,7 @@ def load_benchmark_samples(
         benchmark_name,
         benchmark_root=benchmark_root,
         longmemeval_variant=longmemeval_variant,
+        locomo_users=locomo_users,
     )
     yield from adapter.iter_samples(limit=limit)
 
@@ -156,6 +171,7 @@ def run_minimal_baseline(
     benchmark_name: str,
     benchmark_root: Path | str = DEFAULT_BENCHMARK_ROOT,
     longmemeval_variant: str = "s_cleaned",
+    locomo_users: str | list[str] | tuple[str, ...] | None = None,
     limit: int | None = None,
     top_k: int = 5,
     answer_runner: SingleRecallLLMAnswerRunner | None = None,
@@ -166,6 +182,7 @@ def run_minimal_baseline(
         benchmark_name,
         benchmark_root=benchmark_root,
         longmemeval_variant=longmemeval_variant,
+        locomo_users=locomo_users,
     )
     result = run_benchmark(
         adapter,
@@ -282,8 +299,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark", choices=sorted(VALID_BENCHMARKS), required=True)
     parser.add_argument("--benchmark-root", type=Path, default=DEFAULT_BENCHMARK_ROOT)
     parser.add_argument("--longmemeval-variant", choices=sorted(VALID_LONGMEMEVAL_VARIANTS), default="s_cleaned")
+    parser.add_argument(
+        "--locomo-users",
+        nargs="+",
+        default=None,
+        help=(
+            "Comma-separated LoCoMo conversation filters. "
+            "Each value may be a 1-based conversation index, locomo sample_id, or speaker name."
+        ),
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--memory-adapter",
+        choices=("minimal", "mem0"),
+        default="minimal",
+        help="Memory system to evaluate. 'minimal' preserves the legacy baseline; 'mem0' runs the classics Mem0 reconstruction.",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     return parser
 
@@ -291,18 +323,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-    predictions: list[BenchmarkPrediction] = []
-    for index, sample in enumerate(
-        load_benchmark_samples(
-            args.benchmark,
-            benchmark_root=args.benchmark_root,
-            longmemeval_variant=args.longmemeval_variant,
-            limit=args.limit,
-        ),
-        start=1,
-    ):
-        print(f"[{index}] running {sample.benchmark_name}:{sample.sample_id}")
-        predictions.append(run_minimal_baseline_sample(sample, top_k=args.top_k))
+    benchmark_adapter = _compat_benchmark_adapter(
+        args.benchmark,
+        benchmark_root=args.benchmark_root,
+        longmemeval_variant=args.longmemeval_variant,
+        locomo_users=args.locomo_users,
+    )
+    memory_adapter = _create_cli_memory_adapter(args.memory_adapter, top_k=args.top_k)
+    result = run_benchmark(
+        benchmark_adapter,
+        memory_adapter,
+        limit=args.limit,
+    )
+    predictions = result.predictions
+    for index, prediction in enumerate(predictions, start=1):
+        print(f"[{index}] ran {prediction.benchmark_name}:{prediction.sample_id}")
     written = _write_predictions_jsonl(predictions, args.output)
     print(f"wrote {written} predictions to {args.output}")
     return 0

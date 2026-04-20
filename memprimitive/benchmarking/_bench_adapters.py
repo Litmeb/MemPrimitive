@@ -14,17 +14,58 @@ VALID_BENCHMARKS = frozenset({"locomo", "longmemeval"})
 VALID_LONGMEMEVAL_VARIANTS = frozenset({"oracle", "s_cleaned", "m_cleaned"})
 
 
+def parse_comma_separated_values(value: str | list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    """Normalize comma-separated CLI filters into a compact tuple."""
+
+    if value is None:
+        return ()
+    raw_values = value if isinstance(value, (list, tuple)) else (value,)
+    parsed: list[str] = []
+    for raw_value in raw_values:
+        for item in str(raw_value).split(","):
+            item = item.strip()
+            if item:
+                parsed.append(item)
+    return tuple(parsed)
+
+
+def _matches_locomo_user_filter(
+    conversation_payload: dict[str, Any],
+    *,
+    conversation_index: int,
+    filters: tuple[str, ...],
+) -> bool:
+    if not filters:
+        return True
+    conversation = conversation_payload.get("conversation", {})
+    candidates = {
+        str(conversation_index),
+        str(conversation_payload.get("sample_id", "")).strip().casefold(),
+        str(conversation.get("speaker_a", "")).strip().casefold(),
+        str(conversation.get("speaker_b", "")).strip().casefold(),
+    }
+    return any(str(item).strip().casefold() in candidates for item in filters)
+
+
 class LoCoMoBenchmarkAdapter:
     """Normalize LoCoMo QA samples into the shared benchmark shape."""
 
     name = "locomo"
 
-    def __init__(self, *, benchmark_root: Path | str = DEFAULT_BENCHMARK_ROOT) -> None:
+    def __init__(
+        self,
+        *,
+        benchmark_root: Path | str = DEFAULT_BENCHMARK_ROOT,
+        locomo_users: str | list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         self.benchmark_root = Path(benchmark_root)
+        self.locomo_users = parse_comma_separated_values(locomo_users)
 
     def iter_samples(self, *, limit: int | None = None) -> Iterator[BenchmarkSample]:
+        if limit == 0:
+            return
         yielded = 0
-        for sample in _iter_locomo_samples(self.benchmark_root):
+        for sample in _iter_locomo_samples(self.benchmark_root, locomo_users=self.locomo_users):
             yield sample
             yielded += 1
             if limit is not None and yielded >= limit:
@@ -50,6 +91,8 @@ class LongMemEvalBenchmarkAdapter:
             )
 
     def iter_samples(self, *, limit: int | None = None) -> Iterator[BenchmarkSample]:
+        if limit == 0:
+            return
         yielded = 0
         for sample in _iter_longmemeval_samples(self.benchmark_root, variant=self.variant):
             yield sample
@@ -63,12 +106,13 @@ def create_benchmark_adapter(
     *,
     benchmark_root: Path | str = DEFAULT_BENCHMARK_ROOT,
     longmemeval_variant: str = "s_cleaned",
+    locomo_users: str | list[str] | tuple[str, ...] | None = None,
 ) -> LoCoMoBenchmarkAdapter | LongMemEvalBenchmarkAdapter:
     """Build one official benchmark adapter by name."""
 
     benchmark_name = str(name).strip().casefold()
     if benchmark_name == "locomo":
-        return LoCoMoBenchmarkAdapter(benchmark_root=benchmark_root)
+        return LoCoMoBenchmarkAdapter(benchmark_root=benchmark_root, locomo_users=locomo_users)
     if benchmark_name == "longmemeval":
         return LongMemEvalBenchmarkAdapter(
             benchmark_root=benchmark_root,
@@ -77,11 +121,23 @@ def create_benchmark_adapter(
     raise ValueError(f"Unsupported benchmark {name!r}. Choose from {sorted(VALID_BENCHMARKS)}.")
 
 
-def _iter_locomo_samples(benchmark_root: Path) -> Iterator[BenchmarkSample]:
+def _iter_locomo_samples(
+    benchmark_root: Path,
+    *,
+    locomo_users: str | list[str] | tuple[str, ...] | None = None,
+) -> Iterator[BenchmarkSample]:
     path = benchmark_root / "LoCoMo" / "data" / "locomo10.json"
     conversations = json.loads(path.read_text(encoding="utf-8"))
-    for conversation_payload in conversations:
+    filters = parse_comma_separated_values(locomo_users)
+    for conversation_index, conversation_payload in enumerate(conversations, start=1):
+        if not _matches_locomo_user_filter(
+            conversation_payload,
+            conversation_index=conversation_index,
+            filters=filters,
+        ):
+            continue
         sample_prefix = str(conversation_payload["sample_id"]).strip()
+        conversation = conversation_payload.get("conversation", {})
         history_turns = _locomo_history_turns(conversation_payload)
         for qa_index, qa_payload in enumerate(conversation_payload.get("qa", []), start=1):
             question = str(qa_payload.get("question", "")).strip()
@@ -96,7 +152,10 @@ def _iter_locomo_samples(benchmark_root: Path) -> Iterator[BenchmarkSample]:
                 query=Query(text=question, metadata={"task": "question_answering"}),
                 reference_answer=answer,
                 metadata={
+                    "locomo_user_index": conversation_index,
                     "locomo_sample_id": sample_prefix,
+                    "speaker_a": conversation.get("speaker_a"),
+                    "speaker_b": conversation.get("speaker_b"),
                     "qa_category": qa_payload.get("category"),
                     "evidence": list(qa_payload.get("evidence", [])),
                 },
