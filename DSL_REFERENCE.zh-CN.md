@@ -173,7 +173,9 @@
       5. `source_type`
    2. `embedding_model`
       文本 embedding 模型。默认读环境变量，否则回退到 `sentence-transformers/all-MiniLM-L6-v2`。
-   3. `api_key` / `base_url` / `model`
+   3. `embedding_provider` / `embedding_api_key` / `embedding_base_url`
+      可选 embedding 后端配置。默认 `sentence_transformers`，走本地 `sentence-transformers`；设为 `openai` 时，使用 OpenAI-compatible embeddings API，并读取独立的 `MEMPRIMITIVE_EMBEDDING_API_KEY` / `MEMPRIMITIVE_EMBEDDING_BASE_URL` / `MEMPRIMITIVE_EMBEDDING_MODEL`。
+   4. `api_key` / `base_url` / `model`
       当前这个类本身主要用于统一 runtime 配置来源；真正用到的是 embedding 路径。
 5. 输出字段说明
    1. `unit.normalized_text`
@@ -750,11 +752,15 @@
       没有在 tool 参数里显式给出 layer 时的默认落点。
    4. `max_turns`
       最多几轮 tool-calling。
-   5. `strict_tools`
-      tool 执行失败时是否直接抛异常。
-   6. `allow_no_tool_call`
+   5. `max_retry`
+      tool 调用失败后最多额外重跑几次 LLM，默认 `0`。
+   6. `raise_on_tool_error`
+      默认 `False`。如果重试耗尽后仍有失败 tool call，设为 `True` 时抛异常，否则把失败记录到 trace 并跳过该调用。
+   7. `strict_tools`
+      兼容旧参数；显式设为 `True` 时保留旧行为，tool 执行失败会立即抛异常。
+   8. `allow_no_tool_call`
       是否允许 LLM 一次 tool 都不调。
-   7. `api_key` / `base_url` / `model` / `embedding_model`
+   9. `api_key` / `base_url` / `model` / `embedding_model`
       runtime 配置。
 5. 重要上下文变量
    prompt 渲染时会额外提供：
@@ -766,6 +772,7 @@
    1. organization 阶段的 `visible_records` 默认是整个 store。
    2. 如果 prompt 里配置了 recall plan / visible record label，它还能在渲染 prompt 时先做一轮 recall，再把 recall 命中的 records 并入 `visible_records`。
    3. 每个 unit 单独跑一遍 tool-calling，因此 trace 里是 `per_unit` 结构。
+   4. 如果某次 LLM 尝试中有失败 tool call，会从尝试前 store 快照重跑；最终只提交最后一次接受尝试里的效果。
 
 ## 6. `evolution_trigger`
 
@@ -1078,9 +1085,14 @@
    4. `target_layer`
       tool 未显式指定目标层时的默认值。
    5. `max_turns`
-   6. `strict_tools`
-   7. `allow_no_tool_call`
-   8. `api_key` / `base_url` / `model` / `embedding_model`
+   6. `max_retry`
+      tool 调用失败后最多额外重跑几次 LLM，默认 `0`。
+   7. `raise_on_tool_error`
+      默认 `False`。重试耗尽后仍失败时，默认把失败写入 trace 并跳过失败调用；设为 `True` 时抛异常。
+   8. `strict_tools`
+      兼容旧参数；显式设为 `True` 时 tool 失败立即抛异常。
+   9. `allow_no_tool_call`
+   10. `api_key` / `base_url` / `model` / `embedding_model`
 5. 选 record 逻辑
    selected records 的优先级是：
    1. 如果 `packet.decisions_store` 有值，优先按它选。
@@ -1095,6 +1107,7 @@
       4. `tools`
       5. `default_target_layer`
    2. `visible_records` 默认至少包含 `selected_records`，如果 prompt recall 又命中了别的记录，会并入可见集。
+   3. 如果某次 LLM 尝试中有失败 tool call，会从尝试前 store 快照重跑；最终只提交最后一次接受尝试里的效果。
 
 ## 8. `retrieval`
 
@@ -1711,6 +1724,11 @@ class WriteToolResult:
    5. `deleted_record_ids`
 5. 内置工具写出的 record 会自动补：
    `metadata["llm_tool"]`
+6. 写路径 tool 默认容忍单次调用失败：
+   1. 失败调用不会修改 store。
+   2. 失败会记录到 `tool_calls` / `failed_tool_calls`。
+   3. `max_retry` 会把原始 prompt、context 和失败摘要一起交回 LLM 重跑。
+   4. 需要失败即报错时，优先使用 `raise_on_tool_error=True`；旧的 `strict_tools=True` 仍表示立即抛异常。
 
 ## 11. Readout Tool 协议
 

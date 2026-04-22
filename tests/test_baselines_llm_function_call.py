@@ -52,8 +52,10 @@ def test_llm_function_call_organization_adds_record_and_renders_prompt_template(
         return "DONE"
 
     module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    original_store = store
     packet_out, store = module.run(packet, store)
 
+    assert store is original_store
     profile_records = store.iter_records("profile")
     assert len(profile_records) == 1
     assert profile_records[0].text == "Alice profile note"
@@ -236,15 +238,41 @@ def test_llm_function_call_evolution_updates_selected_records_from_decisions_sto
         return "DONE"
 
     module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    original_store = store
     packet_out, store = module.run(
         Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}),
         store,
     )
 
+    assert store is original_store
     assert store.iter_records("profile")[0].text == "new profile"
     assert packet_out.trace["memory_evolution"]["decision_source"] == "decisions_store"
     assert packet_out.trace["memory_evolution"]["selected_record_ids"] == ["rec-1"]
     assert packet_out.trace["memory_evolution"]["updated_record_ids"] == ["rec-1"]
+
+
+def test_llm_function_call_evolution_add_preserves_shared_store_identity() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    module = LLMFunctionCallEvolution(
+        prompt="Add a profile memory",
+        tools=["ADD"],
+        target_layer="profile",
+    )
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"text": "Caroline attended an LGBTQ support group on 7 May 2023."})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, returned_store = module.run(Packet(), store)
+
+    assert returned_store is store
+    assert [record.text for record in store.iter_records("profile")] == [
+        "Caroline attended an LGBTQ support group on 7 May 2023."
+    ]
+    assert packet_out.trace["memory_evolution"]["written_record_ids"] == ["rec-1"]
 
 
 def test_llm_function_call_evolution_deletes_records_from_source_layer_scan() -> None:
@@ -320,6 +348,86 @@ def test_llm_function_call_evolution_delete_rejects_record_outside_selected_reco
             Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}),
             store,
         )
+
+
+def test_llm_function_call_evolution_default_tool_failure_is_recorded_without_raising() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["selected profile", "other profile"])
+    module = LLMFunctionCallEvolution(prompt="Try invalid update", tools=["UPDATE"])
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "should be skipped"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, updated_store = module.run(Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}), store)
+
+    assert [record.text for record in updated_store.iter_records("profile")] == ["selected profile", "other profile"]
+    trace = packet_out.trace["memory_evolution"]
+    assert trace["raise_on_tool_error"] is False
+    assert trace["retry_count"] == 0
+    assert trace["tool_calls"][0]["status"] == "failed"
+    assert "current evolution candidate set" in trace["failed_tool_calls"][0]["error"]
+
+
+def test_llm_function_call_evolution_raise_on_tool_error_raises_after_retry_exhaustion() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["selected profile", "other profile"])
+    module = LLMFunctionCallEvolution(
+        prompt="Try invalid update",
+        tools=["UPDATE"],
+        max_retry=1,
+        raise_on_tool_error=True,
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        calls.append(context)
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "should fail"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="LLMFunctionCallEvolution tool calls failed"):
+        module.run(Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}), store)
+
+    assert len(calls) == 2
+    assert calls[1]["retry"]["previous_failed_tool_calls"][0]["tool_name"] == "UPDATE"
+    assert [record.text for record in store.iter_records("profile")] == ["selected profile", "other profile"]
+
+
+def test_llm_function_call_evolution_max_retry_reruns_agent_and_commits_only_final_attempt() -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="profile")]))
+    _seed_layer(store, "profile", ["selected profile", "other profile"])
+    module = LLMFunctionCallEvolution(prompt="Retry update", tools=["UPDATE"], max_retry=1)
+    calls: list[dict[str, Any]] = []
+
+    def _fake_run_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        calls.append(context)
+        if len(calls) == 1:
+            _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "text": "partial update"})
+            _invoke_runtime_tool(tools[0], {"record_id": "rec-2", "text": "invalid update"})
+            return "FAILED"
+        assert context["retry"]["previous_failed_tool_calls"][0]["tool_name"] == "UPDATE"
+        _invoke_runtime_tool(tools[0], {"record_id": "rec-1", "text": "final update"})
+        return "DONE"
+
+    module._run_agent = _fake_run_agent.__get__(module, type(module))  # type: ignore[method-assign]
+    packet_out, updated_store = module.run(Packet(decisions_store={"profile": {"record_ids": ["rec-1"]}}), store)
+
+    assert [record.text for record in updated_store.iter_records("profile")] == ["final update", "other profile"]
+    assert len(calls) == 2
+    trace = packet_out.trace["memory_evolution"]
+    assert trace["retry_count"] == 1
+    assert len(trace["attempts"]) == 2
+    assert trace["attempts"][0]["effects"][0]["record_id"] == "rec-1"
+    assert trace["effects"] == trace["attempts"][1]["effects"]
 
 
 def test_llm_function_call_evolution_graph_update_normalizes_graph_metadata() -> None:

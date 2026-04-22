@@ -8,6 +8,7 @@ from typing import Any, Callable
 from ..config import load_pipeline_from_yaml
 from ..core import Observation, Query, Readout
 from ..pipeline import FreeMemoryPipeline, MemoryPipeline
+from ..example.classics import mem0_memory
 from ._types import BenchmarkSample, ConversationTurn, MemoryRecall, default_turn_to_observation
 
 
@@ -240,6 +241,7 @@ class PairwiseDialogueMemoryAdapter(FunctionMemoryAdapter):
                 assistant_text=str(second_turn.text).strip() if second_turn is not None else "",
                 session_id=str(first_turn.session_id).strip(),
                 turn_id=str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip(),
+                timestamp=str(first_turn.session_timestamp).strip(),
             )
         return {
             "loaded_pair_count": pair_count,
@@ -247,21 +249,268 @@ class PairwiseDialogueMemoryAdapter(FunctionMemoryAdapter):
         }
 
 
-def create_mem0_memory_adapter(*, name: str = "mem0") -> PairwiseDialogueMemoryAdapter:
-    """Create a ready-to-run benchmark adapter for the classic Mem0 reconstruction."""
+def _locomo_turn_text(turn: ConversationTurn | None) -> str:
+    if turn is None:
+        return ""
+    speaker_label = str(turn.speaker).strip() or str(turn.role).strip() or "speaker"
+    text = str(turn.text).strip()
+    return f"{speaker_label}: {text}" if text else ""
 
-    from ..example.classics.mem0_memory import build_mem0_memory_system, ingest_message_pair, recall_profile
 
-    def _recall(system: dict[str, object], query: Query) -> MemoryRecall:
-        return MemoryRecall(
-            text=recall_profile(system, user_query=query.text),
-            source_ids=[],
-            metadata={"recall_helper": "recall_profile"},
+def _locomo_speaker_user_id(sample: BenchmarkSample, *, speaker_key: str, fallback_name: str) -> str:
+    index = str(sample.metadata.get("locomo_user_index", "")).strip() or str(sample.sample_id).strip()
+    speaker_name = str(sample.metadata.get(speaker_key, "")).strip() or fallback_name
+    return f"{speaker_name}_{index}"
+
+
+def _locomo_speaker_user_id_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    sample_id: str,
+    speaker_key: str,
+    fallback_name: str,
+) -> str:
+    index = str(metadata.get("locomo_user_index", "")).strip() or str(sample_id).strip()
+    speaker_name = str(metadata.get(speaker_key, "")).strip() or fallback_name
+    return f"{speaker_name}_{index}"
+
+
+def _locomo_pair_for_speaker(
+    first_turn: ConversationTurn,
+    second_turn: ConversationTurn | None,
+    *,
+    speaker_name: str,
+) -> tuple[str, str]:
+    target = str(speaker_name).strip().casefold()
+    first_speaker = str(first_turn.speaker).strip().casefold()
+    second_speaker = str(second_turn.speaker).strip().casefold() if second_turn is not None else ""
+
+    if first_speaker == target:
+        user_turn = first_turn
+        assistant_turn = second_turn if second_speaker and second_speaker != target else None
+    elif second_turn is not None and second_speaker == target:
+        user_turn = second_turn
+        assistant_turn = first_turn if first_speaker != target else None
+    else:
+        return "", ""
+
+    return _locomo_turn_text(user_turn), _locomo_turn_text(assistant_turn)
+
+
+def _build_mem0_locomo_systems(*, recent_top_k: int, recall_top_k: int, similar_top_k: int) -> dict[str, object]:
+    return {
+        "speaker_1_system": mem0_memory.build_mem0_memory_system(
+            recent_top_k=recent_top_k,
+            recall_top_k=recall_top_k,
+            similar_top_k=similar_top_k,
+        ),
+        "speaker_2_system": mem0_memory.build_mem0_memory_system(
+            recent_top_k=recent_top_k,
+            recall_top_k=recall_top_k,
+            similar_top_k=similar_top_k,
+        ),
+    }
+
+
+def _load_mem0_locomo_case(system: dict[str, object], sample: BenchmarkSample, *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
+    if not sample.history_turns:
+        raise ValueError("Mem0 LoCoMo adapter requires sample.history_turns.")
+
+    speaker_a = str(sample.metadata.get("speaker_a", "")).strip() or "speaker_1"
+    speaker_b = str(sample.metadata.get("speaker_b", "")).strip() or "speaker_2"
+    speaker_a_user_id = _locomo_speaker_user_id(sample, speaker_key="speaker_a", fallback_name="speaker_1")
+    speaker_b_user_id = _locomo_speaker_user_id(sample, speaker_key="speaker_b", fallback_name="speaker_2")
+    pair_count = 0
+
+    speaker_1_system = system["speaker_1_system"]
+    speaker_2_system = system["speaker_2_system"]
+    total_turns = len(sample.history_turns)
+    loaded_turns = 0
+
+    if progress_callback is not None:
+        _call_with_supported_kwargs(
+            progress_callback,
+            phase="memory_init",
+            sample=sample,
+            total_turns=total_turns,
         )
 
-    return PairwiseDialogueMemoryAdapter(
+    for first_turn, second_turn in _iter_pairwise_turns(sample.history_turns):
+        pair_count += 1
+        timestamp = str(first_turn.session_timestamp).strip()
+        turn_id = str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip()
+        turns_in_pair = 2 if second_turn is not None else 1
+
+        speaker_1_user_text, speaker_1_assistant_text = _locomo_pair_for_speaker(
+            first_turn,
+            second_turn,
+            speaker_name=speaker_a,
+        )
+        speaker_2_user_text, speaker_2_assistant_text = _locomo_pair_for_speaker(
+            first_turn,
+            second_turn,
+            speaker_name=speaker_b,
+        )
+
+        if speaker_1_user_text:
+            mem0_memory.ingest_message_pair(
+                speaker_1_system,
+                user_text=speaker_1_user_text,
+                assistant_text=speaker_1_assistant_text,
+                session_id=str(first_turn.session_id).strip(),
+                turn_id=turn_id,
+                timestamp=timestamp,
+            )
+        if speaker_2_user_text:
+            mem0_memory.ingest_message_pair(
+                speaker_2_system,
+                user_text=speaker_2_user_text,
+                assistant_text=speaker_2_assistant_text,
+                session_id=str(first_turn.session_id).strip(),
+                turn_id=turn_id,
+                timestamp=timestamp,
+            )
+        loaded_turns += turns_in_pair
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="memory_turn_done",
+                sample=sample,
+                turn_index=loaded_turns,
+                total_turns=total_turns,
+                turn_id=turn_id,
+                turn_increment=turns_in_pair,
+            )
+
+    if progress_callback is not None:
+        _call_with_supported_kwargs(
+            progress_callback,
+            phase="memory_finish",
+            sample=sample,
+            total_turns=total_turns,
+            loaded_turns=loaded_turns,
+        )
+
+    return {
+        "loaded_pair_count": pair_count,
+        "loaded_turn_count": loaded_turns,
+        "load_source": "history_turn_pairs",
+        "speaker_1_user_id": speaker_a_user_id,
+        "speaker_2_user_id": speaker_b_user_id,
+        "speaker_1_name": speaker_a,
+        "speaker_2_name": speaker_b,
+    }
+
+
+def _count_nonempty_lines(text: str) -> int:
+    return sum(1 for line in str(text).splitlines() if str(line).strip())
+
+
+def _recall_mem0_locomo_case(system: dict[str, object], query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
+    sample_metadata = dict(sample.metadata) if sample is not None else {}
+    speaker_a = str(sample_metadata.get("speaker_a", "")).strip()
+    speaker_b = str(sample_metadata.get("speaker_b", "")).strip()
+    if sample is None:
+        speaker_a_user_id = "speaker_1"
+        speaker_b_user_id = "speaker_2"
+    else:
+        speaker_a_user_id = _locomo_speaker_user_id_from_metadata(
+            sample_metadata,
+            sample_id=str(sample.sample_id).strip(),
+            speaker_key="speaker_a",
+            fallback_name="speaker_1",
+        )
+        speaker_b_user_id = _locomo_speaker_user_id_from_metadata(
+            sample_metadata,
+            sample_id=str(sample.sample_id).strip(),
+            speaker_key="speaker_b",
+            fallback_name="speaker_2",
+        )
+
+    speaker_1_system = system["speaker_1_system"]
+    speaker_2_system = system["speaker_2_system"]
+
+    speaker_1_memories = mem0_memory.recall_profile(speaker_1_system, user_query=query.text)
+    speaker_2_memories = mem0_memory.recall_profile(speaker_2_system, user_query=query.text)
+
+    speaker_1_memories_text = str(speaker_1_memories).strip()
+    speaker_2_memories_text = str(speaker_2_memories).strip()
+    recall_text = "\n\n".join(
+        part
+        for part in (
+            f"{speaker_a_user_id or 'speaker_1'}\n{speaker_1_memories_text}" if speaker_1_memories_text else "",
+            f"{speaker_b_user_id or 'speaker_2'}\n{speaker_2_memories_text}" if speaker_2_memories_text else "",
+        )
+        if part
+    )
+
+    metadata = {
+        "recall_helper": "recall_profile",
+        "speaker_1_user_id": speaker_a_user_id,
+        "speaker_2_user_id": speaker_b_user_id,
+        "speaker_1_memories": speaker_1_memories_text,
+        "speaker_2_memories": speaker_2_memories_text,
+        "num_speaker_1_memories": _count_nonempty_lines(speaker_1_memories_text),
+        "num_speaker_2_memories": _count_nonempty_lines(speaker_2_memories_text),
+        "speaker_1_name": speaker_a,
+        "speaker_2_name": speaker_b,
+    }
+    return MemoryRecall(text=recall_text, source_ids=[], metadata=metadata)
+
+
+class _Mem0LoCoMoMemorySession:
+    def __init__(self, *, system_factory: Callable[[], dict[str, object]]) -> None:
+        self.system = system_factory()
+        self.load_metadata: dict[str, Any] = {}
+
+    def load_case(self, sample: BenchmarkSample, *, progress_callback: Callable[..., None] | None = None) -> None:
+        self.load_metadata = _load_mem0_locomo_case(
+            self.system,
+            sample,
+            progress_callback=progress_callback,
+        )
+
+    def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
+        recall_result = _recall_mem0_locomo_case(self.system, query, sample=sample)
+        return _coerce_memory_recall(recall_result, base_metadata=self.load_metadata)
+
+
+class Mem0LoCoMoMemoryAdapter:
+    name = "mem0"
+
+    def __init__(self, *, recent_top_k: int, recall_top_k: int, similar_top_k: int, name: str = "mem0") -> None:
+        self.recent_top_k = recent_top_k
+        self.recall_top_k = recall_top_k
+        self.similar_top_k = similar_top_k
+        self.name = str(name).strip() or "mem0"
+
+    def create_session(self) -> _Mem0LoCoMoMemorySession:
+        return _Mem0LoCoMoMemorySession(
+            system_factory=lambda: _build_mem0_locomo_systems(
+                recent_top_k=self.recent_top_k,
+                recall_top_k=self.recall_top_k,
+                similar_top_k=self.similar_top_k,
+            )
+        )
+
+    def session_key(self, *, sample: BenchmarkSample) -> str:
+        sample_metadata = dict(sample.metadata)
+        locomo_sample_id = str(sample_metadata.get("locomo_sample_id", "")).strip()
+        if locomo_sample_id:
+            return locomo_sample_id
+        user_index = str(sample_metadata.get("locomo_user_index", "")).strip()
+        if user_index:
+            return f"locomo-user-{user_index}"
+        return str(sample.sample_id).split("-qa-", 1)[0]
+
+
+def create_mem0_memory_adapter(*, name: str = "mem0", top_k: int | None = None) -> Mem0LoCoMoMemoryAdapter:
+    """Create a ready-to-run benchmark adapter for the classic Mem0 reconstruction."""
+
+    recall_top_k = 30 if top_k is None else top_k
+    return Mem0LoCoMoMemoryAdapter(
         name=name,
-        system_factory=build_mem0_memory_system,
-        ingest_pair=ingest_message_pair,
-        recall=_recall,
+        recent_top_k=6,
+        recall_top_k=recall_top_k,
+        similar_top_k=recall_top_k,
     )

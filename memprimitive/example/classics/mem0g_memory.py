@@ -95,8 +95,10 @@ from memprimitive.utils._mem0_family import (
     build_graph_pair_context,
     build_profile_pair_context,
     finalize_dialogue_turn,
+    MEM0_FACT_EXTRACTION_PROMPT,
     PromptRecallSelectionTrigger,
     snapshot_dialogue_turn,
+    TimestampedConcatenateReadout,
 )
 from memprimitive.utils._template import structured_prompt, text_prompt
 
@@ -322,17 +324,12 @@ def build_mem0g_memory_system(
                 field="fact_list",
                 value_type=list[str],
                 prompt=text_prompt(
-                    "Extract Mem0-style long-term memory candidates as a JSON list of strings.\n"
-                    "This input is one interaction pair plus historical conversation context.\n"
-                    "Only store stable user-related facts, preferences, plans, identity details, or durable working context.\n"
-                    "Use the assistant reply only as conversational context for reference resolution.\n"
-                    "Do not store facts that originate only from the assistant reply.\n"
-                    "Skip transient chit-chat and wording tied too closely to the exact utterance.\n\n"
-                    "Conversation summary:\n{{ conversation_summary }}\n\n"
-                    "Recent messages:\n{{ recent_messages }}\n\n"
-                    "User message:\n{{ user_message }}\n\n"
-                    "Assistant reply:\n{{ assistant_message }}\n\n"
-                    "Current interaction pair:\n{{ pair_text }}\n",
+                    MEM0_FACT_EXTRACTION_PROMPT
+                    + "\nConversation summary:\n{{ conversation_summary }}\n\n"
+                    + "Recent messages:\n{{ recent_messages }}\n\n"
+                    + "User message:\n{{ user_message }}\n\n"
+                    + "Assistant reply:\n{{ assistant_message }}\n\n"
+                    + "Current interaction pair:\n{{ pair_text }}\n",
                     context_builder=build_profile_pair_context,
                     labeled_recall_plans={
                         "conversation_summary": text_prompt("{{ conversation_summary }}"),
@@ -547,7 +544,7 @@ def build_mem0g_memory_system(
 
     profile_recall_pipeline = MemoryPipeline(
         retrieval=EmbeddingSimilarityRetrieval(top_k=recall_top_k, layer="profile"),
-        readout=ConcatenateReadout(separator="\n"),
+        readout=TimestampedConcatenateReadout(separator="\n"),
         store=store,
     )
     dual_recall_pipeline = MemoryPipeline(
@@ -610,6 +607,7 @@ def ingest_message_pair(
     assistant_text: str,
     session_id: str,
     turn_id: str,
+    timestamp: str | None = None,
 ) -> None:
     profile_write_pipeline = system["profile_write_pipeline"]
     mem0g_write_pipeline = system["mem0g_write_pipeline"]
@@ -620,12 +618,14 @@ def ingest_message_pair(
         assistant_text=assistant_text,
         session_id=session_id,
         turn_id=turn_id,
+        timestamp=timestamp,
     )
 
     profile_write_pipeline.ingest(
         Observation(
             text=turn.pair_text,
             source="dialogue_pair",
+            timestamp=turn.timestamp,
             metadata=turn.pair_metadata(),
         )
     )
@@ -633,6 +633,7 @@ def ingest_message_pair(
         Observation(
             text=turn.pair_text,
             source="dialogue_pair",
+            timestamp=turn.timestamp,
             metadata=turn.pair_metadata(
                 pair_text=turn.pair_text,
             ),

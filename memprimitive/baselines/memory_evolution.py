@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import json
 from math import sqrt
@@ -26,6 +27,9 @@ from ..utils._llm_function_tools import (
     WriteToolSpec,
     aggregate_write_tool_contracts,
     build_runtime_tools,
+    commit_store_snapshot,
+    failed_tool_calls,
+    format_tool_failure_summary,
     normalize_write_tool_specs,
     project_tool_specs_for_prompt,
     write_tool_specs_require_graph_contracts,
@@ -771,7 +775,9 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
         source_layer: str | None = None,
         target_layer: str | None = None,
         max_turns: int = 6,
-        strict_tools: bool = True,
+        strict_tools: bool | None = None,
+        max_retry: int = 0,
+        raise_on_tool_error: bool = False,
         allow_no_tool_call: bool = True,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -791,7 +797,11 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
         self.max_turns = int(max_turns)
         if self.max_turns <= 0:
             raise ValueError("max_turns must be positive.")
-        self.strict_tools = bool(strict_tools)
+        self.max_retry = int(max_retry)
+        if self.max_retry < 0:
+            raise ValueError("max_retry must be non-negative.")
+        self.strict_tools = bool(strict_tools) if strict_tools is not None else False
+        self.raise_on_tool_error = bool(strict_tools) if strict_tools is not None else bool(raise_on_tool_error)
         self.allow_no_tool_call = bool(allow_no_tool_call)
         self.api_key = api_key
         self.base_url = base_url
@@ -801,21 +811,6 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         selected_records, decision_source = self._select_records(packet, store)
         visible_records_holder = {"records": list(selected_records)}
-        context = WriteToolCallContext(
-            packet=packet,
-            store=store,
-            module_slot="memory_evolution",
-            default_target_layer=self.target_layer,
-            selected_records=list(selected_records),
-            visible_records=list(visible_records_holder["records"]),
-        )
-        state = ToolExecutionState()
-        runtime_tools = build_runtime_tools(
-            self.tool_specs,
-            context=context,
-            state=state,
-            strict_tools=self.strict_tools,
-        )
         rendered_prompt, prompt_trace, store = render_prompt_plan(
             ensure_prompt_plan(
                 self.prompt,
@@ -839,24 +834,31 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
                 )
             ),
         )
-        context.store = store
-        context.visible_records = list(visible_records_holder["records"])
         visible_record_ids = [record.record_id for record in visible_records_holder["records"]]
-        self._run_agent(
+        state, committed_store, retry_trace = self._run_agent_with_retries(
+            packet=packet,
+            store=store,
             rendered_prompt=rendered_prompt,
-            tools=runtime_tools,
-            context={
+            base_context={
                 "slot": self.spec.slot,
                 "selected_record_ids": [record.record_id for record in selected_records],
             },
+            selected_record_ids=[record.record_id for record in selected_records],
+            visible_record_ids=visible_record_ids,
         )
         if not state.tool_calls and not self.allow_no_tool_call:
             raise ValueError("LLMFunctionCallEvolution requires at least one successful or attempted tool call.")
+        prompt_trace.update(retry_trace)
 
         trace = copy_trace(packet)
         trace["memory_evolution"] = {
             "module": self.spec.name,
             "tool_names": [spec.name for spec in self.tool_specs],
+            "max_retry": self.max_retry,
+            "retry_count": retry_trace["retry_count"],
+            "raise_on_tool_error": self.raise_on_tool_error,
+            "failed_tool_calls": retry_trace["failed_tool_calls"],
+            "attempts": retry_trace["attempts"],
             "prompt_is_template": self.prompt.mode == "structured"
             or (isinstance(self.prompt.template, str) and "{{" in self.prompt.template and "}}" in self.prompt.template),
             "decision_source": decision_source,
@@ -873,7 +875,77 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
             "tool_calls": list(state.tool_calls),
             "prompt_trace": prompt_trace,
         }
-        return replace(packet, trace=trace), context.store
+        return replace(packet, trace=trace), committed_store
+
+    def _run_agent_with_retries(
+        self,
+        *,
+        packet: Packet,
+        store: MemoryStore,
+        rendered_prompt: str,
+        base_context: dict[str, Any],
+        selected_record_ids: list[str],
+        visible_record_ids: list[str],
+    ) -> tuple[ToolExecutionState, MemoryStore, dict[str, Any]]:
+        previous_failures: list[dict[str, Any]] = []
+        attempt_traces: list[dict[str, Any]] = []
+        final_state = ToolExecutionState()
+        final_store = deepcopy(store)
+
+        for attempt_index in range(self.max_retry + 1):
+            attempt_store = deepcopy(store)
+            selected_ids = set(selected_record_ids)
+            visible_ids = set(visible_record_ids)
+            selected_records = [record for record in attempt_store.iter_records() if record.record_id in selected_ids]
+            visible_records = [record for record in attempt_store.iter_records() if record.record_id in visible_ids]
+            context = WriteToolCallContext(
+                packet=packet,
+                store=attempt_store,
+                module_slot="memory_evolution",
+                default_target_layer=self.target_layer,
+                selected_records=selected_records,
+                visible_records=visible_records,
+            )
+            state = ToolExecutionState()
+            runtime_tools = build_runtime_tools(
+                self.tool_specs,
+                context=context,
+                state=state,
+                strict_tools=self.strict_tools,
+            )
+            agent_context = dict(base_context)
+            if previous_failures:
+                agent_context["retry"] = {
+                    "attempt": attempt_index,
+                    "max_retry": self.max_retry,
+                    "previous_failed_tool_calls": previous_failures,
+                    "instruction": "Retry the memory tool calls using the original prompt and these tool error details.",
+                }
+            self._run_agent(rendered_prompt=rendered_prompt, tools=runtime_tools, context=agent_context)
+
+            failures = failed_tool_calls(state.tool_calls)
+            attempt_traces.append(
+                {
+                    "attempt": attempt_index,
+                    "tool_calls": list(state.tool_calls),
+                    "effects": list(state.effects),
+                    "failed_tool_calls": failures,
+                }
+            )
+            final_state = state
+            final_store = context.store
+            if not failures:
+                break
+            previous_failures = failures
+
+        final_failures = failed_tool_calls(final_state.tool_calls)
+        if final_failures and self.raise_on_tool_error:
+            raise ValueError(f"LLMFunctionCallEvolution tool calls failed: {format_tool_failure_summary(final_failures)}")
+        return final_state, commit_store_snapshot(store, final_store), {
+            "retry_count": max(0, len(attempt_traces) - 1),
+            "failed_tool_calls": final_failures,
+            "attempts": attempt_traces,
+        }
 
     def _select_records(self, packet: Packet, store: MemoryStore) -> tuple[list[MemoryRecord], str]:
         if packet.decisions_store is not None:

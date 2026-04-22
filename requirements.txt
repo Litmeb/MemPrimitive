@@ -7,3 +7,4 @@ sentence-transformers
 openai
 openai-agents
 tiktoken
+tqdm

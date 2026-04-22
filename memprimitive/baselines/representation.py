@@ -13,7 +13,6 @@ from typing import Any, ClassVar, Final, get_args, get_origin
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 
 from ..contracts import (
     UNIT_EMBEDDING_CONTRACT,
@@ -185,7 +184,6 @@ class BasicRepresentation(RepresentationModule):
             "units.metadata.representation",
         ),
     )
-    _embedding_cache: ClassVar[dict[str, SentenceTransformer]] = {}
     requires_contracts = frozenset()
 
     def __init__(
@@ -196,6 +194,9 @@ class BasicRepresentation(RepresentationModule):
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
     ) -> None:
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
@@ -212,6 +213,9 @@ class BasicRepresentation(RepresentationModule):
         self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
         self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
         self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
         self.produces_contracts = normalize_contracts(
             [UNIT_EMBEDDING_CONTRACT] if "embedding" in self.elements else []
         )
@@ -292,11 +296,14 @@ class BasicRepresentation(RepresentationModule):
         )
 
     def _embed_text(self, text: str) -> list[float]:
-        model = self._embedding_cache.get(self.embedding_model)
-        if model is None:
-            model = SentenceTransformer(self.embedding_model)
-            self._embedding_cache[self.embedding_model] = model
-        return [float(value) for value in model.encode(text, normalize_embeddings=True).tolist()]
+        from ..utils._runtime import Runtime
+
+        return Runtime(
+            embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
+            embedding_base_url=self.embedding_base_url,
+        ).embed(text)
 
     def _extract_keywords(self, unit: MemoryUnit, text: str) -> list[str]:
         hinted = unit.metadata.get("keywords")
@@ -355,6 +362,9 @@ class TripleRepresentation(RepresentationModule):
         base_url: str | None = None,
         model: str | None = None,
         embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
         embed_extracted: bool = False,
         embed_entities: bool = False,
     ) -> None:
@@ -378,6 +388,9 @@ class TripleRepresentation(RepresentationModule):
             "MEMPRIMITIVE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
         )
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
         self.embed_extracted = bool(embed_extracted)
         self.embed_entities = bool(embed_entities)
 
@@ -575,6 +588,9 @@ class TripleRepresentation(RepresentationModule):
             base_url=self.base_url,
             model=self.model,
             embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
+            embedding_base_url=self.embedding_base_url,
         )
 
     def _render_prompt(self, packet: Packet, unit: MemoryUnit, store: MemoryStore) -> tuple[str, dict[str, Any], MemoryStore]:
@@ -985,15 +1001,25 @@ class ConfigurableEmbeddingRepresentation(RepresentationModule):
         embedding_text: PromptPlan | str | None = None,
         embedding_version: str = DEFAULT_EMBEDDING_VERSION,
         embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
     ) -> None:
         self.embedding_text = embedding_text if embedding_text is not None else text_prompt("{{ unit.text }}")
         self.embedding_version = embedding_version
+        self._has_explicit_embedding_runtime = any(
+            value is not None
+            for value in (embedding_model, embedding_provider, embedding_api_key, embedding_base_url)
+        )
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
         self.embedding_model = embedding_model or env.get(
             "MEMPRIMITIVE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
         )
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.units is None:
@@ -1048,6 +1074,17 @@ class ConfigurableEmbeddingRepresentation(RepresentationModule):
         return replace(packet, units=represented_units, trace=trace), store
 
     def _embed_text(self, text: str) -> list[float]:
+        if self._has_explicit_embedding_runtime:
+            from ..utils._runtime import Runtime
+
+            return list(
+                Runtime(
+                    embedding_model=self.embedding_model,
+                    embedding_provider=self.embedding_provider,
+                    embedding_api_key=self.embedding_api_key,
+                    embedding_base_url=self.embedding_base_url,
+                ).embed(text)
+            )
         from ..utils._runtime import get_runtime
 
         return list(get_runtime().embed(text))

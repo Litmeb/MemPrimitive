@@ -127,3 +127,18 @@ def test_memory_pipeline_accepts_fanout_ingest_organization() -> None:
     pipeline = MemoryPipeline(organization=FanoutIngestOrganization(field="segments", pipeline=child_pipeline))
 
     assert isinstance(pipeline.organization, FanoutIngestOrganization)
+
+
+def test_memory_pipeline_with_fanout_ingest_runs_default_evolution_stage() -> None:
+    child_pipeline = _child_pipeline()
+    pipeline = MemoryPipeline(
+        representation=BasicRepresentation(elements=("text",)),
+        organization=FanoutIngestOrganization(field="segments", pipeline=child_pipeline),
+    )
+
+    packet = pipeline.ingest(Observation(text="parent", source="notes", metadata={"segments": ["alpha"]}))
+
+    assert [record.text for record in pipeline.store.iter_records("default")] == ["alpha"]
+    assert packet.placements is not None
+    assert [placement.unit_id for placement in packet.placements] == [packet.units[0].unit_id]
+    assert packet.trace["evolution_trigger"]["module"] == "never_evolution_trigger"

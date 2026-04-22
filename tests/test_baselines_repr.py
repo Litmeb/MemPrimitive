@@ -75,6 +75,58 @@ def test_basic_representation_rejects_legacy_triple_element() -> None:
         BasicRepresentation(elements=("text", "triple"))
 
 
+def test_basic_representation_embeds_through_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import BasicRepresentation, PassThroughUnitFormation
+
+    calls: list[dict[str, object]] = []
+
+    class _FakeRuntime:
+        def __init__(
+            self,
+            *,
+            embedding_model: str | None = None,
+            embedding_provider: str | None = None,
+            embedding_api_key: str | None = None,
+            embedding_base_url: str | None = None,
+        ) -> None:
+            calls.append(
+                {
+                    "embedding_model": embedding_model,
+                    "embedding_provider": embedding_provider,
+                    "embedding_api_key": embedding_api_key,
+                    "embedding_base_url": embedding_base_url,
+                }
+            )
+
+        def embed(self, text: str) -> list[float]:
+            calls.append({"text": text})
+            return [4.0, 2.0]
+
+    monkeypatch.setattr(_runtime, "Runtime", _FakeRuntime)
+    unit_packet, store = PassThroughUnitFormation().run(
+        Packet(observation=Observation(text=" Alice likes tea ", source="dialogue")),
+        MemoryStore(),
+    )
+
+    out, _ = BasicRepresentation(
+        embedding_model="embed-model",
+        embedding_provider="openai",
+        embedding_api_key="embed-key",
+        embedding_base_url="https://embed.example/v1",
+    ).run(unit_packet, store)
+
+    assert out.units[0].embedding == [4.0, 2.0]
+    assert calls == [
+        {
+            "embedding_model": "embed-model",
+            "embedding_provider": "openai",
+            "embedding_api_key": "embed-key",
+            "embedding_base_url": "https://embed.example/v1",
+        },
+        {"text": "Alice likes tea"},
+    ]
+
+
 def test_configurable_embedding_representation_defaults_to_unit_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.baselines import ConfigurableEmbeddingRepresentation, PassThroughUnitFormation
 
