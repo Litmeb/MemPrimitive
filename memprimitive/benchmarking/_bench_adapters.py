@@ -144,6 +144,7 @@ def _iter_locomo_samples(
             answer = str(qa_payload.get("answer", "")).strip()
             if not question or not answer:
                 continue
+            evidence = qa_payload.get("evidence") or []
             yield BenchmarkSample(
                 sample_id=f"{sample_prefix}-qa-{qa_index}",
                 benchmark_name="locomo",
@@ -157,7 +158,8 @@ def _iter_locomo_samples(
                     "speaker_a": conversation.get("speaker_a"),
                     "speaker_b": conversation.get("speaker_b"),
                     "qa_category": qa_payload.get("category"),
-                    "evidence": list(qa_payload.get("evidence", [])),
+                    "evidence": list(evidence),
+                    "adversarial_answer": qa_payload.get("adversarial_answer"),
                 },
             )
 

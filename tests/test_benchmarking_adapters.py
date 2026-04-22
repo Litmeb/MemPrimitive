@@ -17,10 +17,13 @@ from memprimitive.benchmarking import (
     FunctionMemoryAdapter,
     PairwiseDialogueMemoryAdapter,
     PipelineMemoryAdapter,
+    MemoryRecall,
     create_mem0_memory_adapter,
     create_yaml_pipeline_memory_adapter,
     run_benchmark,
 )
+from memprimitive.benchmarking.minimal_baseline import _create_cli_memory_adapter
+from memprimitive.benchmarking import _memory_adapters as memory_adapters_module
 
 
 def _sample_with_turns(*texts: str, sample_id: str = "sample-1") -> BenchmarkSample:
@@ -232,36 +235,200 @@ def test_pairwise_dialogue_memory_adapter_keeps_odd_last_turn() -> None:
     assert recall.metadata["loaded_pair_count"] == 2
 
 
-def test_create_mem0_memory_adapter_reuses_mem0_helpers(monkeypatch) -> None:
+def test_create_mem0_memory_adapter_uses_per_speaker_systems(monkeypatch) -> None:
     from memprimitive.example.classics import mem0_memory
 
-    def _build_system() -> dict[str, object]:
-        return {"pairs": []}
+    build_calls: list[dict[str, object]] = []
 
-    def _ingest_pair(system: dict[str, object], *, user_text: str, assistant_text: str, session_id: str, turn_id: str) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _build_system(*, recent_top_k: int, similar_top_k: int, recall_top_k: int) -> dict[str, object]:
+        build_calls.append(
+            {
+                "recent_top_k": recent_top_k,
+                "similar_top_k": similar_top_k,
+                "recall_top_k": recall_top_k,
+            }
+        )
+        return {"label": f"system-{len(build_calls)}", "pairs": []}
+
+    def _ingest_pair(
+        system: dict[str, object],
+        *,
+        user_text: str,
+        assistant_text: str,
+        session_id: str,
+        turn_id: str,
+        timestamp: str | None = None,
+    ) -> None:
+        calls.append(
+            {
+                "system_label": system["label"],
+                "user_text": user_text,
+                "assistant_text": assistant_text,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "timestamp": timestamp,
+            }
+        )
         system["pairs"].append((user_text, assistant_text, session_id, turn_id))
 
     def _recall_profile(system: dict[str, object], *, user_query: str) -> str:
-        return f"{user_query} :: {len(system['pairs'])} pairs"
+        return f"{system['label']} :: {user_query} :: {len(system['pairs'])} pairs"
 
     monkeypatch.setattr(mem0_memory, "build_mem0_memory_system", _build_system)
     monkeypatch.setattr(mem0_memory, "ingest_message_pair", _ingest_pair)
     monkeypatch.setattr(mem0_memory, "recall_profile", _recall_profile)
 
-    adapter = create_mem0_memory_adapter()
+    adapter = create_mem0_memory_adapter(top_k=17)
     session = adapter.create_session()
-    session.load_case(
-        _sample_with_turns(
-            "Alice likes tea.",
-            "Assistant confirms tea.",
-            "Alice also likes jasmine.",
-        )
+    assert build_calls == [
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 17,
+            "recall_top_k": 17,
+        },
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 17,
+            "recall_top_k": 17,
+        },
+    ]
+    sample = BenchmarkSample(
+        sample_id="mem0-timestamps",
+        benchmark_name="locomo",
+        history_observations=[],
+        history_turns=[
+            ConversationTurn(
+                turn_id="turn-1",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="user",
+                speaker="Alice",
+                text="likes tea.",
+            ),
+            ConversationTurn(
+                turn_id="turn-2",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="assistant",
+                speaker="Bob",
+                text="likes coffee.",
+            ),
+            ConversationTurn(
+                turn_id="turn-3",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:10:00Z",
+                role="user",
+                speaker="Alice",
+                text="also likes jasmine.",
+            ),
+        ],
+        query=Query(text="What should be remembered?"),
+        reference_answer="unused",
+        metadata={
+            "speaker_a": "Alice",
+            "speaker_b": "Bob",
+            "locomo_user_index": 1,
+        },
     )
-    recall = session.recall(Query(text="What should be remembered?"))
+    session.load_case(
+        sample
+    )
+    recall = session.recall(Query(text="What should be remembered?"), sample=sample)
 
-    assert recall.text == "What should be remembered? :: 2 pairs"
+    assert "system-1 :: What should be remembered? :: 2 pairs" in recall.text
+    assert "system-2 :: What should be remembered? :: 1 pairs" in recall.text
     assert recall.metadata["loaded_pair_count"] == 2
     assert recall.metadata["recall_helper"] == "recall_profile"
+    assert recall.metadata["speaker_1_user_id"] == "Alice_1"
+    assert recall.metadata["speaker_2_user_id"] == "Bob_1"
+    assert recall.metadata["speaker_1_memories"] == "system-1 :: What should be remembered? :: 2 pairs"
+    assert recall.metadata["speaker_2_memories"] == "system-2 :: What should be remembered? :: 1 pairs"
+    assert recall.metadata["num_speaker_1_memories"] == 1
+    assert recall.metadata["num_speaker_2_memories"] == 1
+    assert [call["system_label"] for call in calls] == ["system-1", "system-2", "system-1"]
+    assert calls[0]["user_text"] == "Alice: likes tea."
+    assert calls[0]["assistant_text"] == "Bob: likes coffee."
+    assert calls[1]["user_text"] == "Bob: likes coffee."
+    assert calls[1]["assistant_text"] == "Alice: likes tea."
+    assert calls[2]["user_text"] == "Alice: also likes jasmine."
+    assert calls[2]["assistant_text"] == ""
+    assert [call["timestamp"] for call in calls] == [
+        "2026-04-17T08:00:00Z",
+        "2026-04-17T08:00:00Z",
+        "2026-04-17T08:10:00Z",
+    ]
+
+
+def test_create_mem0_memory_adapter_defaults_to_upstream_top_k(monkeypatch) -> None:
+    from memprimitive.example.classics import mem0_memory
+
+    build_calls: list[dict[str, object]] = []
+
+    def _build_system(*, recent_top_k: int, similar_top_k: int, recall_top_k: int) -> dict[str, object]:
+        build_calls.append(
+            {
+                "recent_top_k": recent_top_k,
+                "similar_top_k": similar_top_k,
+                "recall_top_k": recall_top_k,
+            }
+        )
+        return {"pairs": []}
+
+    monkeypatch.setattr(mem0_memory, "build_mem0_memory_system", _build_system)
+    adapter = create_mem0_memory_adapter()
+    adapter.create_session()
+
+    assert build_calls == [
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 30,
+            "recall_top_k": 30,
+        },
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 30,
+            "recall_top_k": 30,
+        },
+    ]
+
+
+def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
+    from memprimitive.example.classics import mem0_memory
+
+    build_calls: list[dict[str, object]] = []
+
+    def _build_system(*, recent_top_k: int, similar_top_k: int, recall_top_k: int) -> dict[str, object]:
+        build_calls.append(
+            {
+                "recent_top_k": recent_top_k,
+                "similar_top_k": similar_top_k,
+                "recall_top_k": recall_top_k,
+            }
+        )
+        return {"pairs": []}
+
+    monkeypatch.setattr(mem0_memory, "build_mem0_memory_system", _build_system)
+
+    minimal_adapter = _create_cli_memory_adapter("minimal", top_k=None)
+    mem0_adapter = _create_cli_memory_adapter("mem0", top_k=None)
+
+    assert minimal_adapter.pipeline_factory().retrieval.top_k == 5
+    mem0_adapter.create_session()
+
+    assert build_calls == [
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 30,
+            "recall_top_k": 30,
+        },
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 30,
+            "recall_top_k": 30,
+        },
+    ]
 
 
 def test_run_benchmark_collects_prediction_and_scores() -> None:
@@ -299,6 +466,248 @@ def test_run_benchmark_collects_prediction_and_scores() -> None:
     assert result.predictions[0].scores == {"exact_match": 1.0}
     assert result.aggregate_scores == {"mean_exact_match": 1.0}
     assert result.predictions[0].memory_adapter_name == "recency"
+
+
+def test_run_benchmark_emits_progress_events() -> None:
+    sample = _sample_with_turns("Progress memory.", sample_id="progress")
+    events: list[tuple[str, str | None, int | None]] = []
+
+    class _BenchmarkAdapter:
+        name = "progressbench"
+
+        def iter_samples(self, *, limit: int | None = None):
+            del limit
+            yield sample
+
+    class _AnswerRunner:
+        name = "fake-answer"
+
+        def answer(self, *, sample: BenchmarkSample, memory_recall):
+            return f"{sample.sample_id}::{memory_recall.text}"
+
+    def _progress(*, phase: str, sample: BenchmarkSample | None = None, total: int | None = None) -> None:
+        events.append((phase, sample.sample_id if sample is not None else None, total))
+
+    run_benchmark(
+        _BenchmarkAdapter(),
+        PipelineMemoryAdapter(name="recency", pipeline_factory=_build_recency_pipeline),
+        answer_runner=_AnswerRunner(),
+        progress_callback=_progress,
+    )
+
+    assert events == [
+        ("init", None, 1),
+        ("start", "progress", 1),
+        ("done", "progress", 1),
+        ("finish", None, 1),
+    ]
+
+
+def test_run_benchmark_can_truncate_history_turns_for_smoke_runs() -> None:
+    sample = _sample_with_turns(*(f"turn text {index}" for index in range(12)), sample_id="truncated")
+    loaded_counts: list[tuple[int, int]] = []
+
+    class _BenchmarkAdapter:
+        name = "truncatebench"
+
+        def iter_samples(self, *, limit: int | None = None):
+            del limit
+            yield sample
+
+    class _MemorySession:
+        def load_case(self, sample: BenchmarkSample) -> None:
+            loaded_counts.append((len(sample.history_turns), len(sample.history_observations)))
+
+        def recall(self, query: Query, *, sample: BenchmarkSample | None = None):
+            del query
+            assert sample is not None
+            return MemoryRecall(text=f"{len(sample.history_turns)} turns loaded")
+
+    class _MemoryAdapter:
+        name = "truncate-memory"
+
+        def create_session(self):
+            return _MemorySession()
+
+    class _AnswerRunner:
+        name = "fake-answer"
+
+        def answer(self, *, sample: BenchmarkSample, memory_recall):
+            return memory_recall.text
+
+    result = run_benchmark(
+        _BenchmarkAdapter(),
+        _MemoryAdapter(),
+        answer_runner=_AnswerRunner(),
+        max_history_turns=10,
+    )
+
+    assert loaded_counts == [(10, 10)]
+    prediction = result.predictions[0]
+    assert prediction.predicted_answer == "10 turns loaded"
+    assert prediction.metadata["history_turn_count"] == 10
+    assert prediction.metadata["original_history_turn_count"] == 12
+    assert prediction.metadata["max_history_turns"] == 10
+
+
+def test_run_benchmark_reuses_session_for_same_memory_key() -> None:
+    samples = [
+        _sample_with_turns("Shared memory.", sample_id=f"conv-1-qa-{index}")
+        for index in range(1, 4)
+    ]
+    for sample in samples:
+        sample.metadata["locomo_sample_id"] = "conv-1"
+    created_count = 0
+    loaded_sample_ids: list[str] = []
+    recalled_sample_ids: list[str] = []
+    init_memory_totals: list[int] = []
+
+    class _BenchmarkAdapter:
+        name = "reusebench"
+
+        def iter_samples(self, *, limit: int | None = None):
+            del limit
+            yield from samples
+
+    class _MemorySession:
+        def load_case(self, sample: BenchmarkSample) -> None:
+            loaded_sample_ids.append(sample.sample_id)
+
+        def recall(self, query: Query, *, sample: BenchmarkSample | None = None):
+            del query
+            assert sample is not None
+            recalled_sample_ids.append(sample.sample_id)
+            return MemoryRecall(text=f"memory for {sample.sample_id}")
+
+    class _MemoryAdapter:
+        name = "reuse-memory"
+
+        def create_session(self):
+            nonlocal created_count
+            created_count += 1
+            return _MemorySession()
+
+        def session_key(self, *, sample: BenchmarkSample) -> str:
+            return str(sample.metadata["locomo_sample_id"])
+
+    class _AnswerRunner:
+        name = "fake-answer"
+
+        def answer(self, *, sample: BenchmarkSample, memory_recall):
+            return memory_recall.text
+
+    result = run_benchmark(
+        _BenchmarkAdapter(),
+        _MemoryAdapter(),
+        answer_runner=_AnswerRunner(),
+        progress_callback=lambda *, phase, memory_turn_total=None: (
+            init_memory_totals.append(memory_turn_total) if phase == "init" else None
+        ),
+    )
+
+    assert created_count == 1
+    assert loaded_sample_ids == ["conv-1-qa-1"]
+    assert recalled_sample_ids == ["conv-1-qa-1", "conv-1-qa-2", "conv-1-qa-3"]
+    assert [prediction.predicted_answer for prediction in result.predictions] == [
+        "memory for conv-1-qa-1",
+        "memory for conv-1-qa-2",
+        "memory for conv-1-qa-3",
+    ]
+    assert init_memory_totals == [1]
+
+
+def test_mem0_locomo_load_case_emits_turn_progress(monkeypatch) -> None:
+    sample = _sample_with_turns("Alice likes tea.", "Bob likes coffee.", "Alice likes cake.", sample_id="locomo-progress")
+    sample.metadata.update({"speaker_a": "user", "speaker_b": "assistant", "locomo_sample_id": "locomo-progress"})
+    events: list[tuple[str, int | None, int | None, str | None]] = []
+    ingested: list[tuple[str, str]] = []
+
+    def _fake_build_system(**kwargs):
+        del kwargs
+        return {"fake": object()}
+
+    def _fake_ingest(system, *, user_text, assistant_text, session_id, turn_id, timestamp):
+        del system, session_id, timestamp
+        ingested.append((turn_id, f"{user_text} -> {assistant_text}"))
+
+    monkeypatch.setattr(memory_adapters_module.mem0_memory, "build_mem0_memory_system", _fake_build_system)
+    monkeypatch.setattr(memory_adapters_module.mem0_memory, "ingest_message_pair", _fake_ingest)
+
+    session = create_mem0_memory_adapter(top_k=1).create_session()
+    session.load_case(
+        sample,
+        progress_callback=lambda *, phase, turn_index=None, total_turns=None, turn_id=None: events.append(
+            (phase, turn_index, total_turns, turn_id)
+        ),
+    )
+
+    assert events == [
+        ("memory_init", None, 3, None),
+        ("memory_turn_done", 2, 3, "turn-2"),
+        ("memory_turn_done", 3, 3, "turn-3"),
+        ("memory_finish", None, 3, None),
+    ]
+    assert session.load_metadata["loaded_turn_count"] == 3
+    assert len(ingested) == 3
+
+
+def test_mem0_adapter_groups_qa_by_locomo_sample_id() -> None:
+    adapter = create_mem0_memory_adapter(top_k=1)
+    sample = _sample_with_turns("Memory.", sample_id="conv-1-qa-7")
+    sample.metadata["locomo_sample_id"] = "conv-1"
+
+    assert adapter.session_key(sample=sample) == "conv-1"
+
+
+def test_run_benchmark_merges_memory_metadata_into_prediction_metadata() -> None:
+    sample = _sample_with_turns("Merged metadata memory.", sample_id="merged")
+
+    class _BenchmarkAdapter:
+        name = "mergedbench"
+
+        def iter_samples(self, *, limit: int | None = None):
+            if limit == 0:
+                return
+            yield sample
+
+    class _MemorySession:
+        def load_case(self, sample: BenchmarkSample) -> None:
+            del sample
+
+        def recall(self, query: Query, *, sample: BenchmarkSample | None = None):
+            del query, sample
+            return MemoryRecall(
+                text="merged memory",
+                metadata={
+                    "speaker_1_memories": "Alice memory",
+                    "speaker_2_memories": "Bob memory",
+                    "num_speaker_1_memories": 1,
+                    "num_speaker_2_memories": 1,
+                    "speaker_1_user_id": "Alice_1",
+                    "speaker_2_user_id": "Bob_1",
+                },
+            )
+
+    class _MemoryAdapter:
+        name = "merged-memory"
+
+        def create_session(self):
+            return _MemorySession()
+
+    class _AnswerRunner:
+        name = "fake-answer"
+
+        def answer(self, *, sample: BenchmarkSample, memory_recall):
+            return f"{sample.sample_id}::{memory_recall.text}"
+
+    result = run_benchmark(_BenchmarkAdapter(), _MemoryAdapter(), answer_runner=_AnswerRunner())
+
+    prediction = result.predictions[0]
+    assert prediction.metadata["speaker_1_memories"] == "Alice memory"
+    assert prediction.metadata["speaker_2_memories"] == "Bob memory"
+    assert prediction.metadata["num_speaker_1_memories"] == 1
+    assert prediction.metadata["speaker_1_user_id"] == "Alice_1"
+    assert prediction.to_json_dict()["memory_metadata"]["speaker_2_user_id"] == "Bob_1"
 
 
 def test_run_benchmark_without_scoring_hooks_still_runs() -> None:

@@ -5,12 +5,17 @@ from pathlib import Path
 
 from memprimitive.benchmarking.minimal_baseline import (
     BenchmarkSample,
+    Mem0LoCoMoAnswerRunner,
     SingleRecallLLMAnswerRunner,
+    _TqdmBenchmarkProgress,
+    _create_cli_answer_runner,
     _iter_json_array_file,
     create_minimal_benchmark_pipeline,
     load_benchmark_samples,
     run_minimal_baseline_sample,
 )
+from memprimitive.benchmarking._types import MemoryRecall
+from memprimitive.benchmarking.prompts import ANSWER_PROMPT, ANSWER_PROMPT_GRAPH, ANSWER_PROMPT_ZEP
 from memprimitive.benchmarking.evals import evaluate_file
 from memprimitive.benchmarking.generate_scores import summarize_scores
 from memprimitive.core import MemoryStore, Packet, StoreLayerSpec, StoreTopology
@@ -21,10 +26,20 @@ from memprimitive.utils._runtime import Runtime
 
 class FakeRuntime(Runtime):
     def __init__(self) -> None:
-        pass
+        self.calls: list[dict[str, object]] = []
 
     def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
+        self.calls.append({"system": system, "user": user, "temperature": temperature})
         return f"ANSWER::{user.split('Retrieved memory:\\n', 1)[-1].strip()}"
+
+
+class CapturingRuntime(Runtime):
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
+        self.calls.append({"system": system, "user": user, "temperature": temperature})
+        return "captured-answer"
 
 
 def test_create_minimal_benchmark_pipeline_ingests_and_recalls() -> None:
@@ -63,7 +78,13 @@ def test_load_locomo_samples_normalizes_dialogue_and_qa(tmp_path: Path) -> None:
                 ],
             },
             "qa": [
-                {"question": "What does Alice like?", "answer": "Tea", "category": 1, "evidence": ["D1:1"]},
+                {
+                    "question": "What does Alice like?",
+                    "answer": "Tea",
+                    "category": 1,
+                    "evidence": ["D1:1"],
+                    "adversarial_answer": "Coffee",
+                },
             ],
         }
     ]
@@ -76,6 +97,7 @@ def test_load_locomo_samples_normalizes_dialogue_and_qa(tmp_path: Path) -> None:
     assert samples[0].history_turns[0].turn_id == "D1:1"
     assert samples[0].history_turns[0].session_id == "session_1"
     assert [obs.text for obs in samples[0].history_observations] == ["Alice: I like tea.", "Bob: I like coffee."]
+    assert samples[0].metadata["adversarial_answer"] == "Coffee"
 
 
 def test_load_locomo_samples_filters_by_user_values(tmp_path: Path) -> None:
@@ -180,6 +202,75 @@ def test_run_minimal_baseline_sample_uses_answer_runner() -> None:
     assert prediction.memory_adapter_name == "minimal_pipeline"
 
 
+def test_mem0_locomo_answer_prompt_matches_upstream_key_fragments() -> None:
+    assert "4 May 2022" in ANSWER_PROMPT
+    assert "Ignore the reference" in ANSWER_PROMPT
+    assert "# APPROACH" in ANSWER_PROMPT
+    assert "4 May 2022" in ANSWER_PROMPT_GRAPH
+    assert "# APPROACH" in ANSWER_PROMPT_ZEP
+
+
+def test_mem0_locomo_answer_runner_renders_prompt_and_uses_timestamped_memory() -> None:
+    runtime = CapturingRuntime()
+    runner = Mem0LoCoMoAnswerRunner(runtime=runtime)
+    sample = BenchmarkSample(
+        sample_id="locomo-1",
+        benchmark_name="locomo",
+        history_observations=[],
+        query=__import__("memprimitive").Query(text="What did Alice do?"),
+        reference_answer="unused",
+        metadata={"speaker_a": "Alice", "speaker_b": "Bob"},
+    )
+
+    answer = runner.answer(
+        sample=sample,
+        memory_recall=MemoryRecall(
+            text="Alice memory block\n\nBob memory block",
+            metadata={
+                "speaker_1_name": "Alice",
+                "speaker_2_name": "Bob",
+                "speaker_1_memories": "2022-05-04 Alice went to India last year.",
+                "speaker_2_memories": "2022-05-04 Bob stayed home.",
+            },
+        ),
+    )
+
+    assert answer == "captured-answer"
+    assert len(runtime.calls) == 1
+    call = runtime.calls[0]
+    assert call["system"] == ""
+    user_prompt = str(call["user"])
+    assert "Memories for user Alice" in user_prompt
+    assert "Memories for user Bob" in user_prompt
+    assert "What did Alice do?" in user_prompt
+    assert "2022-05-04 Alice went to India last year." in user_prompt
+    assert "2022-05-04 Bob stayed home." in user_prompt
+    assert "You answer only from the provided retrieved memory" not in user_prompt
+
+
+def test_cli_answer_runner_switches_to_mem0_locomo_for_locomo_mem0() -> None:
+    runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="mem0")
+    assert isinstance(runner, Mem0LoCoMoAnswerRunner)
+
+    other_runner = _create_cli_answer_runner(benchmark_name="longmemeval", memory_adapter_name="mem0")
+    assert isinstance(other_runner, SingleRecallLLMAnswerRunner)
+
+
+def test_tqdm_progress_groups_locomo_samples_by_user() -> None:
+    progress = _TqdmBenchmarkProgress(enabled=False)
+    sample = BenchmarkSample(
+        sample_id="locomo-1-qa-1",
+        benchmark_name="locomo",
+        history_observations=[],
+        query=__import__("memprimitive").Query(text="Question?"),
+        reference_answer="Answer",
+        metadata={"locomo_user_index": 1, "speaker_a": "Alice", "speaker_b": "Bob"},
+    )
+
+    assert progress._user_key(sample) == "locomo-user-1"
+    assert progress._user_label(sample) == "user 1 (Alice/Bob)"
+
+
 def test_mem0_style_eval_reads_benchmark_jsonl(tmp_path: Path) -> None:
     predictions_path = tmp_path / "predictions.jsonl"
     metrics_path = tmp_path / "metrics.json"
@@ -208,6 +299,61 @@ def test_mem0_style_eval_reads_benchmark_jsonl(tmp_path: Path) -> None:
     assert results["conv-1"][0]["f1_score"] > 0
     assert summary["overall"]["count"] == 1
     assert summary["by_category"]["1"]["count"] == 1
+
+
+def test_mem0_style_eval_reads_legacy_and_prediction_jsonl(tmp_path: Path) -> None:
+    predictions_path = tmp_path / "predictions.jsonl"
+    metrics_path = tmp_path / "metrics.json"
+    predictions_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "benchmark_name": "locomo",
+                        "query_text": "What does Alice like?",
+                        "reference_answer": "tea",
+                        "predicted_answer": "Alice likes tea.",
+                        "metadata": {
+                            "locomo_sample_id": "conv-1",
+                            "qa_category": 1,
+                            "adversarial_answer": "coffee",
+                            "speaker_1_memories": "Alice memory",
+                            "num_speaker_1_memories": 1,
+                        },
+                        "memory_metadata": {
+                            "speaker_1_memories": "Alice memory",
+                            "speaker_2_memories": "Bob memory",
+                            "num_speaker_1_memories": 1,
+                            "num_speaker_2_memories": 1,
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "question": "What does Bob like?",
+                        "answer": "coffee",
+                        "response": "Bob likes coffee.",
+                        "category": 2,
+                        "locomo_sample_id": "conv-2",
+                        "speaker_1_memories": "Carol memory",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    results = evaluate_file(
+        input_file=predictions_path,
+        output_file=metrics_path,
+        max_workers=1,
+        use_llm_judge=False,
+    )
+
+    assert results["conv-1"][0]["category"] == "1"
+    assert results["conv-2"][0]["question"] == "What does Bob like?"
+    assert results["conv-1"][0]["response"] == "Alice likes tea."
 
 
 def test_mem0_profile_tools_reject_invisible_update_without_mutation() -> None:

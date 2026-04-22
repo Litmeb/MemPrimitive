@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
-from ..core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Packet
-from ..interfaces import TriggerModule
+from ..core import MemoryRecord, MemoryStore, ModuleSpec, Observation, Packet, Readout
+from ..interfaces import ReadoutModule, TriggerModule
 from ..pipeline import MemoryPipeline
 from ._example_dialogue import (
     build_dialogue_pair_messages,
@@ -13,6 +13,17 @@ from ._example_dialogue import (
 )
 from ._llm_function_tools import WriteToolCallContext, WriteToolResult, WriteToolSpec
 from ._trace import copy_trace
+
+MEM0_FACT_EXTRACTION_PROMPT = """Extract Mem0-style long-term memory candidates as a JSON list of strings.
+
+Return only a JSON list of strings. Each string should be a self-contained, paragraph-style memory with complete context.
+If the person's name is known, use the person's name instead of generic labels like \"user\".
+Include personal details, emotional states and reactions, ongoing journeys/future plans, and Specific dates or timeframes when available.
+Prefer rich, specific narratives rather than general statements.
+Use the assistant reply only as conversational context for reference resolution.
+Extract only from user messages; do not store facts that originate only from the assistant reply.
+Skip transient chit-chat and wording tied too closely to the exact utterance.
+"""
 
 
 class PromptRecallSelectionTrigger(TriggerModule):
@@ -50,6 +61,39 @@ class PromptRecallSelectionTrigger(TriggerModule):
             "decisions_store_counts": {layer_name: 0 for layer_name in self.layer_names},
         }
         return replace(packet, decisions=[True] * len(units), decisions_store=decisions_store, trace=trace), store
+
+
+class TimestampedConcatenateReadout(ReadoutModule):
+    """Render retrieved records as ``timestamp: text`` lines for Mem0 recall."""
+
+    spec = ModuleSpec(
+        name="timestamped_concatenate_readout",
+        slot="readout",
+        input_requirements=("retrieved.items",),
+        output_guarantees=("readout.text", "readout.source_ids"),
+    )
+
+    def __init__(self, separator: str = "\n") -> None:
+        self.separator = separator
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.retrieved is None:
+            raise ValueError("TimestampedConcatenateReadout requires packet.retrieved.")
+
+        items = packet.retrieved.items
+        source_ids = [record.record_id for record in items]
+        text = self.separator.join(f"{record.timestamp}: {record.text}" for record in items)
+        readout = Readout(
+            text=text,
+            source_ids=source_ids,
+            metadata={"item_count": len(items)},
+        )
+        trace = copy_trace(packet)
+        trace["readout"] = {
+            "module": self.spec.name,
+            "source_ids": source_ids,
+        }
+        return replace(packet, readout=readout, trace=trace), store
 
 def build_profile_pair_context(packet, _store) -> dict[str, object]:
     unit = packet.units[0]
@@ -300,6 +344,7 @@ class DialogueTurnSnapshot:
     session_id: str
     turn_id: str
     pair_id: str
+    timestamp: str
     user_text: str
     assistant_text: str
     messages: list[dict[str, str]]
@@ -312,6 +357,7 @@ class DialogueTurnSnapshot:
             "session_id": self.session_id,
             "turn_id": self.turn_id,
             "pair_id": self.pair_id,
+            "timestamp": self.timestamp,
             "messages": self.messages,
             "previous_role": "user",
             "current_role": "assistant",
@@ -329,8 +375,12 @@ def snapshot_dialogue_turn(
     assistant_text: str,
     session_id: str,
     turn_id: str,
+    timestamp: str | None = None,
 ) -> DialogueTurnSnapshot:
     pair_id = f"{session_id}:{turn_id}"
+    resolved_timestamp = str(timestamp).strip() if timestamp is not None else datetime.now(UTC).isoformat()
+    if not resolved_timestamp:
+        resolved_timestamp = datetime.now(UTC).isoformat()
     messages = build_dialogue_pair_messages(user_text, assistant_text)
     pair_text = render_messages_for_prompt(messages)
     recent_messages = recall_context_text(recent_history_recall, query_text=pair_text)
@@ -339,6 +389,7 @@ def snapshot_dialogue_turn(
         session_id=session_id,
         turn_id=turn_id,
         pair_id=pair_id,
+        timestamp=resolved_timestamp,
         user_text=user_text,
         assistant_text=assistant_text,
         messages=messages,
@@ -362,6 +413,7 @@ def finalize_dialogue_turn(
             Observation(
                 text=content,
                 source="dialogue_message",
+                timestamp=turn.timestamp,
                 metadata={
                     "session_id": turn.session_id,
                     "turn_id": turn.turn_id,
@@ -376,6 +428,7 @@ def finalize_dialogue_turn(
         Observation(
             text=turn.pair_text,
             source="dialogue_pair_summary",
+            timestamp=turn.timestamp,
             metadata=turn.pair_metadata(),
         )
     )

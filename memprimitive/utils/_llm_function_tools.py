@@ -12,6 +12,20 @@ from ..core import MemoryRecord, MemoryStore, MemoryUnit, Packet
 from ._graph_family import graph_metadata_for_write, remove_graph_links_to_record
 
 
+def commit_store_snapshot(target: MemoryStore, snapshot: MemoryStore) -> MemoryStore:
+    """Apply a committed retry snapshot without replacing the shared store object."""
+
+    if target is snapshot:
+        return target
+    target.topology = snapshot.topology
+    target.layers = snapshot.layers
+    target.allow_topology_extend = snapshot.allow_topology_extend
+    target.metadata = snapshot.metadata
+    target._next_sequence_id = snapshot._next_sequence_id
+    target._composition_registry = snapshot._composition_registry
+    return target
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -62,6 +76,27 @@ class ToolExecutionState:
     written_record_ids: list[str] = field(default_factory=list)
     updated_record_ids: list[str] = field(default_factory=list)
     deleted_record_ids: list[str] = field(default_factory=list)
+
+
+def failed_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "tool_name": str(call.get("tool_name", "")),
+            "arguments": dict(call.get("arguments", {})) if isinstance(call.get("arguments"), dict) else {},
+            "error": str(call.get("error", "")),
+        }
+        for call in tool_calls
+        if str(call.get("status", "")).casefold() == "failed"
+    ]
+
+
+def format_tool_failure_summary(failures: list[dict[str, Any]]) -> str:
+    parts = []
+    for failure in failures:
+        tool_name = str(failure.get("tool_name", "")).strip() or "UNKNOWN_TOOL"
+        error = str(failure.get("error", "")).strip() or "unknown error"
+        parts.append(f"{tool_name}: {error}")
+    return "; ".join(parts)
 
 
 def project_tool_specs_for_prompt(specs: tuple[WriteToolSpec, ...]) -> list[dict[str, Any]]:

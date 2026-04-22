@@ -899,6 +899,68 @@ def test_embedding_similarity_retrieval_source_retrieved_computes_query_embeddin
     assert packet_out.retrieved.trace["reused_query_embedding"] is False
 
 
+def test_embedding_similarity_retrieval_embeds_query_through_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval
+    from memprimitive.utils import _runtime
+
+    calls: list[dict[str, object]] = []
+
+    class _FakeRuntime:
+        def __init__(
+            self,
+            *,
+            embedding_model: str | None = None,
+            embedding_provider: str | None = None,
+            embedding_api_key: str | None = None,
+            embedding_base_url: str | None = None,
+        ) -> None:
+            calls.append(
+                {
+                    "embedding_model": embedding_model,
+                    "embedding_provider": embedding_provider,
+                    "embedding_api_key": embedding_api_key,
+                    "embedding_base_url": embedding_base_url,
+                }
+            )
+
+        def embed(self, text: str) -> list[float]:
+            calls.append({"text": text})
+            return [1.0, 0.0]
+
+    monkeypatch.setattr(_runtime, "Runtime", _FakeRuntime)
+    store = MemoryStore()
+    store.append(
+        MemoryRecord(
+            record_id="rec-1",
+            unit_id="unit-1",
+            layer="default",
+            text="best",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+        )
+    )
+
+    packet_out, _ = EmbeddingSimilarityRetrieval(
+        top_k=1,
+        embedding_model="embed-model",
+        embedding_provider="openai",
+        embedding_api_key="embed-key",
+        embedding_base_url="https://embed.example/v1",
+    ).run(Packet(query=Query(text="alpha query")), store)
+
+    assert packet_out.query.embedding == [1.0, 0.0]
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
+    assert calls == [
+        {
+            "embedding_model": "embed-model",
+            "embedding_provider": "openai",
+            "embedding_api_key": "embed-key",
+            "embedding_base_url": "https://embed.example/v1",
+        },
+        {"text": "alpha query"},
+    ]
+
+
 def test_embedding_similarity_retrieval_skips_missing_and_mismatched_embeddings() -> None:
     from memprimitive.baselines import EmbeddingSimilarityRetrieval
 
@@ -943,6 +1005,63 @@ def test_embedding_similarity_retrieval_skips_missing_and_mismatched_embeddings(
     assert [record.record_id for record in packet_out.retrieved.items] == ["rec-1"]
     assert packet_out.trace["retrieval"]["embedding_candidate_count"] == 1
     assert packet_out.trace["retrieval"]["skipped_dim_mismatch_count"] == 1
+
+
+def test_triple_memory_retrieval_embeds_fuzzy_terms_through_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import TripleMemoryRetrieval
+    from memprimitive.utils import _runtime
+
+    calls: list[dict[str, object]] = []
+
+    class _FakeRuntime:
+        def __init__(
+            self,
+            *,
+            embedding_model: str | None = None,
+            embedding_provider: str | None = None,
+            embedding_api_key: str | None = None,
+            embedding_base_url: str | None = None,
+        ) -> None:
+            calls.append(
+                {
+                    "embedding_model": embedding_model,
+                    "embedding_provider": embedding_provider,
+                    "embedding_api_key": embedding_api_key,
+                    "embedding_base_url": embedding_base_url,
+                }
+            )
+
+        def embed(self, text: str) -> list[float]:
+            calls.append({"text": text})
+            return [1.0, 0.0] if text == "alice" else [0.9, 0.1]
+
+    monkeypatch.setattr(_runtime, "Runtime", _FakeRuntime)
+    TripleMemoryRetrieval._term_embedding_cache.clear()
+    retriever = TripleMemoryRetrieval(
+        embedding_model="embed-model",
+        embedding_provider="openai",
+        embedding_api_key="embed-key",
+        embedding_base_url="https://embed.example/v1",
+    )
+
+    assert retriever._embed_text("Alice") == [1.0, 0.0]
+    assert retriever._embed_text("Alicia") == [0.9, 0.1]
+    assert calls == [
+        {
+            "embedding_model": "embed-model",
+            "embedding_provider": "openai",
+            "embedding_api_key": "embed-key",
+            "embedding_base_url": "https://embed.example/v1",
+        },
+        {"text": "alice"},
+        {
+            "embedding_model": "embed-model",
+            "embedding_provider": "openai",
+            "embedding_api_key": "embed-key",
+            "embedding_base_url": "https://embed.example/v1",
+        },
+        {"text": "alicia"},
+    ]
 
 
 def test_embedding_similarity_retrieval_can_target_declared_topology_layer() -> None:

@@ -9,6 +9,7 @@ from typing import Any
 
 from agents import Agent, AsyncOpenAI, ModelSettings, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
 from dotenv import load_dotenv
+from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 try:
@@ -18,23 +19,83 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
 
 _JSON_START_PATTERN = re.compile(r"[\{\[]")
 _MEMPRIMITIVE_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+_DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_LOCAL_EMBEDDING_PROVIDERS = frozenset({"sentence_transformers", "sentence-transformers", "local"})
+_OPENAI_EMBEDDING_PROVIDER = "openai"
 
 
 def _coerce_json(content: str) -> Any:
     stripped = content.strip()
     if not stripped:
         raise ValueError("Model returned empty content where JSON was required.")
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        decoder = json.JSONDecoder()
-        for match in _JSON_START_PATTERN.finditer(stripped):
+    first_error: json.JSONDecodeError | None = None
+    decoder = json.JSONDecoder()
+    for candidate in _json_candidates(stripped):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            if first_error is None:
+                first_error = exc
+        for match in _JSON_START_PATTERN.finditer(candidate):
+            raw_candidate = candidate[match.start():].strip()
             try:
-                parsed, _end = decoder.raw_decode(stripped, match.start())
-            except json.JSONDecodeError:
+                parsed, _end = decoder.raw_decode(raw_candidate)
+                return parsed
+            except json.JSONDecodeError as exc:
+                if first_error is None:
+                    first_error = exc
+            repaired = _repair_truncated_json(raw_candidate)
+            if repaired is None:
                 continue
-            return parsed
-        raise
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError as exc:
+                if first_error is None:
+                    first_error = exc
+    if first_error is None:
+        first_error = json.JSONDecodeError("Expecting value", stripped, 0)
+    preview = stripped[:500].replace("\n", "\\n")
+    raise ValueError(f"Model returned non-JSON content where JSON was required: {preview!r}") from first_error
+
+
+def _json_candidates(stripped: str) -> list[str]:
+    candidates = [stripped]
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        unfenced = "\n".join(lines).strip()
+        if unfenced:
+            candidates.append(unfenced)
+    return list(dict.fromkeys(candidates))
+
+
+def _repair_truncated_json(candidate: str) -> str | None:
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for char in candidate:
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append("]" if char == "[" else "}")
+        elif char in "]}":
+            if not stack or stack[-1] != char:
+                return None
+            stack.pop()
+    if in_string or not stack:
+        return None
+    return candidate + "".join(reversed(stack))
 
 
 class Runtime:
@@ -47,18 +108,54 @@ class Runtime:
         base_url: str | None = None,
         model: str | None = None,
         embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
     ) -> None:
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
         self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
         self.base_url = base_url if base_url is not None else env.get("MEMPRIMITIVE_BASE_URL", "")
         self.model = model if model is not None else env.get("MEMPRIMITIVE_MODEL", "")
-        self.embedding_model = embedding_model or env.get(
-            "MEMPRIMITIVE_EMBEDDING_MODEL",
-            "sentence-transformers/all-MiniLM-L6-v2",
+        raw_embedding_provider = (
+            embedding_provider
+            if embedding_provider is not None
+            else env.get("MEMPRIMITIVE_EMBEDDING_PROVIDER", "sentence_transformers")
+        )
+        self.embedding_provider = self._normalize_embedding_provider(raw_embedding_provider)
+        raw_embedding_model = embedding_model or env.get("MEMPRIMITIVE_EMBEDDING_MODEL", "")
+        self.embedding_model = (
+            raw_embedding_model
+            if raw_embedding_model
+            else (
+                _DEFAULT_SENTENCE_TRANSFORMERS_MODEL
+                if self.embedding_provider == "sentence_transformers"
+                else ""
+            )
+        )
+        self.embedding_api_key = (
+            embedding_api_key
+            if embedding_api_key is not None
+            else env.get("MEMPRIMITIVE_EMBEDDING_API_KEY", "")
+        )
+        self.embedding_base_url = (
+            embedding_base_url
+            if embedding_base_url is not None
+            else env.get("MEMPRIMITIVE_EMBEDDING_BASE_URL", "")
         )
         # Non-OpenAI-compatible providers often do not support the default tracing path.
         set_tracing_disabled(disabled=True)
+
+    @staticmethod
+    def _normalize_embedding_provider(provider: str | None) -> str:
+        normalized = str(provider or "sentence_transformers").strip().casefold().replace("-", "_")
+        if normalized in {value.replace("-", "_") for value in _LOCAL_EMBEDDING_PROVIDERS}:
+            return "sentence_transformers"
+        if normalized == _OPENAI_EMBEDDING_PROVIDER:
+            return _OPENAI_EMBEDDING_PROVIDER
+        raise ValueError(
+            "MEMPRIMITIVE_EMBEDDING_PROVIDER must be one of: sentence_transformers, openai."
+        )
 
     def require_llm(self, *, capability: str) -> None:
         if self.api_key and self.base_url and self.model:
@@ -99,11 +196,32 @@ class Runtime:
         return result.final_output
 
     def embed(self, text: str) -> list[float]:
+        if self.embedding_provider == _OPENAI_EMBEDDING_PROVIDER:
+            return self._embed_with_openai(text)
+        return self._embed_with_sentence_transformers(text)
+
+    def _embed_with_sentence_transformers(self, text: str) -> list[float]:
         model = self._embedding_cache.get(self.embedding_model)
         if model is None:
             model = SentenceTransformer(self.embedding_model)
             self._embedding_cache[self.embedding_model] = model
         return [float(value) for value in model.encode(text, normalize_embeddings=True).tolist()]
+
+    def _embed_with_openai(self, text: str) -> list[float]:
+        self.require_embedding_api()
+        client = OpenAI(api_key=self.embedding_api_key, base_url=self.embedding_base_url)
+        response = client.embeddings.create(model=self.embedding_model, input=text)
+        if not response.data:
+            raise ValueError("Embedding API returned no embedding data.")
+        return [float(value) for value in response.data[0].embedding]
+
+    def require_embedding_api(self) -> None:
+        if self.embedding_api_key and self.embedding_base_url and self.embedding_model:
+            return
+        raise ValueError(
+            "Embedding API access requires MEMPRIMITIVE_EMBEDDING_API_KEY, "
+            "MEMPRIMITIVE_EMBEDDING_BASE_URL, and MEMPRIMITIVE_EMBEDDING_MODEL."
+        )
 
     def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
         output = self.run_agent(

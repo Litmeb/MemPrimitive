@@ -90,7 +90,10 @@ def _read_input(path: Path) -> Any:
     if not text:
         return {}
     if text.startswith("[") or text.startswith("{"):
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
@@ -106,18 +109,82 @@ def _normalize_items(data: Any) -> dict[str, list[dict[str, Any]]]:
         metadata = raw_item.get("metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
+        memory_metadata = raw_item.get("memory_metadata", {})
+        if not isinstance(memory_metadata, dict):
+            memory_metadata = {}
         group_key = str(
             metadata.get("locomo_sample_id")
             or raw_item.get("locomo_sample_id")
             or raw_item.get("benchmark_name")
             or f"group-{index}"
         )
+        category = (
+            raw_item.get("category")
+            or metadata.get("qa_category")
+            or memory_metadata.get("qa_category")
+            or ""
+        )
         grouped[group_key].append(
             {
                 "question": raw_item.get("question") or raw_item.get("query_text") or "",
                 "answer": raw_item.get("answer") or raw_item.get("reference_answer") or "",
                 "response": raw_item.get("response") or raw_item.get("predicted_answer") or "",
-                "category": raw_item.get("category") or metadata.get("qa_category") or "",
+                "category": category,
+                "evidence": raw_item.get("evidence") or metadata.get("evidence") or memory_metadata.get("evidence") or [],
+                "adversarial_answer": (
+                    raw_item.get("adversarial_answer")
+                    or metadata.get("adversarial_answer")
+                    or memory_metadata.get("adversarial_answer")
+                    or ""
+                ),
+                "speaker_1_memories": (
+                    raw_item.get("speaker_1_memories")
+                    or metadata.get("speaker_1_memories")
+                    or memory_metadata.get("speaker_1_memories")
+                    or ""
+                ),
+                "speaker_2_memories": (
+                    raw_item.get("speaker_2_memories")
+                    or metadata.get("speaker_2_memories")
+                    or memory_metadata.get("speaker_2_memories")
+                    or ""
+                ),
+                "num_speaker_1_memories": (
+                    raw_item.get("num_speaker_1_memories")
+                    or metadata.get("num_speaker_1_memories")
+                    or memory_metadata.get("num_speaker_1_memories")
+                    or 0
+                ),
+                "num_speaker_2_memories": (
+                    raw_item.get("num_speaker_2_memories")
+                    or metadata.get("num_speaker_2_memories")
+                    or memory_metadata.get("num_speaker_2_memories")
+                    or 0
+                ),
+                "speaker_1_user_id": (
+                    raw_item.get("speaker_1_user_id")
+                    or metadata.get("speaker_1_user_id")
+                    or memory_metadata.get("speaker_1_user_id")
+                    or ""
+                ),
+                "speaker_2_user_id": (
+                    raw_item.get("speaker_2_user_id")
+                    or metadata.get("speaker_2_user_id")
+                    or memory_metadata.get("speaker_2_user_id")
+                    or ""
+                ),
+                "speaker_1_name": (
+                    raw_item.get("speaker_1_name")
+                    or metadata.get("speaker_1_name")
+                    or memory_metadata.get("speaker_1_name")
+                    or ""
+                ),
+                "speaker_2_name": (
+                    raw_item.get("speaker_2_name")
+                    or metadata.get("speaker_2_name")
+                    or memory_metadata.get("speaker_2_name")
+                    or ""
+                ),
             }
         )
     return dict(grouped)

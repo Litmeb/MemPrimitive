@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import replace
 import json
 from typing import TYPE_CHECKING, Any, Final
@@ -32,6 +33,9 @@ from ..utils._llm_function_tools import (
     WriteToolSpec,
     aggregate_write_tool_contracts,
     build_runtime_tools,
+    commit_store_snapshot,
+    failed_tool_calls,
+    format_tool_failure_summary,
     normalize_write_tool_specs,
     project_tool_specs_for_prompt,
     write_tool_specs_require_graph_contracts,
@@ -209,7 +213,13 @@ class FanoutIngestOrganization(OrganizationModule):
             },
             "child_traces": child_traces,
         }
-        return replace(packet, trace=trace), store
+        units = list(packet.units or [])
+        placements = (
+            [Placement(unit_id=unit.unit_id, target_layer=store.topology.layer_names[0]) for unit in units]
+            if units
+            else packet.placements
+        )
+        return replace(packet, placements=placements, trace=trace), store
 
 
 def _append_records_for_placements(
@@ -1013,7 +1023,9 @@ class LLMFunctionCallOrganization(OrganizationModule):
         tools: list[str | WriteToolSpec],
         target_layer: str | None = None,
         max_turns: int = 6,
-        strict_tools: bool = True,
+        strict_tools: bool | None = None,
+        max_retry: int = 0,
+        raise_on_tool_error: bool = False,
         allow_no_tool_call: bool = True,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -1033,7 +1045,11 @@ class LLMFunctionCallOrganization(OrganizationModule):
         self.max_turns = int(max_turns)
         if self.max_turns <= 0:
             raise ValueError("max_turns must be positive.")
-        self.strict_tools = bool(strict_tools)
+        self.max_retry = int(max_retry)
+        if self.max_retry < 0:
+            raise ValueError("max_retry must be non-negative.")
+        self.strict_tools = bool(strict_tools) if strict_tools is not None else False
+        self.raise_on_tool_error = bool(strict_tools) if strict_tools is not None else bool(raise_on_tool_error)
         self.allow_no_tool_call = bool(allow_no_tool_call)
         self.api_key = api_key
         self.base_url = base_url
@@ -1095,9 +1111,27 @@ class LLMFunctionCallOrganization(OrganizationModule):
                     aggregate_visible_record_ids.append(record_id)
 
         trace = copy_trace(packet)
+        failed_calls = [
+            failure
+            for unit_trace in per_unit_trace
+            for failure in unit_trace.get("failed_tool_calls", [])
+            if isinstance(failure, dict)
+        ]
         trace["organization"] = {
             "module": self.spec.name,
             "tool_names": [spec.name for spec in self.tool_specs],
+            "max_retry": self.max_retry,
+            "retry_count": sum(int(unit_trace.get("retry_count", 0)) for unit_trace in per_unit_trace),
+            "raise_on_tool_error": self.raise_on_tool_error,
+            "failed_tool_calls": failed_calls,
+            "attempts": [
+                {
+                    "unit_id": unit_trace.get("unit_id", ""),
+                    "attempts": list(unit_trace.get("attempts", [])),
+                }
+                for unit_trace in per_unit_trace
+                if unit_trace.get("attempts")
+            ],
             "prompt_is_template": self.prompt.mode == "structured"
             or (isinstance(self.prompt.template, str) and "{{" in self.prompt.template and "}}" in self.prompt.template),
             "per_unit": per_unit_trace,
@@ -1119,21 +1153,6 @@ class LLMFunctionCallOrganization(OrganizationModule):
     ) -> tuple[str, dict[str, Any], ToolExecutionState, MemoryStore]:
         unit = packet.units[0]
         visible_records_holder = {"records": list(store.iter_records())}
-        context = WriteToolCallContext(
-            packet=packet,
-            store=store,
-            module_slot="organization",
-            default_target_layer=self.target_layer or placement.target_layer,
-            selected_records=[],
-            visible_records=list(visible_records_holder["records"]),
-        )
-        state = ToolExecutionState()
-        runtime_tools = build_runtime_tools(
-            self.tool_specs,
-            context=context,
-            state=state,
-            strict_tools=self.strict_tools,
-        )
         rendered_prompt, prompt_trace, store = render_prompt_plan(
             ensure_prompt_plan(
                 self.prompt,
@@ -1160,21 +1179,96 @@ class LLMFunctionCallOrganization(OrganizationModule):
                 )
             ),
         )
-        context.store = store
-        context.visible_records = list(visible_records_holder["records"])
         visible_record_ids = [record.record_id for record in visible_records_holder["records"]]
         prompt_trace["visible_record_ids"] = visible_record_ids
         prompt_trace["visible_record_source"] = (
             "store_plus_prompt_recall" if prompt_trace.get("visible_record_ids_by_label") else "store_scan"
         )
-        self._run_agent(
+        state, committed_store, retry_trace = self._run_agent_with_retries(
+            packet=packet,
+            store=store,
             rendered_prompt=rendered_prompt,
-            tools=runtime_tools,
-            context={"unit_id": unit.unit_id, "slot": self.spec.slot},
+            base_context={"unit_id": unit.unit_id, "slot": self.spec.slot},
+            default_target_layer=self.target_layer or placement.target_layer,
+            visible_record_ids=visible_record_ids,
         )
         if not state.tool_calls and not self.allow_no_tool_call:
             raise ValueError("LLMFunctionCallOrganization requires at least one successful or attempted tool call.")
-        return rendered_prompt, prompt_trace, state, context.store
+        prompt_trace.update(retry_trace)
+        return rendered_prompt, prompt_trace, state, committed_store
+
+    def _run_agent_with_retries(
+        self,
+        *,
+        packet: Packet,
+        store: MemoryStore,
+        rendered_prompt: str,
+        base_context: dict[str, Any],
+        default_target_layer: str,
+        visible_record_ids: list[str],
+    ) -> tuple[ToolExecutionState, MemoryStore, dict[str, Any]]:
+        previous_failures: list[dict[str, Any]] = []
+        attempt_traces: list[dict[str, Any]] = []
+        final_state = ToolExecutionState()
+        final_store = deepcopy(store)
+
+        for attempt_index in range(self.max_retry + 1):
+            attempt_store = deepcopy(store)
+            visible_records = [
+                record
+                for record in attempt_store.iter_records()
+                if not visible_record_ids or record.record_id in set(visible_record_ids)
+            ]
+            context = WriteToolCallContext(
+                packet=packet,
+                store=attempt_store,
+                module_slot="organization",
+                default_target_layer=default_target_layer,
+                selected_records=[],
+                visible_records=visible_records,
+            )
+            state = ToolExecutionState()
+            runtime_tools = build_runtime_tools(
+                self.tool_specs,
+                context=context,
+                state=state,
+                strict_tools=self.strict_tools,
+            )
+            agent_context = dict(base_context)
+            if previous_failures:
+                agent_context["retry"] = {
+                    "attempt": attempt_index,
+                    "max_retry": self.max_retry,
+                    "previous_failed_tool_calls": previous_failures,
+                    "instruction": "Retry the memory tool calls using the original prompt and these tool error details.",
+                }
+            self._run_agent(rendered_prompt=rendered_prompt, tools=runtime_tools, context=agent_context)
+
+            failures = failed_tool_calls(state.tool_calls)
+            attempt_traces.append(
+                {
+                    "attempt": attempt_index,
+                    "tool_calls": list(state.tool_calls),
+                    "effects": list(state.effects),
+                    "failed_tool_calls": failures,
+                }
+            )
+            final_state = state
+            final_store = context.store
+            if not failures:
+                break
+            previous_failures = failures
+
+        final_failures = failed_tool_calls(final_state.tool_calls)
+        if final_failures and self.raise_on_tool_error:
+            raise ValueError(f"LLMFunctionCallOrganization tool calls failed: {format_tool_failure_summary(final_failures)}")
+        return final_state, commit_store_snapshot(store, final_store), {
+            "max_retry": self.max_retry,
+            "retry_count": max(0, len(attempt_traces) - 1),
+            "raise_on_tool_error": self.raise_on_tool_error,
+            "failed_tool_calls": final_failures,
+            "attempts": attempt_traces,
+        }
 
     @staticmethod
     def _apply_prompt_visible_records(

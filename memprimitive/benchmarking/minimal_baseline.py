@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterator
 
+from tqdm import tqdm
+
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
     AlwaysTrigger,
@@ -24,11 +26,152 @@ from ._bench_adapters import (
     create_benchmark_adapter,
 )
 from ._memory_adapters import PipelineMemoryAdapter, create_mem0_memory_adapter
-from ._runner import SingleRecallLLMAnswerRunner, run_benchmark, write_predictions_jsonl
-from ._types import BenchmarkPrediction, BenchmarkSample
+from ._runner import Mem0LoCoMoAnswerRunner, SingleRecallLLMAnswerRunner, run_benchmark, write_predictions_jsonl
+from ._types import AnswerRunner, BenchmarkPrediction, BenchmarkSample
 
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[2] / "benchmarks" / "outputs" / "minimal_baseline_predictions.jsonl"
 VALID_BENCHMARKS = frozenset({"locomo", "longmemeval", "dmr"})
+
+
+class _TqdmBenchmarkProgress:
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = bool(enabled)
+        self.bar = None
+        self.memory_bar = None
+        self.user_totals: dict[str, int] = {}
+        self.user_done: dict[str, int] = {}
+        self.user_labels: dict[str, str] = {}
+
+    def __call__(
+        self,
+        *,
+        phase: str,
+        total: int | None = None,
+        total_turns: int | None = None,
+        memory_turn_total: int | None = None,
+        turn_index: int | None = None,
+        turn_id: str | None = None,
+        turn_increment: int | None = None,
+        samples: list[BenchmarkSample] | None = None,
+        sample: BenchmarkSample | None = None,
+        **_: Any,
+    ) -> None:
+        if not self.enabled:
+            return
+        if phase == "init":
+            self._initialize(
+                total=0 if total is None else total,
+                samples=[] if samples is None else samples,
+                memory_turn_total=memory_turn_total,
+            )
+            return
+        if self.bar is None:
+            self._initialize(total=0 if total is None else total, samples=[], memory_turn_total=memory_turn_total)
+        if sample is not None and phase in {"start", "done"}:
+            self._set_sample_status(sample, done=(phase == "done"))
+        if sample is not None and phase == "memory_init":
+            self._set_memory_status(sample, status=f"0/{0 if total_turns is None else total_turns} loading")
+        if sample is not None and phase == "memory_turn_done":
+            increment = 1 if turn_increment is None else int(turn_increment)
+            self._set_memory_status(
+                sample,
+                status=(
+                    f"{0 if turn_index is None else turn_index}"
+                    f"/{'' if total_turns is None else total_turns} {turn_id or 'turn'}"
+                ),
+            )
+            if self.memory_bar is not None:
+                self.memory_bar.update(increment)
+        if sample is not None and phase == "memory_finish":
+            self._set_memory_status(sample, status="loaded")
+        if sample is not None and phase == "memory_reuse":
+            self._set_memory_status(sample, status="reused")
+        if phase == "done" and self.bar is not None:
+            self.bar.update(1)
+        if phase == "finish" and self.bar is not None:
+            if self.memory_bar is not None:
+                self.memory_bar.close()
+                self.memory_bar = None
+            self.bar.close()
+            self.bar = None
+
+    def _initialize(
+        self,
+        *,
+        total: int,
+        samples: list[BenchmarkSample],
+        memory_turn_total: int | None = None,
+    ) -> None:
+        self.user_totals.clear()
+        self.user_done.clear()
+        self.user_labels.clear()
+        for sample in samples:
+            key = self._user_key(sample)
+            self.user_totals[key] = self.user_totals.get(key, 0) + 1
+            self.user_labels.setdefault(key, self._user_label(sample))
+        total_memory_turns = (
+            sum(len(sample.history_turns) for sample in samples)
+            if memory_turn_total is None
+            else memory_turn_total
+        )
+        self.memory_bar = tqdm(
+            total=total_memory_turns,
+            unit="turn",
+            dynamic_ncols=True,
+            desc="memory turns",
+            position=0,
+        )
+        self.bar = tqdm(total=total, unit="qa", dynamic_ncols=True, desc="qa answers", position=1)
+
+    def _set_sample_status(self, sample: BenchmarkSample, *, done: bool) -> None:
+        if self.bar is None:
+            return
+        key = self._user_key(sample)
+        self.user_totals.setdefault(key, 1)
+        self.user_labels.setdefault(key, self._user_label(sample))
+        if done:
+            self.user_done[key] = self.user_done.get(key, 0) + 1
+        current_done = self.user_done.get(key, 0)
+        user_total = self.user_totals.get(key, 1)
+        status = "done" if done else "running"
+        self.bar.set_postfix_str(
+            f"{self.user_labels[key]} {current_done}/{user_total} {status} {sample.sample_id}",
+            refresh=True,
+        )
+
+    def _set_memory_status(self, sample: BenchmarkSample, *, status: str) -> None:
+        if self.memory_bar is None:
+            return
+        key = self._user_key(sample)
+        self.user_labels.setdefault(key, self._user_label(sample))
+        self.memory_bar.set_postfix_str(
+            f"{self.user_labels[key]} {status} {sample.sample_id}",
+            refresh=True,
+        )
+
+    @staticmethod
+    def _user_key(sample: BenchmarkSample) -> str:
+        metadata = sample.metadata
+        user_index = str(metadata.get("locomo_user_index", "")).strip()
+        if user_index:
+            return f"locomo-user-{user_index}"
+        sample_group = str(metadata.get("locomo_sample_id", "")).strip()
+        if sample_group:
+            return sample_group
+        return str(sample.benchmark_name).strip() or "benchmark"
+
+    @staticmethod
+    def _user_label(sample: BenchmarkSample) -> str:
+        metadata = sample.metadata
+        user_index = str(metadata.get("locomo_user_index", "")).strip()
+        speaker_a = str(metadata.get("speaker_a", "")).strip()
+        speaker_b = str(metadata.get("speaker_b", "")).strip()
+        if user_index and (speaker_a or speaker_b):
+            speakers = "/".join(part for part in (speaker_a, speaker_b) if part)
+            return f"user {user_index} ({speakers})"
+        if user_index:
+            return f"user {user_index}"
+        return str(sample.benchmark_name).strip() or "benchmark"
 
 
 class _SingleSampleBenchmarkAdapter:
@@ -93,13 +236,19 @@ def _minimal_memory_adapter(*, top_k: int) -> PipelineMemoryAdapter:
     )
 
 
-def _create_cli_memory_adapter(name: str, *, top_k: int):
+def _create_cli_memory_adapter(name: str, *, top_k: int | None):
     adapter_name = str(name).strip().casefold()
     if adapter_name == "minimal":
-        return _minimal_memory_adapter(top_k=top_k)
+        return _minimal_memory_adapter(top_k=5 if top_k is None else top_k)
     if adapter_name == "mem0":
-        return create_mem0_memory_adapter()
+        return create_mem0_memory_adapter(top_k=top_k)
     raise ValueError("Unsupported memory adapter. Choose from ['mem0', 'minimal'].")
+
+
+def _create_cli_answer_runner(*, benchmark_name: str, memory_adapter_name: str):
+    if benchmark_name == "locomo" and memory_adapter_name == "mem0":
+        return Mem0LoCoMoAnswerRunner()
+    return SingleRecallLLMAnswerRunner()
 
 
 def _compat_benchmark_adapter(
@@ -146,7 +295,7 @@ def run_minimal_baseline_sample(
     sample: BenchmarkSample,
     *,
     top_k: int = 5,
-    answer_runner: SingleRecallLLMAnswerRunner | None = None,
+    answer_runner: AnswerRunner | None = None,
 ) -> BenchmarkPrediction:
     """Run the one-recall baseline for a single normalized benchmark sample."""
 
@@ -174,7 +323,7 @@ def run_minimal_baseline(
     locomo_users: str | list[str] | tuple[str, ...] | None = None,
     limit: int | None = None,
     top_k: int = 5,
-    answer_runner: SingleRecallLLMAnswerRunner | None = None,
+    answer_runner: AnswerRunner | None = None,
 ) -> list[BenchmarkPrediction]:
     """Run the minimal baseline across one supported benchmark."""
 
@@ -309,13 +458,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--max-history-turns",
+        type=int,
+        default=None,
+        help="Limit each sample to the first N history turns before loading memory.",
+    )
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run a cheap smoke test: first 10 history turns per sample and first 10 questions.",
+    )
+    parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument(
         "--memory-adapter",
         choices=("minimal", "mem0"),
         default="minimal",
         help="Memory system to evaluate. 'minimal' preserves the legacy baseline; 'mem0' runs the classics Mem0 reconstruction.",
     )
+    parser.add_argument("--no-progress", action="store_true", help="Disable the tqdm benchmark progress bar.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     return parser
 
@@ -323,17 +484,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+    benchmark_name = str(args.benchmark).strip().casefold()
+    memory_adapter_name = str(args.memory_adapter).strip().casefold()
+    limit = args.limit
+    max_history_turns = args.max_history_turns
+    if args.smoke_test:
+        limit = 10 if limit is None else min(limit, 10)
+        max_history_turns = 10 if max_history_turns is None else min(max_history_turns, 10)
     benchmark_adapter = _compat_benchmark_adapter(
-        args.benchmark,
+        benchmark_name,
         benchmark_root=args.benchmark_root,
         longmemeval_variant=args.longmemeval_variant,
         locomo_users=args.locomo_users,
     )
-    memory_adapter = _create_cli_memory_adapter(args.memory_adapter, top_k=args.top_k)
+    memory_adapter = _create_cli_memory_adapter(memory_adapter_name, top_k=args.top_k)
+    answer_runner = _create_cli_answer_runner(
+        benchmark_name=benchmark_name,
+        memory_adapter_name=memory_adapter_name,
+    )
     result = run_benchmark(
         benchmark_adapter,
         memory_adapter,
-        limit=args.limit,
+        answer_runner=answer_runner,
+        limit=limit,
+        max_history_turns=max_history_turns,
+        progress_callback=_TqdmBenchmarkProgress(enabled=not args.no_progress),
     )
     predictions = result.predictions
     for index, prediction in enumerate(predictions, start=1):

@@ -62,12 +62,14 @@ Some examples and the benchmark answer runner use the OpenAI-compatible runtime 
 MEMPRIMITIVE_API_KEY=...
 MEMPRIMITIVE_BASE_URL=...
 MEMPRIMITIVE_MODEL=...
+MEMPRIMITIVE_EMBEDDING_PROVIDER=sentence_transformers
 MEMPRIMITIVE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ```
 
 Notes:
 
-- `MEMPRIMITIVE_EMBEDDING_MODEL` is optional; the default is `sentence-transformers/all-MiniLM-L6-v2`.
+- Embeddings default to local `sentence-transformers`; `MEMPRIMITIVE_EMBEDDING_MODEL` is optional in that mode and defaults to `sentence-transformers/all-MiniLM-L6-v2`.
+- To use an OpenAI-compatible embeddings API instead, set `MEMPRIMITIVE_EMBEDDING_PROVIDER=openai` plus `MEMPRIMITIVE_EMBEDDING_API_KEY`, `MEMPRIMITIVE_EMBEDDING_BASE_URL`, and `MEMPRIMITIVE_EMBEDDING_MODEL`.
 - Simple config validation does not need model credentials.
 - End-to-end execution of LLM-backed examples does need them.
 

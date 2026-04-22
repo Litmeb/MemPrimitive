@@ -10,7 +10,6 @@ import re
 from typing import Any, ClassVar, Final
 
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 
 from ..contracts import (
     RECORD_GRAPH_LINKS_CONTRACT,
@@ -898,8 +897,9 @@ class EmbeddingSimilarityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Retrieve the ``top_k`` records with highest embedding cosine similarity.
 
     Constructor: ``top_k`` must be a positive integer. ``layer`` selects
-    ``store.iter_records(layer)``; ``None`` means all layers. ``embedding_model``
-    defaults to the same sentence-transformers model as ``BasicRepresentation``.
+    ``store.iter_records(layer)``; ``None`` means all layers. Embedding is
+    delegated to ``Runtime.embed()`` so the runtime embedding provider controls
+    whether query text is embedded locally or through an API.
 
     ``run`` requires ``packet.query``. Uses ``query.embedding`` when present;
     otherwise encodes ``query.text`` and returns an updated packet with the cached
@@ -917,14 +917,16 @@ class EmbeddingSimilarityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         store_requirements=("record.embedding",),
     )
     requires_contracts = frozenset({UNIT_EMBEDDING_CONTRACT})
-    _embedding_cache: ClassVar[dict[str, SentenceTransformer]] = {}
 
     def __init__(
         self,
         top_k: int = 3,
         layer: str | None = None,
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: str | None = None,
         source: str = "store",
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
     ) -> None:
         if top_k <= 0:
             raise ValueError("EmbeddingSimilarityRetrieval requires top_k > 0.")
@@ -932,6 +934,9 @@ class EmbeddingSimilarityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         self.layer = layer
         self.embedding_model = embedding_model
         self.source = _normalize_retrieval_source(source)
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
 
     def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         if packet.query is None:
@@ -998,11 +1003,14 @@ class EmbeddingSimilarityRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return _with_retrieved(packet, retrieved, query=query), store
 
     def _embed_text(self, text: str) -> list[float]:
-        model = self._embedding_cache.get(self.embedding_model)
-        if model is None:
-            model = SentenceTransformer(self.embedding_model)
-            self._embedding_cache[self.embedding_model] = model
-        return [float(value) for value in model.encode(text, normalize_embeddings=True).tolist()]
+        from ..utils._runtime import Runtime
+
+        return Runtime(
+            embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
+            embedding_base_url=self.embedding_base_url,
+        ).embed(text)
 
     @staticmethod
     def _cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -1100,8 +1108,7 @@ class TripleMemoryRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         input_requirements=("query.text",),
         output_guarantees=("retrieved.items", "retrieved.scores"),
     )
-    _embedding_cache: ClassVar[dict[str, SentenceTransformer]] = {}
-    _term_embedding_cache: ClassVar[dict[tuple[str, str], list[float]]] = {}
+    _term_embedding_cache: ClassVar[dict[tuple[str | None, str | None, str | None, str], list[float]]] = {}
 
     def __init__(
         self,
@@ -1109,7 +1116,10 @@ class TripleMemoryRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         layer: str | None = None,
         *,
         source: str = "store",
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
         candidate_similarity_threshold: float = 0.7,
         final_similarity_threshold: float = 0.85,
     ) -> None:
@@ -1123,6 +1133,9 @@ class TripleMemoryRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         self.layer = layer
         self.source = _normalize_retrieval_source(source)
         self.embedding_model = embedding_model
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
         self.candidate_similarity_threshold = float(candidate_similarity_threshold)
         self.final_similarity_threshold = float(final_similarity_threshold)
 
@@ -1306,15 +1319,23 @@ class TripleMemoryRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
 
     def _embed_text(self, text: str) -> list[float]:
         normalized = str(text).strip().casefold()
-        key = (self.embedding_model, normalized)
+        key = (
+            self.embedding_provider,
+            self.embedding_base_url,
+            self.embedding_model,
+            normalized,
+        )
         cached = self._term_embedding_cache.get(key)
         if cached is not None:
             return cached
-        model = self._embedding_cache.get(self.embedding_model)
-        if model is None:
-            model = SentenceTransformer(self.embedding_model)
-            self._embedding_cache[self.embedding_model] = model
-        embedding = [float(value) for value in model.encode(normalized, normalize_embeddings=True).tolist()]
+        from ..utils._runtime import Runtime
+
+        embedding = Runtime(
+            embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
+            embedding_base_url=self.embedding_base_url,
+        ).embed(normalized)
         self._term_embedding_cache[key] = embedding
         return embedding
 
