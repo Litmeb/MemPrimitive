@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 from memprimitive import FreeMemoryPipeline, MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
@@ -285,12 +287,12 @@ def test_create_mem0_memory_adapter_uses_per_speaker_systems(monkeypatch) -> Non
     assert build_calls == [
         {
             "recent_top_k": 6,
-            "similar_top_k": 17,
+            "similar_top_k": 5,
             "recall_top_k": 17,
         },
         {
             "recent_top_k": 6,
-            "similar_top_k": 17,
+            "similar_top_k": 5,
             "recall_top_k": 17,
         },
     ]
@@ -383,13 +385,46 @@ def test_create_mem0_memory_adapter_defaults_to_upstream_top_k(monkeypatch) -> N
     assert build_calls == [
         {
             "recent_top_k": 6,
-            "similar_top_k": 30,
+            "similar_top_k": 5,
             "recall_top_k": 30,
         },
         {
             "recent_top_k": 6,
-            "similar_top_k": 30,
+            "similar_top_k": 5,
             "recall_top_k": 30,
+        },
+    ]
+
+
+def test_create_mem0_memory_adapter_accepts_write_time_similar_top_k(monkeypatch) -> None:
+    from memprimitive.example.classics import mem0_memory
+
+    build_calls: list[dict[str, object]] = []
+
+    def _build_system(*, recent_top_k: int, similar_top_k: int, recall_top_k: int) -> dict[str, object]:
+        build_calls.append(
+            {
+                "recent_top_k": recent_top_k,
+                "similar_top_k": similar_top_k,
+                "recall_top_k": recall_top_k,
+            }
+        )
+        return {"pairs": []}
+
+    monkeypatch.setattr(mem0_memory, "build_mem0_memory_system", _build_system)
+    adapter = create_mem0_memory_adapter(top_k=17, similar_top_k=3)
+    adapter.create_session()
+
+    assert build_calls == [
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 3,
+            "recall_top_k": 17,
+        },
+        {
+            "recent_top_k": 6,
+            "similar_top_k": 3,
+            "recall_top_k": 17,
         },
     ]
 
@@ -420,12 +455,12 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
     assert build_calls == [
         {
             "recent_top_k": 6,
-            "similar_top_k": 30,
+            "similar_top_k": 5,
             "recall_top_k": 30,
         },
         {
             "recent_top_k": 6,
-            "similar_top_k": 30,
+            "similar_top_k": 5,
             "recall_top_k": 30,
         },
     ]
@@ -616,6 +651,53 @@ def test_run_benchmark_reuses_session_for_same_memory_key() -> None:
     assert init_memory_totals == [1]
 
 
+def test_run_benchmark_parallel_workers_preserve_prediction_order() -> None:
+    samples = [_sample_with_turns(f"memory {index}", sample_id=f"sample-{index}") for index in range(1, 4)]
+
+    class _BenchmarkAdapter:
+        name = "parallelbench"
+
+        def iter_samples(self, *, limit: int | None = None):
+            del limit
+            yield from samples
+
+    class _MemorySession:
+        def load_case(self, sample: BenchmarkSample) -> None:
+            del sample
+
+        def recall(self, query: Query, *, sample: BenchmarkSample | None = None):
+            del query
+            assert sample is not None
+            return MemoryRecall(text=f"memory for {sample.sample_id}")
+
+    class _MemoryAdapter:
+        name = "parallel-memory"
+
+        def create_session(self):
+            return _MemorySession()
+
+    class _AnswerRunner:
+        name = "fake-answer"
+
+        def answer(self, *, sample: BenchmarkSample, memory_recall):
+            if sample.sample_id == "sample-1":
+                time.sleep(0.02)
+            return f"{sample.sample_id}::{memory_recall.text}"
+
+    result = run_benchmark(
+        _BenchmarkAdapter(),
+        _MemoryAdapter(),
+        answer_runner=_AnswerRunner(),
+        max_workers=2,
+    )
+
+    assert [prediction.sample_id for prediction in result.predictions] == [
+        "sample-1",
+        "sample-2",
+        "sample-3",
+    ]
+
+
 def test_mem0_locomo_load_case_emits_turn_progress(monkeypatch) -> None:
     sample = _sample_with_turns("Alice likes tea.", "Bob likes coffee.", "Alice likes cake.", sample_id="locomo-progress")
     sample.metadata.update({"speaker_a": "user", "speaker_b": "assistant", "locomo_sample_id": "locomo-progress"})
@@ -649,6 +731,33 @@ def test_mem0_locomo_load_case_emits_turn_progress(monkeypatch) -> None:
     ]
     assert session.load_metadata["loaded_turn_count"] == 3
     assert len(ingested) == 3
+
+
+def test_mem0_locomo_load_case_can_parallelize_speakers(monkeypatch) -> None:
+    sample = _sample_with_turns("Alice likes tea.", "Bob likes coffee.", sample_id="locomo-parallel")
+    sample.metadata.update({"speaker_a": "user", "speaker_b": "assistant", "locomo_sample_id": "locomo-parallel"})
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    thread_ids: set[int] = set()
+
+    def _fake_build_system(**kwargs):
+        del kwargs
+        return {"fake": object()}
+
+    def _fake_ingest(system, *, user_text, assistant_text, session_id, turn_id, timestamp):
+        del system, user_text, assistant_text, session_id, turn_id, timestamp
+        with lock:
+            thread_ids.add(threading.get_ident())
+        barrier.wait(timeout=2)
+
+    monkeypatch.setattr(memory_adapters_module.mem0_memory, "build_mem0_memory_system", _fake_build_system)
+    monkeypatch.setattr(memory_adapters_module.mem0_memory, "ingest_message_pair", _fake_ingest)
+
+    session = create_mem0_memory_adapter(top_k=1, speaker_workers=2).create_session()
+    session.load_case(sample)
+
+    assert len(thread_ids) == 2
+    assert session.load_metadata["speaker_workers"] == 2
 
 
 def test_mem0_adapter_groups_qa_by_locomo_sample_id() -> None:

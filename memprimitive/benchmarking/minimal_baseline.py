@@ -236,12 +236,22 @@ def _minimal_memory_adapter(*, top_k: int) -> PipelineMemoryAdapter:
     )
 
 
-def _create_cli_memory_adapter(name: str, *, top_k: int | None):
+def _create_cli_memory_adapter(
+    name: str,
+    *,
+    top_k: int | None,
+    similar_top_k: int = 5,
+    mem0_speaker_workers: int = 2,
+):
     adapter_name = str(name).strip().casefold()
     if adapter_name == "minimal":
         return _minimal_memory_adapter(top_k=5 if top_k is None else top_k)
     if adapter_name == "mem0":
-        return create_mem0_memory_adapter(top_k=top_k)
+        return create_mem0_memory_adapter(
+            top_k=top_k,
+            similar_top_k=similar_top_k,
+            speaker_workers=mem0_speaker_workers,
+        )
     raise ValueError("Unsupported memory adapter. Choose from ['mem0', 'minimal'].")
 
 
@@ -471,6 +481,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument(
+        "--similar-top-k",
+        type=int,
+        default=5,
+        help="Mem0 write-time similar-memory top-k. Only used with --memory-adapter mem0.",
+    )
+    parser.add_argument(
+        "--mem0-speaker-workers",
+        type=int,
+        default=2,
+        help="Parallel speaker workers for Mem0 LoCoMo memory load and recall.",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Parallel QA recall/answer workers. Increase for API-backed runs if rate limits allow.",
+    )
+    parser.add_argument(
         "--memory-adapter",
         choices=("minimal", "mem0"),
         default="minimal",
@@ -497,7 +525,12 @@ def main(argv: list[str] | None = None) -> int:
         longmemeval_variant=args.longmemeval_variant,
         locomo_users=args.locomo_users,
     )
-    memory_adapter = _create_cli_memory_adapter(memory_adapter_name, top_k=args.top_k)
+    memory_adapter = _create_cli_memory_adapter(
+        memory_adapter_name,
+        top_k=args.top_k,
+        similar_top_k=args.similar_top_k,
+        mem0_speaker_workers=args.mem0_speaker_workers,
+    )
     answer_runner = _create_cli_answer_runner(
         benchmark_name=benchmark_name,
         memory_adapter_name=memory_adapter_name,
@@ -508,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         answer_runner=answer_runner,
         limit=limit,
         max_history_turns=max_history_turns,
+        max_workers=args.max_workers,
         progress_callback=_TqdmBenchmarkProgress(enabled=not args.no_progress),
     )
     predictions = result.predictions
