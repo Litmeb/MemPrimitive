@@ -127,6 +127,36 @@ def test_finalize_dialogue_turn_uses_turn_timestamp_for_recent_and_summary_recor
     ]
 
 
+def test_mem0_memory_system_omits_summary_update_pipeline() -> None:
+    system = mem0_memory.build_mem0_memory_system()
+    store = system["store"]
+
+    assert "conversation_summary_update_pipeline" not in system
+
+    turn = DialogueTurnSnapshot(
+        session_id="session-1",
+        turn_id="turn-1",
+        pair_id="session-1:turn-1",
+        timestamp="2026-04-17T08:00:00Z",
+        user_text="Alice likes tea.",
+        assistant_text="Noted.",
+        messages=[
+            {"role": "user", "content": "Alice likes tea."},
+            {"role": "assistant", "content": "Noted."},
+        ],
+        pair_text="user: Alice likes tea.\nassistant: Noted.",
+        recent_messages="",
+        conversation_summary="",
+    )
+    finalize_dialogue_turn(
+        recent_dialogue_pipeline=system["recent_dialogue_pipeline"],
+        turn=turn,
+    )
+
+    assert store.count("recent_dialogue") == 2
+    assert store.count("conversation_summary") == 0
+
+
 def test_mem0_prompt_recall_visible_scope_restricts_profile_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     system = mem0_memory.build_mem0_memory_system()
     store = system["store"]

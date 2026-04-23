@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -184,6 +185,80 @@ def _memory_progress_turn_total(memory_adapter: Any, samples: list[BenchmarkSamp
     return total
 
 
+def _load_memory_session(
+    memory_adapter: Any,
+    *,
+    sample: BenchmarkSample,
+    index: int,
+    total: int,
+    session_cache: dict[str, Any],
+    progress_callback: Callable[..., None] | None,
+) -> Any:
+    session_key = _memory_session_key(memory_adapter, sample)
+    if session_key is not None and session_key in session_cache:
+        session = session_cache[session_key]
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="memory_reuse",
+                index=index,
+                total=total,
+                sample=sample,
+                session_key=session_key,
+            )
+        return session
+
+    session = memory_adapter.create_session()
+    _call_with_supported_kwargs(
+        session.load_case,
+        sample,
+        progress_callback=progress_callback,
+        sample_index=index,
+        total_samples=total,
+    )
+    if session_key is not None:
+        session_cache[session_key] = session
+    return session
+
+
+def _build_prediction(
+    *,
+    runner: AnswerRunner | Any,
+    memory_adapter: Any,
+    sample: BenchmarkSample,
+    session: Any,
+) -> BenchmarkPrediction:
+    memory_recall = session.recall(sample.query, sample=sample)
+    predicted_answer = _answer_with_runner(runner, sample=sample, memory_recall=memory_recall)
+    return BenchmarkPrediction(
+        sample_id=sample.sample_id,
+        benchmark_name=sample.benchmark_name,
+        query_text=sample.query.text,
+        reference_answer=sample.reference_answer,
+        predicted_answer=predicted_answer,
+        retrieved_text=memory_recall.text,
+        retrieved_source_ids=list(memory_recall.source_ids),
+        metadata={
+            **sample.metadata,
+            "history_turn_count": len(sample.history_turns),
+            "history_observation_count": len(sample.history_observations),
+            "query_metadata": dict(sample.query.metadata),
+            **dict(memory_recall.metadata),
+        },
+        memory_adapter_name=str(memory_adapter.name),
+        memory_metadata=dict(memory_recall.metadata),
+    )
+
+
+def _score_prediction(benchmark_adapter: Any, prediction: BenchmarkPrediction) -> None:
+    score_fn = getattr(benchmark_adapter, "score_prediction", None)
+    if not callable(score_fn):
+        return
+    score_value = _call_with_supported_kwargs(score_fn, prediction=prediction)
+    if isinstance(score_value, dict):
+        prediction.scores = dict(score_value)
+
+
 def run_benchmark(
     benchmark_adapter,
     memory_adapter,
@@ -191,10 +266,13 @@ def run_benchmark(
     answer_runner: AnswerRunner | None = None,
     limit: int | None = None,
     max_history_turns: int | None = None,
+    max_workers: int = 1,
     progress_callback: Callable[..., None] | None = None,
 ) -> BenchmarkRunResult:
     """Run one memory adapter against one benchmark adapter."""
 
+    if max_workers <= 0:
+        raise ValueError("max_workers must be positive.")
     runner = answer_runner if answer_runner is not None else SingleRecallLLMAnswerRunner()
     predictions: list[BenchmarkPrediction] = []
     samples = [
@@ -211,73 +289,86 @@ def run_benchmark(
             memory_turn_total=_memory_progress_turn_total(memory_adapter, samples),
         )
     session_cache: dict[str, Any] = {}
-    for index, sample in enumerate(samples, start=1):
-        if progress_callback is not None:
-            _call_with_supported_kwargs(
-                progress_callback,
-                phase="start",
-                index=index,
-                total=total,
-                sample=sample,
-        )
-        session_key = _memory_session_key(memory_adapter, sample)
-        if session_key is not None and session_key in session_cache:
-            session = session_cache[session_key]
+    if max_workers == 1:
+        for index, sample in enumerate(samples, start=1):
             if progress_callback is not None:
                 _call_with_supported_kwargs(
                     progress_callback,
-                    phase="memory_reuse",
+                    phase="start",
                     index=index,
                     total=total,
                     sample=sample,
-                    session_key=session_key,
                 )
-        else:
-            session = memory_adapter.create_session()
-            _call_with_supported_kwargs(
-                session.load_case,
-                sample,
-                progress_callback=progress_callback,
-                sample_index=index,
-                total_samples=total,
-            )
-            if session_key is not None:
-                session_cache[session_key] = session
-        memory_recall = session.recall(sample.query, sample=sample)
-        predicted_answer = _answer_with_runner(runner, sample=sample, memory_recall=memory_recall)
-        prediction = BenchmarkPrediction(
-            sample_id=sample.sample_id,
-            benchmark_name=sample.benchmark_name,
-            query_text=sample.query.text,
-            reference_answer=sample.reference_answer,
-            predicted_answer=predicted_answer,
-            retrieved_text=memory_recall.text,
-            retrieved_source_ids=list(memory_recall.source_ids),
-            metadata={
-                **sample.metadata,
-                "history_turn_count": len(sample.history_turns),
-                "history_observation_count": len(sample.history_observations),
-                "query_metadata": dict(sample.query.metadata),
-                **dict(memory_recall.metadata),
-            },
-            memory_adapter_name=str(memory_adapter.name),
-            memory_metadata=dict(memory_recall.metadata),
-        )
-        score_fn = getattr(benchmark_adapter, "score_prediction", None)
-        if callable(score_fn):
-            score_value = _call_with_supported_kwargs(score_fn, prediction=prediction)
-            if isinstance(score_value, dict):
-                prediction.scores = dict(score_value)
-        predictions.append(prediction)
-        if progress_callback is not None:
-            _call_with_supported_kwargs(
-                progress_callback,
-                phase="done",
+            session = _load_memory_session(
+                memory_adapter,
+                sample=sample,
                 index=index,
                 total=total,
-                sample=sample,
-                prediction=prediction,
+                session_cache=session_cache,
+                progress_callback=progress_callback,
             )
+            prediction = _build_prediction(
+                runner=runner,
+                memory_adapter=memory_adapter,
+                sample=sample,
+                session=session,
+            )
+            _score_prediction(benchmark_adapter, prediction)
+            predictions.append(prediction)
+            if progress_callback is not None:
+                _call_with_supported_kwargs(
+                    progress_callback,
+                    phase="done",
+                    index=index,
+                    total=total,
+                    sample=sample,
+                    prediction=prediction,
+                )
+    else:
+        predictions_by_index: dict[int, BenchmarkPrediction] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {}
+            for index, sample in enumerate(samples, start=1):
+                if progress_callback is not None:
+                    _call_with_supported_kwargs(
+                        progress_callback,
+                        phase="start",
+                        index=index,
+                        total=total,
+                        sample=sample,
+                    )
+                session = _load_memory_session(
+                    memory_adapter,
+                    sample=sample,
+                    index=index,
+                    total=total,
+                    session_cache=session_cache,
+                    progress_callback=progress_callback,
+                )
+                future = executor.submit(
+                    _build_prediction,
+                    runner=runner,
+                    memory_adapter=memory_adapter,
+                    sample=sample,
+                    session=session,
+                )
+                future_to_item[future] = (index, sample)
+
+            for future in as_completed(future_to_item):
+                index, sample = future_to_item[future]
+                prediction = future.result()
+                _score_prediction(benchmark_adapter, prediction)
+                predictions_by_index[index] = prediction
+                if progress_callback is not None:
+                    _call_with_supported_kwargs(
+                        progress_callback,
+                        phase="done",
+                        index=index,
+                        total=total,
+                        sample=sample,
+                        prediction=prediction,
+                    )
+        predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
 
     aggregate_scores: dict[str, Any] = {}
     aggregate_fn = getattr(benchmark_adapter, "aggregate_scores", None)

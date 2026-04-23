@@ -402,7 +402,7 @@ def snapshot_dialogue_turn(
 def finalize_dialogue_turn(
     *,
     recent_dialogue_pipeline: MemoryPipeline,
-    conversation_summary_update_pipeline: MemoryPipeline,
+    conversation_summary_update_pipeline: MemoryPipeline | None = None,
     turn: DialogueTurnSnapshot,
 ) -> None:
     for message_index, message in enumerate(turn.messages, start=1):
@@ -424,6 +424,8 @@ def finalize_dialogue_turn(
                 },
             )
         )
+    if conversation_summary_update_pipeline is None:
+        return
     conversation_summary_update_pipeline.ingest(
         Observation(
             text=turn.pair_text,

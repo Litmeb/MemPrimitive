@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from ..config import load_pipeline_from_yaml
@@ -312,9 +313,17 @@ def _build_mem0_locomo_systems(*, recent_top_k: int, recall_top_k: int, similar_
     }
 
 
-def _load_mem0_locomo_case(system: dict[str, object], sample: BenchmarkSample, *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
+def _load_mem0_locomo_case(
+    system: dict[str, object],
+    sample: BenchmarkSample,
+    *,
+    progress_callback: Callable[..., None] | None = None,
+    speaker_workers: int = 1,
+) -> dict[str, Any]:
     if not sample.history_turns:
         raise ValueError("Mem0 LoCoMo adapter requires sample.history_turns.")
+    if speaker_workers <= 0:
+        raise ValueError("speaker_workers must be positive.")
 
     speaker_a = str(sample.metadata.get("speaker_a", "")).strip() or "speaker_1"
     speaker_b = str(sample.metadata.get("speaker_b", "")).strip() or "speaker_2"
@@ -335,52 +344,87 @@ def _load_mem0_locomo_case(system: dict[str, object], sample: BenchmarkSample, *
             total_turns=total_turns,
         )
 
-    for first_turn, second_turn in _iter_pairwise_turns(sample.history_turns):
-        pair_count += 1
-        timestamp = str(first_turn.session_timestamp).strip()
-        turn_id = str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip()
-        turns_in_pair = 2 if second_turn is not None else 1
+    executor = (
+        ThreadPoolExecutor(max_workers=min(2, speaker_workers))
+        if speaker_workers > 1
+        else None
+    )
+    try:
+        for first_turn, second_turn in _iter_pairwise_turns(sample.history_turns):
+            pair_count += 1
+            timestamp = str(first_turn.session_timestamp).strip()
+            turn_id = str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip()
+            turns_in_pair = 2 if second_turn is not None else 1
 
-        speaker_1_user_text, speaker_1_assistant_text = _locomo_pair_for_speaker(
-            first_turn,
-            second_turn,
-            speaker_name=speaker_a,
-        )
-        speaker_2_user_text, speaker_2_assistant_text = _locomo_pair_for_speaker(
-            first_turn,
-            second_turn,
-            speaker_name=speaker_b,
-        )
+            speaker_1_user_text, speaker_1_assistant_text = _locomo_pair_for_speaker(
+                first_turn,
+                second_turn,
+                speaker_name=speaker_a,
+            )
+            speaker_2_user_text, speaker_2_assistant_text = _locomo_pair_for_speaker(
+                first_turn,
+                second_turn,
+                speaker_name=speaker_b,
+            )
 
-        if speaker_1_user_text:
-            mem0_memory.ingest_message_pair(
-                speaker_1_system,
-                user_text=speaker_1_user_text,
-                assistant_text=speaker_1_assistant_text,
-                session_id=str(first_turn.session_id).strip(),
-                turn_id=turn_id,
-                timestamp=timestamp,
-            )
-        if speaker_2_user_text:
-            mem0_memory.ingest_message_pair(
-                speaker_2_system,
-                user_text=speaker_2_user_text,
-                assistant_text=speaker_2_assistant_text,
-                session_id=str(first_turn.session_id).strip(),
-                turn_id=turn_id,
-                timestamp=timestamp,
-            )
-        loaded_turns += turns_in_pair
-        if progress_callback is not None:
-            _call_with_supported_kwargs(
-                progress_callback,
-                phase="memory_turn_done",
-                sample=sample,
-                turn_index=loaded_turns,
-                total_turns=total_turns,
-                turn_id=turn_id,
-                turn_increment=turns_in_pair,
-            )
+            ingest_calls = []
+            if speaker_1_user_text:
+                ingest_calls.append(
+                    {
+                        "system": speaker_1_system,
+                        "user_text": speaker_1_user_text,
+                        "assistant_text": speaker_1_assistant_text,
+                    }
+                )
+            if speaker_2_user_text:
+                ingest_calls.append(
+                    {
+                        "system": speaker_2_system,
+                        "user_text": speaker_2_user_text,
+                        "assistant_text": speaker_2_assistant_text,
+                    }
+                )
+
+            if executor is None or len(ingest_calls) <= 1:
+                for call in ingest_calls:
+                    mem0_memory.ingest_message_pair(
+                        call["system"],
+                        user_text=call["user_text"],
+                        assistant_text=call["assistant_text"],
+                        session_id=str(first_turn.session_id).strip(),
+                        turn_id=turn_id,
+                        timestamp=timestamp,
+                    )
+            else:
+                futures = [
+                    executor.submit(
+                        mem0_memory.ingest_message_pair,
+                        call["system"],
+                        user_text=call["user_text"],
+                        assistant_text=call["assistant_text"],
+                        session_id=str(first_turn.session_id).strip(),
+                        turn_id=turn_id,
+                        timestamp=timestamp,
+                    )
+                    for call in ingest_calls
+                ]
+                for future in futures:
+                    future.result()
+
+            loaded_turns += turns_in_pair
+            if progress_callback is not None:
+                _call_with_supported_kwargs(
+                    progress_callback,
+                    phase="memory_turn_done",
+                    sample=sample,
+                    turn_index=loaded_turns,
+                    total_turns=total_turns,
+                    turn_id=turn_id,
+                    turn_increment=turns_in_pair,
+                )
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     if progress_callback is not None:
         _call_with_supported_kwargs(
@@ -399,6 +443,7 @@ def _load_mem0_locomo_case(system: dict[str, object], sample: BenchmarkSample, *
         "speaker_2_user_id": speaker_b_user_id,
         "speaker_1_name": speaker_a,
         "speaker_2_name": speaker_b,
+        "speaker_workers": speaker_workers,
     }
 
 
@@ -406,7 +451,15 @@ def _count_nonempty_lines(text: str) -> int:
     return sum(1 for line in str(text).splitlines() if str(line).strip())
 
 
-def _recall_mem0_locomo_case(system: dict[str, object], query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
+def _recall_mem0_locomo_case(
+    system: dict[str, object],
+    query: Query,
+    *,
+    sample: BenchmarkSample | None = None,
+    speaker_workers: int = 1,
+) -> MemoryRecall:
+    if speaker_workers <= 0:
+        raise ValueError("speaker_workers must be positive.")
     sample_metadata = dict(sample.metadata) if sample is not None else {}
     speaker_a = str(sample_metadata.get("speaker_a", "")).strip()
     speaker_b = str(sample_metadata.get("speaker_b", "")).strip()
@@ -430,8 +483,15 @@ def _recall_mem0_locomo_case(system: dict[str, object], query: Query, *, sample:
     speaker_1_system = system["speaker_1_system"]
     speaker_2_system = system["speaker_2_system"]
 
-    speaker_1_memories = mem0_memory.recall_profile(speaker_1_system, user_query=query.text)
-    speaker_2_memories = mem0_memory.recall_profile(speaker_2_system, user_query=query.text)
+    if speaker_workers > 1:
+        with ThreadPoolExecutor(max_workers=min(2, speaker_workers)) as executor:
+            speaker_1_future = executor.submit(mem0_memory.recall_profile, speaker_1_system, user_query=query.text)
+            speaker_2_future = executor.submit(mem0_memory.recall_profile, speaker_2_system, user_query=query.text)
+            speaker_1_memories = speaker_1_future.result()
+            speaker_2_memories = speaker_2_future.result()
+    else:
+        speaker_1_memories = mem0_memory.recall_profile(speaker_1_system, user_query=query.text)
+        speaker_2_memories = mem0_memory.recall_profile(speaker_2_system, user_query=query.text)
 
     speaker_1_memories_text = str(speaker_1_memories).strip()
     speaker_2_memories_text = str(speaker_2_memories).strip()
@@ -459,8 +519,11 @@ def _recall_mem0_locomo_case(system: dict[str, object], query: Query, *, sample:
 
 
 class _Mem0LoCoMoMemorySession:
-    def __init__(self, *, system_factory: Callable[[], dict[str, object]]) -> None:
+    def __init__(self, *, system_factory: Callable[[], dict[str, object]], speaker_workers: int) -> None:
+        if speaker_workers <= 0:
+            raise ValueError("speaker_workers must be positive.")
         self.system = system_factory()
+        self.speaker_workers = speaker_workers
         self.load_metadata: dict[str, Any] = {}
 
     def load_case(self, sample: BenchmarkSample, *, progress_callback: Callable[..., None] | None = None) -> None:
@@ -468,20 +531,37 @@ class _Mem0LoCoMoMemorySession:
             self.system,
             sample,
             progress_callback=progress_callback,
+            speaker_workers=self.speaker_workers,
         )
 
     def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
-        recall_result = _recall_mem0_locomo_case(self.system, query, sample=sample)
+        recall_result = _recall_mem0_locomo_case(
+            self.system,
+            query,
+            sample=sample,
+            speaker_workers=self.speaker_workers,
+        )
         return _coerce_memory_recall(recall_result, base_metadata=self.load_metadata)
 
 
 class Mem0LoCoMoMemoryAdapter:
     name = "mem0"
 
-    def __init__(self, *, recent_top_k: int, recall_top_k: int, similar_top_k: int, name: str = "mem0") -> None:
+    def __init__(
+        self,
+        *,
+        recent_top_k: int,
+        recall_top_k: int,
+        similar_top_k: int,
+        speaker_workers: int = 1,
+        name: str = "mem0",
+    ) -> None:
+        if speaker_workers <= 0:
+            raise ValueError("speaker_workers must be positive.")
         self.recent_top_k = recent_top_k
         self.recall_top_k = recall_top_k
         self.similar_top_k = similar_top_k
+        self.speaker_workers = speaker_workers
         self.name = str(name).strip() or "mem0"
 
     def create_session(self) -> _Mem0LoCoMoMemorySession:
@@ -490,7 +570,8 @@ class Mem0LoCoMoMemoryAdapter:
                 recent_top_k=self.recent_top_k,
                 recall_top_k=self.recall_top_k,
                 similar_top_k=self.similar_top_k,
-            )
+            ),
+            speaker_workers=self.speaker_workers,
         )
 
     def session_key(self, *, sample: BenchmarkSample) -> str:
@@ -504,7 +585,13 @@ class Mem0LoCoMoMemoryAdapter:
         return str(sample.sample_id).split("-qa-", 1)[0]
 
 
-def create_mem0_memory_adapter(*, name: str = "mem0", top_k: int | None = None) -> Mem0LoCoMoMemoryAdapter:
+def create_mem0_memory_adapter(
+    *,
+    name: str = "mem0",
+    top_k: int | None = None,
+    similar_top_k: int = 5,
+    speaker_workers: int = 1,
+) -> Mem0LoCoMoMemoryAdapter:
     """Create a ready-to-run benchmark adapter for the classic Mem0 reconstruction."""
 
     recall_top_k = 30 if top_k is None else top_k
@@ -512,5 +599,6 @@ def create_mem0_memory_adapter(*, name: str = "mem0", top_k: int | None = None) 
         name=name,
         recent_top_k=6,
         recall_top_k=recall_top_k,
-        similar_top_k=recall_top_k,
+        similar_top_k=similar_top_k,
+        speaker_workers=speaker_workers,
     )

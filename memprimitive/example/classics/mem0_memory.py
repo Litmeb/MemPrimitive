@@ -5,7 +5,7 @@ methods in the shared primitive language used by MemPrimitive. The goal is not
 to clone an upstream codebase line by line, but to preserve the causal memory
 loop that matters for mechanism-level comparison:
 
-1. take the current message pair together with prior summary and recent context,
+1. take the current message pair together with recent context,
 2. extract durable profile facts,
 3. retrieve similar existing memories for each fact,
 4. let the model decide add/update/delete actions, and
@@ -25,8 +25,8 @@ does not appear in the prompt and have that hallucinated id coincidentally
 match a real profile record. In ordinary use, that failure mode is negligible,
 so the effective update scope remains close to the retrieved candidate set.
 Under that criterion, the example still preserves the more important design
-claim for this project: Mem0 can be decomposed into summary-backed fact
-extraction, per-fact similar-memory search, and tool-driven profile
+claim for this project: Mem0 can be decomposed into fact extraction,
+per-fact similar-memory search, and tool-driven profile
 maintenance using reusable baseline primitives instead of paper-specific glue
 code.
 
@@ -48,7 +48,6 @@ if __package__ is None:
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
 from memprimitive.baselines import (
-    AlwaysTrigger,
     AppendOrganization,
     BasicRepresentation,
     ConcatenateReadout,
@@ -58,7 +57,6 @@ from memprimitive.baselines import (
     LLMRepresentation,
     NeverTrigger,
     RecencyRetrieval,
-    SummaryRewriteEvolution,
 )
 from memprimitive.utils._mem0_family import (
     build_fixed_profile_tools,
@@ -112,42 +110,6 @@ def build_mem0_memory_system(
         organization=AppendOrganization(target_layer="recent_dialogue"),
         store=store,
     )
-    conversation_summary_update_pipeline = MemoryPipeline(
-        representation=(
-            BasicRepresentation(elements=("text",)),
-            LLMRepresentation(
-                field="summary",
-                prompt=text_prompt(
-                    "Update the running conversation summary for long-term memory extraction.\n"
-                    "Write one concise but information-rich summary of the conversation so far.\n"
-                    "Preserve durable user facts, preferences, plans, identity details, and important ongoing context.\n"
-                    "Prefer resolved, current information when older and newer details conflict.\n\n"
-                    "Previous conversation summary:\n{{ previous_summary }}\n\n"
-                    "Recent messages including the newest exchange:\n{{ recent_messages }}\n\n"
-                    "Current interaction pair:\n{{ pair_text }}",
-                    context_builder=build_profile_pair_context,
-                    labeled_recall_plans={
-                        "previous_summary": text_prompt("{{ conversation_summary }}"),
-                        "recent_messages": text_prompt("{{ recent_messages }}"),
-                    },
-                    labeled_recall_query_builders={
-                        "previous_summary": (
-                            lambda packet, store, context: str(context.get("pair_text", "")),
-                        ),
-                        "recent_messages": (
-                            lambda packet, store, context: str(context.get("pair_text", "")),
-                        ),
-                    },
-                ),
-            ),
-        ),
-        write_trigger=NeverTrigger(slot="write_trigger"),
-        organization=AppendOrganization(target_layer="conversation_summary"),
-        evolution_trigger=AlwaysTrigger(slot="evolution_trigger"),
-        memory_evolution=SummaryRewriteEvolution(target_layer="conversation_summary"),
-        store=store,
-    )
-
     profile_candidate_recall_pipeline = MemoryPipeline(
         retrieval=EmbeddingSimilarityRetrieval(top_k=similar_top_k, layer="profile"),
         readout=ConcatenateReadout(separator="\n"),
@@ -289,7 +251,6 @@ def build_mem0_memory_system(
         "recent_dialogue_pipeline": recent_dialogue_pipeline,
         "recent_history_recall": recent_history_recall,
         "conversation_summary_recall": conversation_summary_recall,
-        "conversation_summary_update_pipeline": conversation_summary_update_pipeline,
         "mem0_write_pipeline": mem0_write_pipeline,
         "profile_fact_write_pipeline": profile_fact_write_pipeline,
         "reply_memory_pipeline": reply_memory_pipeline,
@@ -325,7 +286,6 @@ def ingest_message_pair(
     )
     finalize_dialogue_turn(
         recent_dialogue_pipeline=system["recent_dialogue_pipeline"],
-        conversation_summary_update_pipeline=system["conversation_summary_update_pipeline"],
         turn=turn,
     )
 
