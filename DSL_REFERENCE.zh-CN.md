@@ -1121,11 +1121,12 @@
 6. `TripleMemoryRetrieval`
 7. `BM25Retrieval`
 8. `GraphNeighborRetrieval`
-9. `ExpandRetrievedGraphNeighbors`
-10. `VectorGraphSeedAndExpandRetrieval`
-11. `LayerAwareRetrieval`
-12. `BufferRetrieval`
-13. `QueryRewriteRetrieval`
+9. `ParentEpisodeExpansionRetrieval`
+10. `ExpandRetrievedGraphNeighbors`
+11. `VectorGraphSeedAndExpandRetrieval`
+12. `LayerAwareRetrieval`
+13. `BufferRetrieval`
+14. `QueryRewriteRetrieval`
 
 ### 8.1 `RecencyRetrieval`
 
@@ -1300,7 +1301,37 @@
    1. 结果默认按 graph link 展开顺序返回。
    2. 如果 query 里给了 candidate filter，只会返回 filter 内的 records。
 
-### 8.9 `ExpandRetrievedGraphNeighbors`
+### 8.9 `ParentEpisodeExpansionRetrieval`
+
+1. 功能
+   把当前句子级或 derivative 检索命中扩展回显式 parent episode 记录。
+2. 读取
+   读取：
+   1. `packet.retrieved.items`
+   2. hit record 的 `metadata[parent_id_field]`
+   3. 或 hit record 的 `metadata["provenance"][parent_id_field]`
+   4. `episode_layer` 中的 episode records
+3. 写回
+   覆盖写新的 `packet.retrieved`。
+   不改 `store`。
+4. 主要参数
+   1. `top_k`
+   2. `episode_layer`
+      默认 `episodic`。
+   3. `parent_id_fields`
+      默认依次尝试：
+      1. `parent_episode_record_id`
+      2. `episode_record_id`
+      3. `source_episode_record_id`
+   4. `source`
+      当前只支持 `retrieved`。
+5. 特殊行为
+   1. 不会解析 record text 来猜 parent episode；必须有显式 metadata / provenance parent id。
+   2. 多个 hit 指向同一 episode 时只返回一次，并保留首次命中的 episode 顺序。
+   3. 如果重复 hit 有数值 `score`，父 episode score 使用最高数值分；如果没有数值分，则保留首次 hit score。
+   4. trace 记录 `input_hit_ids`、`successful_parent_ids`、`missing_parent_count`、`hit_to_parent`、`duplicate_parent_count` 和 `unresolved_parent_count`。
+
+### 8.10 `ExpandRetrievedGraphNeighbors`
 
 1. 功能
    不从 query seed ids 出发，而是从当前 `packet.retrieved.items` 继续扩一跳邻居。
@@ -1318,7 +1349,7 @@
    1. 只有 `packet.retrieved.items` 中 layer 正好等于 `self.layer` 的记录会被当成 seeds。
    2. `dedupe=True` 时，同一 record 被多个 seed 扩到也只保留一份。
 
-### 8.10 `VectorGraphSeedAndExpandRetrieval`
+### 8.11 `VectorGraphSeedAndExpandRetrieval`
 
 1. 功能
    先用向量检索 graph notes 作为 seeds，再扩一跳 graph neighbors，最后可选做 agentic rerank。
@@ -1356,7 +1387,7 @@
    2. `query_expand_with_llm=True` 时，embedding 文本不再只是原 query，而是增强后的 note-like 文本。
    3. `agentic_search=True` 时，最终排序由 runtime.rerank 决定，不再只是 seed+expand 的原始顺序。
 
-### 8.11 `LayerAwareRetrieval`
+### 8.12 `LayerAwareRetrieval`
 
 1. 功能
    每层用不同 retriever 分别检索，再做全局合并。
@@ -1388,7 +1419,7 @@
    2. 数值 score 会乘上 `merge_weight_by_layer[layer]` 后再参加全局排序。
    3. 每层 retriever 是在 layer-scoped store 视图上运行的。
 
-### 8.12 `BufferRetrieval`
+### 8.13 `BufferRetrieval`
 
 1. 功能
    从某一层直接读一个有界 recency window，而不是做 query 搜索。
@@ -1405,7 +1436,7 @@
    1. 虽然仍要求 `packet.query` 存在，但 query 文本不参与排名。
    2. 很适合 Reflexion 这类“读最近几条 reflection”。
 
-### 8.13 `QueryRewriteRetrieval`
+### 8.14 `QueryRewriteRetrieval`
 
 1. 功能
    先改写 query，再把改写结果交给内部 retriever。

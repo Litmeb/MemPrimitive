@@ -347,6 +347,22 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 ### Other Boundary Papers
 
+- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can cover a mechanism-level skeleton of the memory system, but not a paper-faithful reconstruction from existing primitives alone. The core reason is that MemMachine's decisive behavior is not just multi-layer storage; it is contextualized episodic retrieval over sentence-derived hits, parent episodes, temporal neighbors, cluster reranking, budgeted deduplication, and chronological return.
+- What the current framework can already approximate without new modules:
+  - working/short-term episodes -> bounded temporal layer plus `BufferRetrieval` / `RecencyRetrieval`
+  - STM/session summary -> `HierarchicalEvolution` or `LLMRepresentation` + summary rewrite/retention
+  - long-term raw episodes -> append-only episodic layer with temporal/session metadata
+  - sentence-level vector index -> `SentenceSplitUnitFormation` + embedding representation into a separate sentence layer
+  - profile memory -> Mem0-style `LLMRepresentation` extraction plus `LLMFunctionCallEvolution` add/update/delete over a profile layer
+  - multi-layer context assembly -> `LayerAwareRetrieval` and `TemplateReadout`
+- Newly covered reusable module:
+  - `ParentEpisodeExpansionRetrieval` now covers the sentence/derivative hit -> source episode expansion step using explicit metadata/provenance parent ids, without record-text parsing.
+- Modules still needed for a faithful reconstruction:
+  - `TemporalNeighborExpansionRetrieval`: expand each nucleus episode to bounded previous/following episodes within the same session/user scope, e.g. MemMachine's one-backward/two-forward contextualization.
+  - `EpisodeClusterRerankRetrieval` or a combined `ContextualizedEpisodeRetrieval`: build anchored episode clusters, deduplicate overlaps under a return budget, rerank clusters with the runtime reranker, prioritize near-nucleus episodes when the budget is tight, and emit final episodes chronologically.
+  - `STMConsolidationEvolution`: expose STM overflow as an explicit event that summarizes evicted episodes, retains/update a session summary, and copies raw evicted episodes into LTM. Current sliding-window trimming does not preserve enough eviction provenance for this declaratively.
+  - `ProfileFeatureEvolution`: maintain structured profile features with category/tag/feature/value plus citations/source episode ids, supporting add/delete/consolidate or upsert-style updates rather than only free-text profile records.
+  - Optional `RetrievalAgentRetrieval`: route direct retrieval vs split-query vs chain-of-query, run sub-queries/iterative rewrites, and rerank final candidates against the concatenated multi-query history.
 - `MemGPT`: latest paper + upstream repo audit suggests the current framework can cover a mechanism-level, memory-only reconstruction without adding new baseline primitive families if scope is limited to the storage/retrieval/update surfaces and allows thin example-level orchestration.
 - The clean reusable mapping is:
   - editable in-context core memory blocks -> ordinary layers plus single-record/low-budget retention and `LLMFunctionCallEvolution` / `UPDATE`-style rewrites
