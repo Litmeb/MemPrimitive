@@ -898,8 +898,9 @@
 4. `LayerMoveEvolution`
 5. `GraphLinkEvolution`
 6. `GraphNeighborContextTraceEvolution`
-7. `HierarchicalEvolution`
-8. `LLMFunctionCallEvolution`
+7. `STMConsolidationEvolution`
+8. `HierarchicalEvolution`
+9. `LLMFunctionCallEvolution`
 
 ### 7.1 `AppendOnlyEvolution`
 
@@ -1022,7 +1023,45 @@
 5. 特殊行为
    适合只想“追踪邻居上下文”而不想主动重连边的场景。
 
-### 7.7 `HierarchicalEvolution`
+### 7.7 `STMConsolidationEvolution`
+
+1. 功能
+   显式执行 STM overflow / consolidation：按 session scope 保留 working layer 中最新的 STM records，把溢出的旧 raw episodes copy-append 到 LTM episode layer，重写当前 session summary，然后从 STM 删除已 consolidation 的旧 records。
+2. 读取
+   读取：
+   1. `working_layer` 中的 records
+   2. `summary_layer` 中同 scope 的旧 summary records
+   3. 每条 record 的 `metadata`，默认用 `session_id` 分组
+3. 写回
+   1. 向 `ltm_episode_layer` append raw episode copies
+   2. 向 `summary_layer` 写入新的当前 summary record
+   3. 删除同 scope 的旧 summary records，使每个受影响 session 只保留一个当前 summary
+   4. 从 `working_layer` 删除已 consolidation 的 evicted records
+   5. 写 `packet.trace["memory_evolution"]`
+4. 主要参数
+   1. `working_layer`
+      STM / working memory 层，默认 `"working"`。
+   2. `ltm_episode_layer`
+      长期 raw episode 层，默认 `"episodic"`。
+   3. `summary_layer`
+      session summary 层，默认 `"session_summary"`。
+   4. `record_budget`
+      每个 scope 在 STM 中保留的最新 record 数，默认 `20`。
+   5. `token_budget`
+      可选 token budget。设置后按最新记录向前累加 token，超出部分被 evict；至少保留最新一条。
+   6. `summary_max_sentences`
+      runtime summary rewrite 的最大句数提示，默认 `3`。
+   7. `scope_metadata_keys`
+      scope 分组 metadata keys，默认 `("session_id",)`；如需同时隔离用户，可传 `("session_id", "user_id")`。
+5. 特殊行为
+   1. 这个模块不依赖 `MemoryStore` 的 `capacity="sliding_window"`，也不调用 `trim_layer_to_*`。如果 working layer 自己开启自动 sliding-window，旧记录可能在模块运行前就已经丢失，因此 MemMachine 风格 STM consolidation 应让该模块自己控制 overflow。
+   2. LTM copy 保留原始 `text`、`timestamp`、`unit_id`、embedding 和原 metadata，并额外写：
+      1. `metadata["stm_consolidation_source_record_id"]`
+      2. `metadata["stm_consolidation"]`
+   3. Summary rewrite 使用 runtime summarization：输入包含旧 summary（如果存在）和本次 evicted raw STM records。
+   4. trace 会记录 `evicted_record_ids`、`moved_ltm_record_ids`、`deleted_working_record_ids`、`summary_updates`，并在每个 effect 中记录 `session_scope`、`retained_record_ids`、`summary_old_record_id`、`summary_new_record_id`。
+
+### 7.8 `HierarchicalEvolution`
 
 1. 功能
    在 organization 完成后，对已有 records 做层级抽象、生成高层记录，并可做目标层保留窗口裁剪。
@@ -1062,7 +1101,7 @@
       3. `pruned_record_ids`
       4. `retained_record_ids`
 
-### 7.8 `LLMFunctionCallEvolution`
+### 7.9 `LLMFunctionCallEvolution`
 
 1. 功能
    在演化阶段使用 LLM tool-calling 对已有 records 做增删改。
