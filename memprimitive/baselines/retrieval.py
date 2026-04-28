@@ -807,6 +807,53 @@ def _record_matches_temporal_scope(record, constraints: Mapping[str, Any]) -> bo
     return all(field in metadata and metadata[field] == value for field, value in constraints.items())
 
 
+def _record_id_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_values: Iterable[Any] = (value,)
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray, Mapping)):
+        raw_values = value
+    else:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        record_id = _explicit_record_id_value(raw_value)
+        if record_id is None or record_id in seen:
+            continue
+        seen.add(record_id)
+        normalized.append(record_id)
+    return normalized
+
+
+def _append_unique(values: list[str], value: str | None) -> None:
+    if value is not None and value not in values:
+        values.append(value)
+
+
+def _chronological_record_key(record) -> tuple[bool, datetime, str]:
+    timestamp = _timestamp_sort_value(record)
+    return (
+        timestamp is None,
+        timestamp or datetime.max.replace(tzinfo=timezone.utc),
+        str(getattr(record, "record_id", "")),
+    )
+
+
+def _score_by_record_id(retrieved: RetrievedSet) -> dict[str, dict[str, Any]]:
+    scores_by_id: dict[str, dict[str, Any]] = {}
+    for index, record in enumerate(retrieved.items):
+        score = _score_dict_at(retrieved.scores, index)
+        record_id = _explicit_record_id_value(score.get("record_id")) or getattr(record, "record_id", None)
+        if isinstance(record_id, str) and record_id not in scores_by_id:
+            scores_by_id[record_id] = score
+    for raw_score in retrieved.scores:
+        score = dict(raw_score) if isinstance(raw_score, Mapping) else {}
+        record_id = _explicit_record_id_value(score.get("record_id"))
+        if record_id is not None and record_id not in scores_by_id:
+            scores_by_id[record_id] = score
+    return scores_by_id
+
+
 class RecencyRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Retrieve up to ``top_k`` latest records by recency only.
 
@@ -2060,6 +2107,458 @@ class TemporalNeighborExpansionRetrieval(RetrievalModule):
         return _with_retrieved(packet, retrieved), store
 
 
+class EpisodeClusterRerankRetrieval(RetrievalModule):
+    """Rerank temporal episode clusters, dedupe them under budget, and return episodes."""
+
+    spec = ModuleSpec(
+        name="episode_cluster_rerank_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text", "retrieved.items", "retrieved.trace.clusters"),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = 20,
+        *,
+        cluster_top_k: int | None = None,
+        rerank: bool = True,
+        chronological: bool = True,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("EpisodeClusterRerankRetrieval requires top_k > 0.")
+        if cluster_top_k is not None and cluster_top_k <= 0:
+            raise ValueError("EpisodeClusterRerankRetrieval requires cluster_top_k > 0 when provided.")
+        self.top_k = int(top_k)
+        self.cluster_top_k = None if cluster_top_k is None else int(cluster_top_k)
+        self.rerank = bool(rerank)
+        self.chronological = bool(chronological)
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        retrieved_input = packet.retrieved
+        raw_clusters = self._raw_clusters(retrieved_input)
+        input_cluster_count = len(raw_clusters)
+        if retrieved_input is None:
+            return self._empty_result(packet, store, empty_reason="missing_retrieved", input_cluster_count=0)
+        if packet.query is None or not getattr(packet.query, "text", None):
+            return self._empty_result(
+                packet,
+                store,
+                empty_reason="missing_query",
+                input_cluster_count=input_cluster_count,
+            )
+        if not raw_clusters:
+            return self._empty_result(
+                packet,
+                store,
+                empty_reason="no_clusters",
+                input_cluster_count=input_cluster_count,
+            )
+
+        record_by_id = self._records_by_id(retrieved_input, store)
+        scores_by_id = _score_by_record_id(retrieved_input)
+        resolved_clusters = self._resolve_clusters(raw_clusters, record_by_id, scores_by_id)
+        unresolved_cluster_count = input_cluster_count - len(resolved_clusters)
+        if not resolved_clusters:
+            return self._empty_result(
+                packet,
+                store,
+                empty_reason="no_resolved_clusters",
+                input_cluster_count=input_cluster_count,
+                unresolved_cluster_count=unresolved_cluster_count,
+            )
+
+        reranked_clusters = self._ordered_clusters(packet.query.text, resolved_clusters)
+        selected_entries, selected_order, deduped_duplicate_count, budget_truncated_count = self._merge_clusters(
+            reranked_clusters
+        )
+
+        returned_ids = self._returned_ids(selected_entries, selected_order)
+        items = [selected_entries[record_id]["record"] for record_id in returned_ids]
+        scores = [
+            {
+                "record_id": record_id,
+                "rank": rank,
+                "strategy": "episode_cluster_rerank",
+                "source_nucleus_record_ids": list(selected_entries[record_id]["source_nucleus_record_ids"]),
+                "roles": list(selected_entries[record_id]["roles"]),
+                "cluster_score": float(selected_entries[record_id]["cluster_score"]),
+            }
+            for rank, record_id in enumerate(returned_ids, start=1)
+        ]
+
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "source": "retrieved",
+                "top_k": self.top_k,
+                "cluster_top_k": self.cluster_top_k,
+                "rerank": self.rerank,
+                "chronological": self.chronological,
+                "input_cluster_count": input_cluster_count,
+                "resolved_cluster_count": len(resolved_clusters),
+                "unresolved_cluster_count": unresolved_cluster_count,
+                "reranked_clusters": self._cluster_trace(reranked_clusters),
+                "returned_ids": returned_ids,
+                "returned_count": len(items),
+                "deduped_duplicate_count": deduped_duplicate_count,
+                "budget_truncated_count": budget_truncated_count,
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+    def _empty_result(
+        self,
+        packet: Packet,
+        store: MemoryStore,
+        *,
+        empty_reason: str,
+        input_cluster_count: int,
+        unresolved_cluster_count: int = 0,
+    ) -> tuple[Packet, MemoryStore]:
+        retrieved = RetrievedSet(
+            items=[],
+            scores=[],
+            trace={
+                "module": self.spec.name,
+                "source": "retrieved",
+                "top_k": self.top_k,
+                "cluster_top_k": self.cluster_top_k,
+                "rerank": self.rerank,
+                "chronological": self.chronological,
+                "input_cluster_count": input_cluster_count,
+                "resolved_cluster_count": 0,
+                "unresolved_cluster_count": unresolved_cluster_count,
+                "reranked_clusters": [],
+                "returned_ids": [],
+                "returned_count": 0,
+                "deduped_duplicate_count": 0,
+                "budget_truncated_count": 0,
+                "empty_reason": empty_reason,
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+    @staticmethod
+    def _raw_clusters(retrieved: RetrievedSet | None) -> list[Any]:
+        if retrieved is None or not isinstance(retrieved.trace, Mapping):
+            return []
+        clusters = retrieved.trace.get("clusters")
+        return list(clusters) if isinstance(clusters, list) else []
+
+    @staticmethod
+    def _records_by_id(retrieved: RetrievedSet, store: MemoryStore) -> dict[str, Any]:
+        records_by_id: dict[str, Any] = {}
+        for record in retrieved.items:
+            record_id = getattr(record, "record_id", None)
+            if isinstance(record_id, str):
+                records_by_id.setdefault(record_id, record)
+
+        source_layer = retrieved.trace.get("layer") if isinstance(retrieved.trace, Mapping) else None
+        if isinstance(source_layer, str) and source_layer.strip() and store.has_layer(source_layer.strip()):
+            fallback_records = store.iter_records(source_layer.strip())
+        else:
+            fallback_records = store.iter_records()
+        for record in fallback_records:
+            record_id = getattr(record, "record_id", None)
+            if isinstance(record_id, str):
+                records_by_id.setdefault(record_id, record)
+        return records_by_id
+
+    def _resolve_clusters(
+        self,
+        raw_clusters: list[Any],
+        record_by_id: Mapping[str, Any],
+        scores_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        nucleus_counts: dict[str, int] = {}
+        for raw_cluster in raw_clusters:
+            if not isinstance(raw_cluster, Mapping):
+                continue
+            nucleus_id = _explicit_record_id_value(raw_cluster.get("nucleus_record_id"))
+            if nucleus_id is not None:
+                nucleus_counts[nucleus_id] = nucleus_counts.get(nucleus_id, 0) + 1
+
+        resolved_clusters: list[dict[str, Any]] = []
+        for cluster_index, raw_cluster in enumerate(raw_clusters):
+            if not isinstance(raw_cluster, Mapping):
+                continue
+            nucleus_id = _explicit_record_id_value(raw_cluster.get("nucleus_record_id"))
+            backward_ids = _record_id_list(raw_cluster.get("backward_ids"))
+            forward_ids = _record_id_list(raw_cluster.get("forward_ids"))
+            cluster_ids = _record_id_list(raw_cluster.get("cluster_ids"))
+            if not cluster_ids:
+                cluster_ids = [record_id for record_id in [*backward_ids, nucleus_id, *forward_ids] if record_id]
+
+            records: list[Any] = []
+            roles_by_id: dict[str, list[str]] = {}
+            unresolved_ids: list[str] = []
+            seen_ids: set[str] = set()
+            for record_id in cluster_ids:
+                record = record_by_id.get(record_id)
+                if record is None:
+                    unresolved_ids.append(record_id)
+                    continue
+                role = self._role_for_cluster_id(
+                    record_id,
+                    nucleus_id=nucleus_id,
+                    backward_ids=backward_ids,
+                    forward_ids=forward_ids,
+                )
+                roles = roles_by_id.setdefault(record_id, [])
+                _append_unique(roles, role)
+                if record_id in seen_ids:
+                    continue
+                seen_ids.add(record_id)
+                records.append(record)
+
+            if not records:
+                continue
+
+            source_score = dict(scores_by_id.get(nucleus_id, {})) if nucleus_id is not None else {}
+            numeric_score = _numeric_score_value(source_score)
+            source_rank = source_score.get("rank")
+            rank_score = None
+            if not isinstance(source_rank, bool) and isinstance(source_rank, (int, float)) and source_rank >= 0:
+                rank_score = 1.0 / (1.0 + float(source_rank))
+            fallback_score = numeric_score if numeric_score is not None else rank_score
+            if fallback_score is None:
+                fallback_score = 1.0 / (1.0 + float(cluster_index))
+            if numeric_score is not None:
+                score_source = "upstream_score"
+            elif rank_score is not None:
+                score_source = "upstream_rank"
+            else:
+                score_source = "input_order"
+
+            candidate_id = self._candidate_id(
+                cluster_index,
+                nucleus_id=nucleus_id,
+                nucleus_counts=nucleus_counts,
+            )
+            resolved_clusters.append(
+                {
+                    "input_index": cluster_index,
+                    "candidate_id": candidate_id,
+                    "nucleus_record_id": nucleus_id,
+                    "cluster_ids": [record.record_id for record in records],
+                    "backward_ids": backward_ids,
+                    "forward_ids": forward_ids,
+                    "records": records,
+                    "roles_by_id": roles_by_id,
+                    "unresolved_ids": unresolved_ids,
+                    "fallback_score": float(fallback_score),
+                    "cluster_score": float(fallback_score),
+                    "rationale": "",
+                    "score_source": score_source,
+                }
+            )
+        return resolved_clusters
+
+    @staticmethod
+    def _candidate_id(cluster_index: int, *, nucleus_id: str | None, nucleus_counts: Mapping[str, int]) -> str:
+        if nucleus_id is not None and nucleus_counts.get(nucleus_id, 0) == 1:
+            return nucleus_id
+        return f"cluster-{cluster_index}:{nucleus_id or 'unknown'}"
+
+    @staticmethod
+    def _role_for_cluster_id(
+        record_id: str,
+        *,
+        nucleus_id: str | None,
+        backward_ids: list[str],
+        forward_ids: list[str],
+    ) -> str:
+        if nucleus_id is not None and record_id == nucleus_id:
+            return "nucleus"
+        if record_id in backward_ids:
+            return "backward"
+        if record_id in forward_ids:
+            return "forward"
+        return "context"
+
+    def _ordered_clusters(self, query_text: str, resolved_clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cluster_limit = min(self.cluster_top_k or len(resolved_clusters), len(resolved_clusters))
+        if not self.rerank:
+            clusters = [dict(cluster) for cluster in resolved_clusters[:cluster_limit]]
+            for rank, cluster in enumerate(clusters, start=1):
+                cluster["rank"] = rank
+                cluster["score_source"] = cluster.get("score_source", "input_order")
+            return clusters
+
+        candidates = [
+            {
+                "id": cluster["candidate_id"],
+                "content": self._cluster_content(cluster["records"]),
+                "nucleus_record_id": cluster["nucleus_record_id"],
+                "cluster_ids": list(cluster["cluster_ids"]),
+                "score": float(cluster["fallback_score"]),
+            }
+            for cluster in resolved_clusters
+        ]
+        from ..utils._runtime import get_runtime
+
+        reranked = get_runtime().rerank(
+            query=query_text,
+            candidates=candidates,
+            task="Rerank contextualized episode clusters for episodic recall.",
+            top_k=cluster_limit,
+        )
+        cluster_by_candidate_id = {cluster["candidate_id"]: cluster for cluster in resolved_clusters}
+        ordered: list[dict[str, Any]] = []
+        seen_candidate_ids: set[str] = set()
+        for rerank_index, item in enumerate(reranked):
+            if not isinstance(item, Mapping):
+                continue
+            candidate_id = _explicit_record_id_value(item.get("id"))
+            if candidate_id is None or candidate_id in seen_candidate_ids:
+                continue
+            cluster = cluster_by_candidate_id.get(candidate_id)
+            if cluster is None:
+                continue
+            score = item.get("score", 0.0)
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                score = 0.0
+            ranked_cluster = dict(cluster)
+            ranked_cluster["cluster_score"] = float(score)
+            ranked_cluster["rationale"] = str(item.get("rationale", "")).strip()
+            ranked_cluster["score_source"] = "runtime_rerank"
+            ranked_cluster["rerank_index"] = rerank_index
+            ordered.append(ranked_cluster)
+            seen_candidate_ids.add(candidate_id)
+            if len(ordered) >= cluster_limit:
+                break
+
+        for cluster in resolved_clusters:
+            if len(ordered) >= cluster_limit:
+                break
+            candidate_id = cluster["candidate_id"]
+            if candidate_id in seen_candidate_ids:
+                continue
+            ranked_cluster = dict(cluster)
+            ranked_cluster["cluster_score"] = 0.0
+            ranked_cluster["rationale"] = ""
+            ranked_cluster["score_source"] = "rerank_missing_fallback"
+            ranked_cluster["rerank_index"] = len(reranked) + len(ordered)
+            ordered.append(ranked_cluster)
+            seen_candidate_ids.add(candidate_id)
+
+        ordered.sort(key=lambda cluster: (-float(cluster["cluster_score"]), int(cluster.get("rerank_index", 0))))
+        for rank, cluster in enumerate(ordered, start=1):
+            cluster["rank"] = rank
+        return ordered
+
+    @staticmethod
+    def _cluster_content(records: list[Any]) -> str:
+        return "\n".join(f"[{record.record_id}] {record.text}" for record in records)
+
+    def _merge_clusters(
+        self,
+        clusters: list[dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, Any]], list[str], int, int]:
+        selected_entries: dict[str, dict[str, Any]] = {}
+        selected_order: list[str] = []
+        deduped_duplicate_count = 0
+        budget_truncated_count = 0
+
+        for cluster in clusters:
+            if len(selected_order) >= self.top_k:
+                break
+            records = list(cluster["records"])
+            new_records = [record for record in records if record.record_id not in selected_entries]
+            remaining_budget = self.top_k - len(selected_order)
+            if len(new_records) <= remaining_budget:
+                for record in records:
+                    added = self._add_or_update_selected(selected_entries, selected_order, record, cluster)
+                    if not added:
+                        deduped_duplicate_count += 1
+                continue
+
+            added_new_count = 0
+            new_record_count = len(new_records)
+            for record in self._partial_cluster_records(cluster):
+                added = self._add_or_update_selected(selected_entries, selected_order, record, cluster)
+                if added:
+                    added_new_count += 1
+                else:
+                    deduped_duplicate_count += 1
+                if len(selected_order) >= self.top_k:
+                    break
+            budget_truncated_count += max(0, new_record_count - added_new_count)
+
+        return selected_entries, selected_order, deduped_duplicate_count, budget_truncated_count
+
+    def _partial_cluster_records(self, cluster: Mapping[str, Any]) -> list[Any]:
+        records = list(cluster["records"])
+        nucleus_id = cluster.get("nucleus_record_id")
+        nucleus_index = next(
+            (index for index, record in enumerate(records) if record.record_id == nucleus_id),
+            0,
+        )
+        indexed_records = list(enumerate(records))
+        return [
+            record
+            for _, record in sorted(
+                indexed_records,
+                key=lambda item: (abs(item[0] - nucleus_index), item[0]),
+            )
+        ]
+
+    @staticmethod
+    def _add_or_update_selected(
+        selected_entries: dict[str, dict[str, Any]],
+        selected_order: list[str],
+        record,
+        cluster: Mapping[str, Any],
+    ) -> bool:
+        record_id = record.record_id
+        roles_by_id = cluster["roles_by_id"]
+        nucleus_id = cluster.get("nucleus_record_id")
+        entry = selected_entries.get(record_id)
+        if entry is None:
+            selected_entries[record_id] = {
+                "record": record,
+                "source_nucleus_record_ids": [nucleus_id] if isinstance(nucleus_id, str) else [],
+                "roles": list(roles_by_id.get(record_id, ["context"])),
+                "cluster_score": float(cluster["cluster_score"]),
+            }
+            selected_order.append(record_id)
+            return True
+
+        _append_unique(entry["source_nucleus_record_ids"], nucleus_id if isinstance(nucleus_id, str) else None)
+        for role in roles_by_id.get(record_id, ["context"]):
+            _append_unique(entry["roles"], role)
+        entry["cluster_score"] = max(float(entry["cluster_score"]), float(cluster["cluster_score"]))
+        return False
+
+    def _returned_ids(self, selected_entries: Mapping[str, dict[str, Any]], selected_order: list[str]) -> list[str]:
+        if not self.chronological:
+            return list(selected_order)
+        return sorted(
+            selected_order,
+            key=lambda record_id: _chronological_record_key(selected_entries[record_id]["record"]),
+        )
+
+    @staticmethod
+    def _cluster_trace(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "rank": int(cluster.get("rank", index)),
+                "candidate_id": cluster["candidate_id"],
+                "nucleus_record_id": cluster["nucleus_record_id"],
+                "cluster_ids": list(cluster["cluster_ids"]),
+                "score": float(cluster["cluster_score"]),
+                "rationale": str(cluster.get("rationale", "")),
+                "score_source": str(cluster.get("score_source", "")),
+                "input_index": int(cluster["input_index"]),
+                "unresolved_ids": list(cluster.get("unresolved_ids", [])),
+            }
+            for index, cluster in enumerate(clusters, start=1)
+        ]
+
+
 class ExpandRetrievedGraphNeighbors(RetrievalModule):
     """Expand graph neighbors from ``packet.retrieved.items`` seed records."""
 
@@ -2697,6 +3196,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     GraphNeighborRetrieval,
     ParentEpisodeExpansionRetrieval,
     TemporalNeighborExpansionRetrieval,
+    EpisodeClusterRerankRetrieval,
     ExpandRetrievedGraphNeighbors,
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,

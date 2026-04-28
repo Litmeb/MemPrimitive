@@ -1123,11 +1123,12 @@
 8. `GraphNeighborRetrieval`
 9. `ParentEpisodeExpansionRetrieval`
 10. `TemporalNeighborExpansionRetrieval`
-11. `ExpandRetrievedGraphNeighbors`
-12. `VectorGraphSeedAndExpandRetrieval`
-13. `LayerAwareRetrieval`
-14. `BufferRetrieval`
-15. `QueryRewriteRetrieval`
+11. `EpisodeClusterRerankRetrieval`
+12. `ExpandRetrievedGraphNeighbors`
+13. `VectorGraphSeedAndExpandRetrieval`
+14. `LayerAwareRetrieval`
+15. `BufferRetrieval`
+16. `QueryRewriteRetrieval`
 
 ### 8.1 `RecencyRetrieval`
 
@@ -1362,7 +1363,37 @@
    4. 时间序优先使用 episode `timestamp` 解析值加 `record_id` 排序；如果 timestamp 不可用，则退回该 layer 的 `store.iter_records(layer)` 稳定顺序。
    5. 多个 nucleus 的 cluster 可以重叠；最终输出会按 `record_id` 去重。trace 中的 `clusters` 保留每个 nucleus 的 `cluster_ids`、`backward_ids`、`forward_ids`，顶层记录 `input_record_ids`、`returned_ids`、`ordering_mode` 和 `deduped_duplicate_count`。
 
-### 8.11 `ExpandRetrievedGraphNeighbors`
+### 8.11 `EpisodeClusterRerankRetrieval`
+
+1. 功能
+   对 `TemporalNeighborExpansionRetrieval` 产出的 episode clusters 做 cluster-level rerank，再在 episode budget 内合并、去重，并返回最终 episode context。
+2. 读取
+   读取：
+   1. `packet.query.text`
+   2. `packet.retrieved.items`
+   3. `packet.retrieved.trace["clusters"]`
+   4. 必要时从 `packet.retrieved.trace["layer"]` 对应 layer 或整个 `store` 回填解析 cluster 中的 episode records
+3. 写回
+   覆盖写新的 `packet.retrieved`。
+   不改 `store`。
+4. 主要参数
+   1. `top_k`
+      最终 episode 返回条数，默认 `20`。
+   2. `cluster_top_k`
+      rerank 后最多保留多少个 cluster；不传则使用全部可解析 cluster。
+   3. `rerank`
+      默认 `True`，使用 runtime reranker 对 cluster 排序；设为 `False` 时保留输入 cluster 顺序。
+   4. `chronological`
+      默认 `True`，最终选中的 episodes 会按时间正序返回。
+5. 特殊行为
+   1. cluster 输入优先读取 `cluster_ids`；如果没有 `cluster_ids`，则按 `backward_ids + nucleus_record_id + forward_ids` 组装。
+   2. record 解析先使用 `packet.retrieved.items`，再按 trace 中的 `layer` 到 store 回填；无法解析的 ids 会记录到 cluster trace 的 `unresolved_ids`，完全无法解析的 cluster 会被跳过。
+   3. `rerank=True` 时会把每个 cluster 渲染成 `"[record_id] text"` 行并交给 `runtime.rerank`；runtime 没返回的 cluster 会用 fallback trace 补齐。
+   4. 合并多个 cluster 时按 `record_id` 去重，并在 score 中保留 `source_nucleus_record_ids` 和 `roles`。
+   5. 如果剩余 budget 放不下整个 cluster，会优先保留 nucleus episode，再按 cluster 内距离 nucleus 的近远选择邻居。
+   6. trace 记录 `input_cluster_count`、`resolved_cluster_count`、`unresolved_cluster_count`、`reranked_clusters`、`returned_ids`、`deduped_duplicate_count` 和 `budget_truncated_count`。
+
+### 8.12 `ExpandRetrievedGraphNeighbors`
 
 1. 功能
    不从 query seed ids 出发，而是从当前 `packet.retrieved.items` 继续扩一跳邻居。
@@ -1380,7 +1411,7 @@
    1. 只有 `packet.retrieved.items` 中 layer 正好等于 `self.layer` 的记录会被当成 seeds。
    2. `dedupe=True` 时，同一 record 被多个 seed 扩到也只保留一份。
 
-### 8.12 `VectorGraphSeedAndExpandRetrieval`
+### 8.13 `VectorGraphSeedAndExpandRetrieval`
 
 1. 功能
    先用向量检索 graph notes 作为 seeds，再扩一跳 graph neighbors，最后可选做 agentic rerank。
@@ -1418,7 +1449,7 @@
    2. `query_expand_with_llm=True` 时，embedding 文本不再只是原 query，而是增强后的 note-like 文本。
    3. `agentic_search=True` 时，最终排序由 runtime.rerank 决定，不再只是 seed+expand 的原始顺序。
 
-### 8.13 `LayerAwareRetrieval`
+### 8.14 `LayerAwareRetrieval`
 
 1. 功能
    每层用不同 retriever 分别检索，再做全局合并。
@@ -1450,7 +1481,7 @@
    2. 数值 score 会乘上 `merge_weight_by_layer[layer]` 后再参加全局排序。
    3. 每层 retriever 是在 layer-scoped store 视图上运行的。
 
-### 8.14 `BufferRetrieval`
+### 8.15 `BufferRetrieval`
 
 1. 功能
    从某一层直接读一个有界 recency window，而不是做 query 搜索。
@@ -1467,7 +1498,7 @@
    1. 虽然仍要求 `packet.query` 存在，但 query 文本不参与排名。
    2. 很适合 Reflexion 这类“读最近几条 reflection”。
 
-### 8.15 `QueryRewriteRetrieval`
+### 8.16 `QueryRewriteRetrieval`
 
 1. 功能
    先改写 query，再把改写结果交给内部 retriever。

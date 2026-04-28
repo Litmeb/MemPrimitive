@@ -1446,6 +1446,255 @@ def test_temporal_neighbor_expansion_retrieval_is_registered_and_exported() -> N
     assert "TemporalNeighborExpansionRetrieval" in pkg.__all__
 
 
+def test_episode_cluster_rerank_prefers_high_scoring_cluster_and_resolves_store_neighbors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memprimitive.baselines import EpisodeClusterRerankRetrieval
+    from memprimitive.utils import _runtime
+
+    class _FakeClusterRerankRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def rerank(self, *, query: str, candidates: list[dict[str, object]], task: str, top_k: int):
+            self.calls.append({"query": query, "candidates": candidates, "task": task, "top_k": top_k})
+            scores = {"ep-2": 0.2, "ep-4": 0.95}
+            return [
+                {
+                    "id": str(candidate["id"]),
+                    "score": scores[str(candidate["nucleus_record_id"])],
+                    "rationale": "fake cluster rank",
+                }
+                for candidate in sorted(
+                    candidates,
+                    key=lambda item: -scores[str(item["nucleus_record_id"])],
+                )[:top_k]
+            ]
+
+    fake_runtime = _FakeClusterRerankRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": "ep-1", "timestamp": "2026-01-01T00:00:00+00:00"},
+            {"record_id": "ep-2", "timestamp": "2026-01-01T00:01:00+00:00"},
+            {"record_id": "ep-3", "timestamp": "2026-01-01T00:02:00+00:00"},
+            {"record_id": "ep-4", "timestamp": "2026-01-01T00:03:00+00:00"},
+            {"record_id": "ep-5", "timestamp": "2026-01-01T00:04:00+00:00"},
+        ]
+    )
+    retrieved = RetrievedSet(
+        items=[records["ep-2"], records["ep-4"]],
+        scores=[
+            {"record_id": "ep-2", "score": 0.2},
+            {"record_id": "ep-4", "score": 0.95},
+        ],
+        trace={
+            "layer": "episodic",
+            "clusters": [
+                {
+                    "nucleus_record_id": "ep-2",
+                    "cluster_ids": ["ep-1", "ep-2"],
+                    "backward_ids": ["ep-1"],
+                    "forward_ids": [],
+                },
+                {
+                    "nucleus_record_id": "ep-4",
+                    "cluster_ids": ["ep-4", "ep-5"],
+                    "backward_ids": [],
+                    "forward_ids": ["ep-5"],
+                },
+            ],
+        },
+    )
+
+    packet_out, _ = EpisodeClusterRerankRetrieval(top_k=2, cluster_top_k=1).run(
+        Packet(query=Query(text="important ep-4 context"), retrieved=retrieved),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-4", "ep-5"]
+    assert fake_runtime.calls[0]["top_k"] == 1
+    assert packet_out.retrieved.trace["reranked_clusters"][0]["nucleus_record_id"] == "ep-4"
+    assert packet_out.retrieved.trace["returned_ids"] == ["ep-4", "ep-5"]
+
+
+def test_episode_cluster_rerank_dedupes_overlapping_clusters_and_merges_provenance() -> None:
+    from memprimitive.baselines import EpisodeClusterRerankRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": f"ep-{index}", "timestamp": f"2026-01-01T00:0{index}:00+00:00"}
+            for index in range(1, 5)
+        ]
+    )
+    retrieved = RetrievedSet(
+        items=list(records.values()),
+        scores=[],
+        trace={
+            "layer": "episodic",
+            "clusters": [
+                {
+                    "nucleus_record_id": "ep-2",
+                    "cluster_ids": ["ep-1", "ep-2", "ep-3"],
+                    "backward_ids": ["ep-1"],
+                    "forward_ids": ["ep-3"],
+                },
+                {
+                    "nucleus_record_id": "ep-3",
+                    "cluster_ids": ["ep-2", "ep-3", "ep-4"],
+                    "backward_ids": ["ep-2"],
+                    "forward_ids": ["ep-4"],
+                },
+            ],
+        },
+    )
+
+    packet_out, _ = EpisodeClusterRerankRetrieval(top_k=5, rerank=False, chronological=False).run(
+        Packet(query=Query(text="dedupe overlaps"), retrieved=retrieved),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-1", "ep-2", "ep-3", "ep-4"]
+    scores_by_id = {score["record_id"]: score for score in packet_out.retrieved.scores}
+    assert scores_by_id["ep-2"]["source_nucleus_record_ids"] == ["ep-2", "ep-3"]
+    assert scores_by_id["ep-2"]["roles"] == ["nucleus", "backward"]
+    assert scores_by_id["ep-3"]["source_nucleus_record_ids"] == ["ep-2", "ep-3"]
+    assert scores_by_id["ep-3"]["roles"] == ["forward", "nucleus"]
+    assert packet_out.retrieved.trace["deduped_duplicate_count"] == 2
+
+
+def test_episode_cluster_rerank_partial_budget_keeps_nucleus_then_nearest_neighbors() -> None:
+    from memprimitive.baselines import EpisodeClusterRerankRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": f"ep-{index}", "timestamp": f"2026-01-01T00:0{index}:00+00:00"}
+            for index in range(1, 6)
+        ]
+    )
+    retrieved = RetrievedSet(
+        items=list(records.values()),
+        scores=[],
+        trace={
+            "layer": "episodic",
+            "clusters": [
+                {
+                    "nucleus_record_id": "ep-3",
+                    "cluster_ids": ["ep-1", "ep-2", "ep-3", "ep-4", "ep-5"],
+                    "backward_ids": ["ep-1", "ep-2"],
+                    "forward_ids": ["ep-4", "ep-5"],
+                },
+            ],
+        },
+    )
+
+    packet_out, _ = EpisodeClusterRerankRetrieval(top_k=3, rerank=False, chronological=False).run(
+        Packet(query=Query(text="tight budget"), retrieved=retrieved),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-3", "ep-2", "ep-4"]
+    assert packet_out.retrieved.trace["budget_truncated_count"] == 2
+
+
+def test_episode_cluster_rerank_returns_chronological_order() -> None:
+    from memprimitive.baselines import EpisodeClusterRerankRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": "ep-3", "timestamp": "2026-01-01T00:02:00+00:00"},
+            {"record_id": "ep-1", "timestamp": "2026-01-01T00:00:00+00:00"},
+            {"record_id": "ep-4", "timestamp": "2026-01-01T00:03:00+00:00"},
+            {"record_id": "ep-2", "timestamp": "2026-01-01T00:01:00+00:00"},
+        ]
+    )
+    retrieved = RetrievedSet(
+        items=list(records.values()),
+        scores=[],
+        trace={
+            "layer": "episodic",
+            "clusters": [
+                {
+                    "nucleus_record_id": "ep-3",
+                    "cluster_ids": ["ep-3", "ep-4"],
+                    "backward_ids": [],
+                    "forward_ids": ["ep-4"],
+                },
+                {
+                    "nucleus_record_id": "ep-1",
+                    "cluster_ids": ["ep-1", "ep-2"],
+                    "backward_ids": [],
+                    "forward_ids": ["ep-2"],
+                },
+            ],
+        },
+    )
+
+    packet_out, _ = EpisodeClusterRerankRetrieval(top_k=4, rerank=False).run(
+        Packet(query=Query(text="chronological context"), retrieved=retrieved),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-1", "ep-2", "ep-3", "ep-4"]
+    assert packet_out.retrieved.trace["returned_ids"] == ["ep-1", "ep-2", "ep-3", "ep-4"]
+
+
+def test_episode_cluster_rerank_returns_empty_for_missing_or_unresolved_clusters() -> None:
+    from memprimitive.baselines import EpisodeClusterRerankRetrieval
+
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="episodic")]))
+    no_cluster_packet, _ = EpisodeClusterRerankRetrieval().run(
+        Packet(query=Query(text="no clusters"), retrieved=RetrievedSet(items=[], scores=[], trace={})),
+        store,
+    )
+
+    assert no_cluster_packet.retrieved is not None
+    assert no_cluster_packet.retrieved.items == []
+    assert no_cluster_packet.retrieved.trace["empty_reason"] == "no_clusters"
+    assert no_cluster_packet.retrieved.trace["input_cluster_count"] == 0
+
+    unresolved_packet, _ = EpisodeClusterRerankRetrieval().run(
+        Packet(
+            query=Query(text="missing episode"),
+            retrieved=RetrievedSet(
+                items=[],
+                scores=[],
+                trace={
+                    "layer": "episodic",
+                    "clusters": [
+                        {
+                            "nucleus_record_id": "missing",
+                            "cluster_ids": ["missing"],
+                            "backward_ids": [],
+                            "forward_ids": [],
+                        }
+                    ],
+                },
+            ),
+        ),
+        store,
+    )
+
+    assert unresolved_packet.retrieved is not None
+    assert unresolved_packet.retrieved.items == []
+    assert unresolved_packet.retrieved.trace["empty_reason"] == "no_resolved_clusters"
+    assert unresolved_packet.retrieved.trace["input_cluster_count"] == 1
+    assert unresolved_packet.retrieved.trace["unresolved_cluster_count"] == 1
+
+
+def test_episode_cluster_rerank_retrieval_is_registered_and_exported() -> None:
+    import memprimitive.baselines as pkg
+    from memprimitive.baselines import EpisodeClusterRerankRetrieval
+
+    assert EpisodeClusterRerankRetrieval.__name__ == "EpisodeClusterRerankRetrieval"
+    assert "EpisodeClusterRerankRetrieval" in registered_baseline_class_names()
+    assert "EpisodeClusterRerankRetrieval" in pkg.__all__
+
+
 def test_layer_aware_retrieval_merges_per_layer_results_and_applies_global_top_k() -> None:
     from memprimitive.baselines import EmbeddingSimilarityRetrieval, LayerAwareRetrieval, RecencyRetrieval
 
