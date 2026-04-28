@@ -26,6 +26,8 @@ BaselineFactory = Callable[[], PrimitiveModule]
 def _default_factory_for_class(cls: type[PrimitiveModule], slot: str, *, top_k: int) -> BaselineFactory:
     """Instantiate a registered class; slot-specific kwargs live here (not per-class lists)."""
     if slot == "retrieval":
+        if cls.__name__ == "TemporalNeighborExpansionRetrieval":
+            return lambda c=cls: c()
         if cls.__name__ == "QueryRewriteRetrieval":
             from .retrieval import RecencyRetrieval
 

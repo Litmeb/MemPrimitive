@@ -1122,11 +1122,12 @@
 7. `BM25Retrieval`
 8. `GraphNeighborRetrieval`
 9. `ParentEpisodeExpansionRetrieval`
-10. `ExpandRetrievedGraphNeighbors`
-11. `VectorGraphSeedAndExpandRetrieval`
-12. `LayerAwareRetrieval`
-13. `BufferRetrieval`
-14. `QueryRewriteRetrieval`
+10. `TemporalNeighborExpansionRetrieval`
+11. `ExpandRetrievedGraphNeighbors`
+12. `VectorGraphSeedAndExpandRetrieval`
+13. `LayerAwareRetrieval`
+14. `BufferRetrieval`
+15. `QueryRewriteRetrieval`
 
 ### 8.1 `RecencyRetrieval`
 
@@ -1331,7 +1332,37 @@
    3. 如果重复 hit 有数值 `score`，父 episode score 使用最高数值分；如果没有数值分，则保留首次 hit score。
    4. trace 记录 `input_hit_ids`、`successful_parent_ids`、`missing_parent_count`、`hit_to_parent`、`duplicate_parent_count` 和 `unresolved_parent_count`。
 
-### 8.10 `ExpandRetrievedGraphNeighbors`
+### 8.10 `TemporalNeighborExpansionRetrieval`
+
+1. 功能
+   从当前 `packet.retrieved.items` 中的 nucleus episode 出发，取同一 scope 内的前后时间邻居，覆盖 MemMachine 式 “nucleus episode + previous/following episodes” contextualization。
+2. 读取
+   读取：
+   1. `packet.retrieved.items`
+   2. `store.iter_records(layer)`
+   3. nucleus record 的 metadata scope 字段
+3. 写回
+   覆盖写新的 `packet.retrieved`。
+   不改 `store`。
+4. 主要参数
+   1. `layer`
+      默认 `episodic`。
+   2. `backward`
+      每个 nucleus 向前取多少条，默认 `1`。
+   3. `forward`
+      每个 nucleus 向后取多少条，默认 `2`。
+   4. `scope_fields`
+      默认 `("session_id", "user_id", "agent_id")`。
+   5. `chronological`
+      默认 `True`，最终去重后按时间顺序返回。
+5. 特殊行为
+   1. 这不是 graph neighbor retrieval；不会读取 graph links，也不会沿语义图扩展。
+   2. 只把 `packet.retrieved.items` 中 layer 等于 `self.layer` 的记录当作 nucleus。
+   3. scope 字段只有在 nucleus metadata 中存在时才作为过滤条件；存在的字段要求候选 episode metadata 中同字段同值。
+   4. 时间序优先使用 episode `timestamp` 解析值加 `record_id` 排序；如果 timestamp 不可用，则退回该 layer 的 `store.iter_records(layer)` 稳定顺序。
+   5. 多个 nucleus 的 cluster 可以重叠；最终输出会按 `record_id` 去重。trace 中的 `clusters` 保留每个 nucleus 的 `cluster_ids`、`backward_ids`、`forward_ids`，顶层记录 `input_record_ids`、`returned_ids`、`ordering_mode` 和 `deduped_duplicate_count`。
+
+### 8.11 `ExpandRetrievedGraphNeighbors`
 
 1. 功能
    不从 query seed ids 出发，而是从当前 `packet.retrieved.items` 继续扩一跳邻居。
@@ -1349,7 +1380,7 @@
    1. 只有 `packet.retrieved.items` 中 layer 正好等于 `self.layer` 的记录会被当成 seeds。
    2. `dedupe=True` 时，同一 record 被多个 seed 扩到也只保留一份。
 
-### 8.11 `VectorGraphSeedAndExpandRetrieval`
+### 8.12 `VectorGraphSeedAndExpandRetrieval`
 
 1. 功能
    先用向量检索 graph notes 作为 seeds，再扩一跳 graph neighbors，最后可选做 agentic rerank。
@@ -1387,7 +1418,7 @@
    2. `query_expand_with_llm=True` 时，embedding 文本不再只是原 query，而是增强后的 note-like 文本。
    3. `agentic_search=True` 时，最终排序由 runtime.rerank 决定，不再只是 seed+expand 的原始顺序。
 
-### 8.12 `LayerAwareRetrieval`
+### 8.13 `LayerAwareRetrieval`
 
 1. 功能
    每层用不同 retriever 分别检索，再做全局合并。
@@ -1419,7 +1450,7 @@
    2. 数值 score 会乘上 `merge_weight_by_layer[layer]` 后再参加全局排序。
    3. 每层 retriever 是在 layer-scoped store 视图上运行的。
 
-### 8.13 `BufferRetrieval`
+### 8.14 `BufferRetrieval`
 
 1. 功能
    从某一层直接读一个有界 recency window，而不是做 query 搜索。
@@ -1436,7 +1467,7 @@
    1. 虽然仍要求 `packet.query` 存在，但 query 文本不参与排名。
    2. 很适合 Reflexion 这类“读最近几条 reflection”。
 
-### 8.14 `QueryRewriteRetrieval`
+### 8.15 `QueryRewriteRetrieval`
 
 1. 功能
    先改写 query，再把改写结果交给内部 retriever。

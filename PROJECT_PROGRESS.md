@@ -357,8 +357,8 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
   - multi-layer context assembly -> `LayerAwareRetrieval` and `TemplateReadout`
 - Newly covered reusable module:
   - `ParentEpisodeExpansionRetrieval` now covers the sentence/derivative hit -> source episode expansion step using explicit metadata/provenance parent ids, without record-text parsing.
+  - `TemporalNeighborExpansionRetrieval` now covers bounded previous/following episode expansion around retrieved nucleus episodes within matching session/user/agent scope, with chronological dedupe and per-nucleus cluster trace.
 - Modules still needed for a faithful reconstruction:
-  - `TemporalNeighborExpansionRetrieval`: expand each nucleus episode to bounded previous/following episodes within the same session/user scope, e.g. MemMachine's one-backward/two-forward contextualization.
   - `EpisodeClusterRerankRetrieval` or a combined `ContextualizedEpisodeRetrieval`: build anchored episode clusters, deduplicate overlaps under a return budget, rerank clusters with the runtime reranker, prioritize near-nucleus episodes when the budget is tight, and emit final episodes chronologically.
   - `STMConsolidationEvolution`: expose STM overflow as an explicit event that summarizes evicted episodes, retains/update a session summary, and copies raw evicted episodes into LTM. Current sliding-window trimming does not preserve enough eviction provenance for this declaratively.
   - `ProfileFeatureEvolution`: maintain structured profile features with category/tag/feature/value plus citations/source episode ids, supporting add/delete/consolidate or upsert-style updates rather than only free-text profile records.

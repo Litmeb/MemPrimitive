@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 from math import sqrt
 import re
@@ -745,6 +746,65 @@ def _explicit_parent_id_from_record(record, parent_id_fields: tuple[str, ...]) -
                 return parent_id, field, "provenance"
 
     return None, None, None
+
+
+def _normalize_scope_fields(scope_fields: Iterable[str] | None) -> tuple[str, ...]:
+    if scope_fields is None:
+        return ()
+    raw_fields = (scope_fields,) if isinstance(scope_fields, str) else scope_fields
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_field in raw_fields:
+        field = str(raw_field).strip()
+        if not field or field in seen:
+            continue
+        seen.add(field)
+        normalized.append(field)
+    return tuple(normalized)
+
+
+def _record_metadata(record) -> dict[str, Any]:
+    metadata = getattr(record, "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _timestamp_sort_value(record) -> datetime | None:
+    raw_timestamp = getattr(record, "timestamp", None)
+    if not isinstance(raw_timestamp, str):
+        return None
+    timestamp = raw_timestamp.strip()
+    if not timestamp:
+        return None
+    if timestamp.endswith("Z"):
+        timestamp = f"{timestamp[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _ordered_temporal_records(records: list[Any]) -> tuple[list[Any], str]:
+    timestamp_keys: list[tuple[datetime, str, int, Any]] = []
+    for index, record in enumerate(records):
+        timestamp = _timestamp_sort_value(record)
+        if timestamp is None:
+            return list(records), "store_iteration"
+        timestamp_keys.append((timestamp, str(getattr(record, "record_id", "")), index, record))
+    timestamp_keys.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [record for _, _, _, record in timestamp_keys], "timestamp_record_id"
+
+
+def _temporal_scope_constraints(record, scope_fields: tuple[str, ...]) -> dict[str, Any]:
+    metadata = _record_metadata(record)
+    return {field: metadata[field] for field in scope_fields if field in metadata}
+
+
+def _record_matches_temporal_scope(record, constraints: Mapping[str, Any]) -> bool:
+    metadata = _record_metadata(record)
+    return all(field in metadata and metadata[field] == value for field, value in constraints.items())
 
 
 class RecencyRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
@@ -1772,6 +1832,234 @@ class ParentEpisodeExpansionRetrieval(RetrievalModule):
         return _with_retrieved(packet, retrieved), store
 
 
+class TemporalNeighborExpansionRetrieval(RetrievalModule):
+    """Expand nucleus episodes to bounded temporal neighbors within the same scope."""
+
+    DEFAULT_SCOPE_FIELDS: ClassVar[tuple[str, ...]] = ("session_id", "user_id", "agent_id")
+
+    spec = ModuleSpec(
+        name="temporal_neighbor_expansion_retrieval",
+        slot="retrieval",
+        input_requirements=("retrieved.items",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        *,
+        layer: str = "episodic",
+        backward: int = 1,
+        forward: int = 2,
+        scope_fields: Iterable[str] | None = DEFAULT_SCOPE_FIELDS,
+        chronological: bool = True,
+    ) -> None:
+        normalized_layer = str(layer).strip()
+        if not normalized_layer:
+            raise ValueError("TemporalNeighborExpansionRetrieval requires a non-empty layer.")
+        if backward < 0:
+            raise ValueError("TemporalNeighborExpansionRetrieval requires backward >= 0.")
+        if forward < 0:
+            raise ValueError("TemporalNeighborExpansionRetrieval requires forward >= 0.")
+        self.layer = normalized_layer
+        self.target_layer = normalized_layer
+        self.backward = int(backward)
+        self.forward = int(forward)
+        self.scope_fields = _normalize_scope_fields(scope_fields)
+        self.chronological = bool(chronological)
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        retrieved_input = packet.retrieved if packet.retrieved is not None else RetrievedSet()
+        input_records = list(retrieved_input.items)
+        input_record_ids = [getattr(record, "record_id", None) for record in input_records]
+
+        nucleus_records: list[Any] = []
+        seen_nucleus_ids: set[str] = set()
+        skipped_non_layer_input_ids: list[str] = []
+        duplicate_nucleus_count = 0
+        for record in input_records:
+            record_id = getattr(record, "record_id", None)
+            if getattr(record, "layer", None) != self.layer:
+                if isinstance(record_id, str):
+                    skipped_non_layer_input_ids.append(record_id)
+                continue
+            if not isinstance(record_id, str):
+                continue
+            if record_id in seen_nucleus_ids:
+                duplicate_nucleus_count += 1
+                continue
+            seen_nucleus_ids.add(record_id)
+            nucleus_records.append(record)
+
+        if not nucleus_records:
+            retrieved = RetrievedSet(
+                items=[],
+                scores=[],
+                trace={
+                    "module": self.spec.name,
+                    "source": "retrieved",
+                    "layer": self.layer,
+                    "backward": self.backward,
+                    "forward": self.forward,
+                    "scope_fields": list(self.scope_fields),
+                    "chronological": self.chronological,
+                    "ordering_mode": "none",
+                    "candidate_count": 0,
+                    "input_record_ids": input_record_ids,
+                    "nucleus_record_ids": [],
+                    "skipped_non_layer_input_ids": skipped_non_layer_input_ids,
+                    "duplicate_nucleus_count": duplicate_nucleus_count,
+                    "unresolved_nucleus_ids": [],
+                    "clusters": [],
+                    "returned_ids": [],
+                    "returned_count": 0,
+                    "total_cluster_candidate_count": 0,
+                    "deduped_duplicate_count": 0,
+                },
+            )
+            return _with_retrieved(packet, retrieved), store
+
+        layer_records = store.iter_records(self.layer)
+        ordered_records, ordering_mode = _ordered_temporal_records(layer_records)
+        order_index_by_id = {
+            record.record_id: index
+            for index, record in enumerate(ordered_records)
+            if isinstance(getattr(record, "record_id", None), str)
+        }
+
+        entries_by_id: dict[str, dict[str, Any]] = {}
+        discovery_order: list[str] = []
+        clusters: list[dict[str, Any]] = []
+        unresolved_nucleus_ids: list[str] = []
+        total_cluster_candidate_count = 0
+        deduped_duplicate_count = 0
+
+        def add_entry(record, *, nucleus_record_id: str, role: str) -> None:
+            nonlocal total_cluster_candidate_count, deduped_duplicate_count
+            total_cluster_candidate_count += 1
+            record_id = record.record_id
+            entry = entries_by_id.get(record_id)
+            if entry is None:
+                entries_by_id[record_id] = {
+                    "record": record,
+                    "source_nucleus_record_ids": [nucleus_record_id],
+                    "roles": [role],
+                }
+                discovery_order.append(record_id)
+                return
+            deduped_duplicate_count += 1
+            if nucleus_record_id not in entry["source_nucleus_record_ids"]:
+                entry["source_nucleus_record_ids"].append(nucleus_record_id)
+            if role not in entry["roles"]:
+                entry["roles"].append(role)
+
+        for nucleus_record in nucleus_records:
+            nucleus_record_id = nucleus_record.record_id
+            if nucleus_record_id not in order_index_by_id:
+                unresolved_nucleus_ids.append(nucleus_record_id)
+                clusters.append(
+                    {
+                        "nucleus_record_id": nucleus_record_id,
+                        "cluster_ids": [],
+                        "backward_ids": [],
+                        "forward_ids": [],
+                        "scope": _temporal_scope_constraints(nucleus_record, self.scope_fields),
+                        "status": "nucleus_not_found",
+                    }
+                )
+                continue
+
+            scope_constraints = _temporal_scope_constraints(nucleus_record, self.scope_fields)
+            scoped_records = [
+                record for record in ordered_records if _record_matches_temporal_scope(record, scope_constraints)
+            ]
+            scoped_index_by_id = {
+                record.record_id: index
+                for index, record in enumerate(scoped_records)
+                if isinstance(getattr(record, "record_id", None), str)
+            }
+            scoped_index = scoped_index_by_id.get(nucleus_record_id)
+            if scoped_index is None:
+                unresolved_nucleus_ids.append(nucleus_record_id)
+                clusters.append(
+                    {
+                        "nucleus_record_id": nucleus_record_id,
+                        "cluster_ids": [],
+                        "backward_ids": [],
+                        "forward_ids": [],
+                        "scope": dict(scope_constraints),
+                        "status": "nucleus_out_of_scope",
+                    }
+                )
+                continue
+
+            backward_records = scoped_records[max(0, scoped_index - self.backward) : scoped_index]
+            nucleus_store_record = scoped_records[scoped_index]
+            forward_records = scoped_records[scoped_index + 1 : scoped_index + 1 + self.forward]
+            cluster_records = [*backward_records, nucleus_store_record, *forward_records]
+
+            for record in backward_records:
+                add_entry(record, nucleus_record_id=nucleus_record_id, role="backward")
+            add_entry(nucleus_store_record, nucleus_record_id=nucleus_record_id, role="nucleus")
+            for record in forward_records:
+                add_entry(record, nucleus_record_id=nucleus_record_id, role="forward")
+
+            clusters.append(
+                {
+                    "nucleus_record_id": nucleus_record_id,
+                    "cluster_ids": [record.record_id for record in cluster_records],
+                    "backward_ids": [record.record_id for record in backward_records],
+                    "forward_ids": [record.record_id for record in forward_records],
+                    "scope": dict(scope_constraints),
+                    "status": "resolved",
+                }
+            )
+
+        if self.chronological:
+            selected_ids = sorted(discovery_order, key=lambda record_id: order_index_by_id.get(record_id, 10**12))
+        else:
+            selected_ids = list(discovery_order)
+        items = [entries_by_id[record_id]["record"] for record_id in selected_ids]
+        scores = [
+            {
+                "record_id": record_id,
+                "rank": rank,
+                "strategy": "temporal_neighbor_expansion",
+                "source_nucleus_record_ids": list(entries_by_id[record_id]["source_nucleus_record_ids"]),
+                "roles": list(entries_by_id[record_id]["roles"]),
+                "is_nucleus": "nucleus" in entries_by_id[record_id]["roles"],
+                "order_index": order_index_by_id.get(record_id),
+            }
+            for rank, record_id in enumerate(selected_ids, start=1)
+        ]
+
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "source": "retrieved",
+                "layer": self.layer,
+                "backward": self.backward,
+                "forward": self.forward,
+                "scope_fields": list(self.scope_fields),
+                "chronological": self.chronological,
+                "ordering_mode": ordering_mode,
+                "candidate_count": len(layer_records),
+                "input_record_ids": input_record_ids,
+                "nucleus_record_ids": [record.record_id for record in nucleus_records],
+                "skipped_non_layer_input_ids": skipped_non_layer_input_ids,
+                "duplicate_nucleus_count": duplicate_nucleus_count,
+                "unresolved_nucleus_ids": unresolved_nucleus_ids,
+                "clusters": clusters,
+                "returned_ids": selected_ids,
+                "returned_count": len(items),
+                "total_cluster_candidate_count": total_cluster_candidate_count,
+                "deduped_duplicate_count": deduped_duplicate_count,
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+
 class ExpandRetrievedGraphNeighbors(RetrievalModule):
     """Expand graph neighbors from ``packet.retrieved.items`` seed records."""
 
@@ -2408,6 +2696,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     BM25Retrieval,
     GraphNeighborRetrieval,
     ParentEpisodeExpansionRetrieval,
+    TemporalNeighborExpansionRetrieval,
     ExpandRetrievedGraphNeighbors,
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,

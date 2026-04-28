@@ -1322,6 +1322,130 @@ def test_parent_episode_expansion_retrieval_is_registered_and_exported() -> None
     assert "ParentEpisodeExpansionRetrieval" in pkg.__all__
 
 
+def _temporal_episode_store(records: list[dict[str, object]]) -> tuple[MemoryStore, dict[str, MemoryRecord]]:
+    store = MemoryStore(topology=StoreTopology.from_layers([StoreLayerSpec(name="episodic")]))
+    by_id: dict[str, MemoryRecord] = {}
+    for payload in records:
+        record_id = str(payload["record_id"])
+        record = MemoryRecord(
+            record_id=record_id,
+            unit_id=str(payload.get("unit_id", f"unit-{record_id}")),
+            layer="episodic",
+            text=str(payload.get("text", record_id)),
+            timestamp=str(payload["timestamp"]),
+            metadata=dict(payload.get("metadata", {})),
+        )
+        store.append(record)
+        by_id[record_id] = record
+    return store, by_id
+
+
+def test_temporal_neighbor_expansion_expands_same_session_window() -> None:
+    from memprimitive.baselines import TemporalNeighborExpansionRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": "ep-1", "timestamp": "2026-01-01T00:00:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-2", "timestamp": "2026-01-01T00:01:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-3", "timestamp": "2026-01-01T00:02:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-4", "timestamp": "2026-01-01T00:03:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-5", "timestamp": "2026-01-01T00:04:00+00:00", "metadata": {"session_id": "s1"}},
+        ]
+    )
+
+    packet_out, _ = TemporalNeighborExpansionRetrieval(layer="episodic").run(
+        Packet(retrieved=RetrievedSet(items=[records["ep-3"]], scores=[])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-2", "ep-3", "ep-4", "ep-5"]
+    cluster = packet_out.retrieved.trace["clusters"][0]
+    assert cluster["nucleus_record_id"] == "ep-3"
+    assert cluster["cluster_ids"] == ["ep-2", "ep-3", "ep-4", "ep-5"]
+    assert cluster["backward_ids"] == ["ep-2"]
+    assert cluster["forward_ids"] == ["ep-4", "ep-5"]
+
+
+def test_temporal_neighbor_expansion_does_not_cross_session_scope() -> None:
+    from memprimitive.baselines import TemporalNeighborExpansionRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": "s1-prev", "timestamp": "2026-01-01T00:00:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "s2-near-prev", "timestamp": "2026-01-01T00:01:00+00:00", "metadata": {"session_id": "s2"}},
+            {"record_id": "s1-nucleus", "timestamp": "2026-01-01T00:02:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "s2-near-next", "timestamp": "2026-01-01T00:03:00+00:00", "metadata": {"session_id": "s2"}},
+            {"record_id": "s1-next", "timestamp": "2026-01-01T00:04:00+00:00", "metadata": {"session_id": "s1"}},
+        ]
+    )
+
+    packet_out, _ = TemporalNeighborExpansionRetrieval(layer="episodic", backward=1, forward=2).run(
+        Packet(retrieved=RetrievedSet(items=[records["s1-nucleus"]], scores=[])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["s1-prev", "s1-nucleus", "s1-next"]
+    assert packet_out.retrieved.trace["clusters"][0]["forward_ids"] == ["s1-next"]
+
+
+def test_temporal_neighbor_expansion_dedupes_overlapping_clusters() -> None:
+    from memprimitive.baselines import TemporalNeighborExpansionRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": f"ep-{index}", "timestamp": f"2026-01-01T00:0{index}:00+00:00", "metadata": {"session_id": "s1"}}
+            for index in range(1, 6)
+        ]
+    )
+
+    packet_out, _ = TemporalNeighborExpansionRetrieval(layer="episodic", backward=1, forward=2).run(
+        Packet(retrieved=RetrievedSet(items=[records["ep-2"], records["ep-3"]], scores=[])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-1", "ep-2", "ep-3", "ep-4", "ep-5"]
+    assert [cluster["cluster_ids"] for cluster in packet_out.retrieved.trace["clusters"]] == [
+        ["ep-1", "ep-2", "ep-3", "ep-4"],
+        ["ep-2", "ep-3", "ep-4", "ep-5"],
+    ]
+    assert packet_out.retrieved.trace["deduped_duplicate_count"] == 3
+
+
+def test_temporal_neighbor_expansion_returns_chronological_order_from_out_of_order_nuclei() -> None:
+    from memprimitive.baselines import TemporalNeighborExpansionRetrieval
+
+    store, records = _temporal_episode_store(
+        [
+            {"record_id": "ep-3", "timestamp": "2026-01-01T00:02:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-1", "timestamp": "2026-01-01T00:00:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-2", "timestamp": "2026-01-01T00:01:00+00:00", "metadata": {"session_id": "s1"}},
+            {"record_id": "ep-4", "timestamp": "2026-01-01T00:03:00+00:00", "metadata": {"session_id": "s1"}},
+        ]
+    )
+
+    packet_out, _ = TemporalNeighborExpansionRetrieval(layer="episodic", backward=0, forward=1).run(
+        Packet(retrieved=RetrievedSet(items=[records["ep-3"], records["ep-1"]], scores=[])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-1", "ep-2", "ep-3", "ep-4"]
+    assert packet_out.retrieved.trace["ordering_mode"] == "timestamp_record_id"
+    assert packet_out.retrieved.trace["returned_ids"] == ["ep-1", "ep-2", "ep-3", "ep-4"]
+
+
+def test_temporal_neighbor_expansion_retrieval_is_registered_and_exported() -> None:
+    import memprimitive.baselines as pkg
+    from memprimitive.baselines import TemporalNeighborExpansionRetrieval
+
+    assert TemporalNeighborExpansionRetrieval.__name__ == "TemporalNeighborExpansionRetrieval"
+    assert "TemporalNeighborExpansionRetrieval" in registered_baseline_class_names()
+    assert "TemporalNeighborExpansionRetrieval" in pkg.__all__
+
+
 def test_layer_aware_retrieval_merges_per_layer_results_and_applies_global_top_k() -> None:
     from memprimitive.baselines import EmbeddingSimilarityRetrieval, LayerAwareRetrieval, RecencyRetrieval
 
