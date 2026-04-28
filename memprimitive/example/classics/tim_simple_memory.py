@@ -281,10 +281,16 @@ def _build_tim_simple_update_unit(*, thought: dict[str, Any]) -> MemoryUnit:
 
 
 def _build_tim_simple_evolution_module(
+    system: dict[str, object] | None = None,
     *,
-    memory_layer: str,
-    candidate_pipeline: MemoryPipeline,
+    memory_layer: str | None = None,
+    candidate_pipeline: MemoryPipeline | None = None,
 ) -> LLMFunctionCallEvolution:
+    if system is not None:
+        memory_layer = str(system["memory_layer"])
+        candidate_pipeline = _build_tim_simple_candidate_recall_pipeline(system)
+    if memory_layer is None or candidate_pipeline is None:
+        raise ValueError("memory_layer and candidate_pipeline are required.")
     return LLMFunctionCallEvolution(
         target_layer=memory_layer,
         tools=["ADD", "UPDATE", "DELETE"],

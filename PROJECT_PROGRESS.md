@@ -347,7 +347,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 ### Other Boundary Papers
 
-- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can cover a mechanism-level skeleton of the memory system, but not a paper-faithful reconstruction from existing primitives alone. The core reason is that MemMachine's decisive behavior is not just multi-layer storage; it is contextualized episodic retrieval over sentence-derived hits, parent episodes, temporal neighbors, cluster reranking, budgeted deduplication, and chronological return.
+- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can now cover the contextualized episodic recall spine of the memory system at a mechanism level. The remaining gaps are not the sentence-hit -> parent -> temporal-context -> cluster-rerank recall path, but the surrounding STM consolidation, structured profile maintenance, and optional retrieval-agent orchestration.
 - What the current framework can already approximate without new modules:
   - working/short-term episodes -> bounded temporal layer plus `BufferRetrieval` / `RecencyRetrieval`
   - STM/session summary -> `HierarchicalEvolution` or `LLMRepresentation` + summary rewrite/retention
@@ -358,8 +358,10 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Newly covered reusable module:
   - `ParentEpisodeExpansionRetrieval` now covers the sentence/derivative hit -> source episode expansion step using explicit metadata/provenance parent ids, without record-text parsing.
   - `TemporalNeighborExpansionRetrieval` now covers bounded previous/following episode expansion around retrieved nucleus episodes within matching session/user/agent scope, with chronological dedupe and per-nucleus cluster trace.
+  - `EpisodeClusterRerankRetrieval` now covers the final contextualized episodic recall stage: consume temporal episode clusters, rerank clusters through the shared runtime reranker, unify/dedupe under an episode budget with nucleus-near fallback when budget is tight, and return final episodes chronologically.
+- Follow-up audit note: `EpisodeClusterRerankRetrieval` has focused code coverage, is registered/exported, and now has a matching `DSL_REFERENCE.zh-CN.md` retrieval-section entry.
+- Together, those three retrieval modules cover MemMachine's sentence-derived hit -> parent episode -> temporal neighbor cluster -> cluster-level rerank/unify/chronological-return path without adding a combined paper-specific `ContextualizedEpisodeRetrieval`.
 - Modules still needed for a faithful reconstruction:
-  - `EpisodeClusterRerankRetrieval` or a combined `ContextualizedEpisodeRetrieval`: build anchored episode clusters, deduplicate overlaps under a return budget, rerank clusters with the runtime reranker, prioritize near-nucleus episodes when the budget is tight, and emit final episodes chronologically.
   - `STMConsolidationEvolution`: expose STM overflow as an explicit event that summarizes evicted episodes, retains/update a session summary, and copies raw evicted episodes into LTM. Current sliding-window trimming does not preserve enough eviction provenance for this declaratively.
   - `ProfileFeatureEvolution`: maintain structured profile features with category/tag/feature/value plus citations/source episode ids, supporting add/delete/consolidate or upsert-style updates rather than only free-text profile records.
   - Optional `RetrievalAgentRetrieval`: route direct retrieval vs split-query vs chain-of-query, run sub-queries/iterative rewrites, and rerank final candidates against the concatenated multi-query history.
