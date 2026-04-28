@@ -1158,6 +1158,170 @@ def test_retrieval_can_target_declared_topology_layer() -> None:
     assert [record.text for record in packet_out.retrieved.items] == ["episodic second"]
 
 
+def test_parent_episode_expansion_dedupes_sentence_hits_and_uses_best_numeric_score() -> None:
+    from memprimitive.baselines import ParentEpisodeExpansionRetrieval
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="episodic"),
+                StoreLayerSpec(name="sentence"),
+            ]
+        )
+    )
+    parent = MemoryRecord(
+        record_id="episode-1",
+        unit_id="episode-unit-1",
+        layer="episodic",
+        text="Alice discussed graph memory, then Bob asked about tea.",
+        timestamp="2026-01-01T00:00:00+00:00",
+    )
+    store.append(parent)
+    hit_a = MemoryRecord(
+        record_id="sentence-1",
+        unit_id="sentence-unit-1",
+        layer="sentence",
+        text="Alice discussed graph memory.",
+        timestamp="2026-01-01T00:00:01+00:00",
+        metadata={
+            "parent_episode_record_id": "episode-1",
+            "provenance": {"sentence_index": 0, "source": "sentence_split"},
+        },
+    )
+    hit_b = MemoryRecord(
+        record_id="sentence-2",
+        unit_id="sentence-unit-2",
+        layer="sentence",
+        text="Bob asked about tea.",
+        timestamp="2026-01-01T00:00:02+00:00",
+        metadata={
+            "provenance": {
+                "parent_episode_record_id": "episode-1",
+                "sentence_index": 1,
+                "source": "sentence_split",
+            }
+        },
+    )
+
+    packet_out, store_out = ParentEpisodeExpansionRetrieval(top_k=3, episode_layer="episodic").run(
+        Packet(
+            retrieved=RetrievedSet(
+                items=[hit_a, hit_b],
+                scores=[
+                    {"record_id": "sentence-1", "score": 0.2, "strategy": "embedding_similarity"},
+                    {"record_id": "sentence-2", "score": 0.9, "strategy": "embedding_similarity"},
+                ],
+            )
+        ),
+        store,
+    )
+
+    assert store_out.count("episodic") == 1
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["episode-1"]
+    score = packet_out.retrieved.scores[0]
+    assert score["record_id"] == "episode-1"
+    assert score["score"] == 0.9
+    assert score["source_hit_record_id"] == "sentence-2"
+    assert score["first_hit_record_id"] == "sentence-1"
+    assert score["source_score"]["record_id"] == "sentence-2"
+    assert score["parent_id_field"] == "parent_episode_record_id"
+    assert score["hit_provenance"]["sentence_index"] == 1
+    assert packet_out.retrieved.trace["input_hit_ids"] == ["sentence-1", "sentence-2"]
+    assert packet_out.retrieved.trace["successful_parent_ids"] == ["episode-1"]
+    assert packet_out.retrieved.trace["duplicate_parent_count"] == 1
+    assert [entry["status"] for entry in packet_out.retrieved.trace["hit_to_parent"]] == ["resolved", "resolved"]
+
+
+def test_parent_episode_expansion_skips_missing_and_unresolved_parent_ids() -> None:
+    from memprimitive.baselines import ParentEpisodeExpansionRetrieval
+
+    store = MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="episodic"),
+                StoreLayerSpec(name="sentence"),
+            ]
+        )
+    )
+    store.append(
+        MemoryRecord(
+            record_id="episode-1",
+            unit_id="episode-unit-1",
+            layer="episodic",
+            text="Grounded parent episode.",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+    )
+    missing_parent_hit = MemoryRecord(
+        record_id="sentence-missing-parent",
+        unit_id="sentence-unit-1",
+        layer="sentence",
+        text="A derivative hit without provenance.",
+        timestamp="2026-01-01T00:00:01+00:00",
+        metadata={},
+    )
+    unresolved_parent_hit = MemoryRecord(
+        record_id="sentence-unresolved-parent",
+        unit_id="sentence-unit-2",
+        layer="sentence",
+        text="A derivative hit for an absent parent.",
+        timestamp="2026-01-01T00:00:02+00:00",
+        metadata={"source_episode_record_id": "episode-missing"},
+    )
+    resolved_hit = MemoryRecord(
+        record_id="sentence-resolved-parent",
+        unit_id="sentence-unit-3",
+        layer="sentence",
+        text="A derivative hit for the stored parent.",
+        timestamp="2026-01-01T00:00:03+00:00",
+        metadata={"episode_record_id": "episode-1"},
+    )
+
+    packet_out, _ = ParentEpisodeExpansionRetrieval(top_k=3, episode_layer="episodic").run(
+        Packet(retrieved=RetrievedSet(items=[missing_parent_hit, unresolved_parent_hit, resolved_hit], scores=[])),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["episode-1"]
+    trace = packet_out.retrieved.trace
+    assert trace["missing_parent_count"] == 1
+    assert trace["unresolved_parent_count"] == 1
+    assert trace["successful_parent_ids"] == ["episode-1"]
+    assert [entry["status"] for entry in trace["hit_to_parent"]] == [
+        "missing_parent_id",
+        "parent_not_found",
+        "resolved",
+    ]
+
+
+def test_parent_episode_expansion_returns_empty_when_packet_has_no_retrieved_set() -> None:
+    from memprimitive.baselines import ParentEpisodeExpansionRetrieval
+
+    store = MemoryStore()
+    before_count = store.count()
+
+    packet_out, store_out = ParentEpisodeExpansionRetrieval(top_k=2).run(Packet(), store)
+
+    assert store_out.count() == before_count
+    assert packet_out.retrieved is not None
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+    assert packet_out.retrieved.trace["candidate_count"] == 0
+    assert packet_out.retrieved.trace["input_hit_ids"] == []
+    assert packet_out.retrieved.trace["returned_count"] == 0
+
+
+def test_parent_episode_expansion_retrieval_is_registered_and_exported() -> None:
+    import memprimitive.baselines as pkg
+    from memprimitive.baselines import ParentEpisodeExpansionRetrieval
+
+    assert ParentEpisodeExpansionRetrieval.__name__ == "ParentEpisodeExpansionRetrieval"
+    assert "ParentEpisodeExpansionRetrieval" in registered_baseline_class_names()
+    assert "ParentEpisodeExpansionRetrieval" in pkg.__all__
+
+
 def test_layer_aware_retrieval_merges_per_layer_results_and_applies_global_top_k() -> None:
     from memprimitive.baselines import EmbeddingSimilarityRetrieval, LayerAwareRetrieval, RecencyRetrieval
 

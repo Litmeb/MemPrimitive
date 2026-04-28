@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 import json
 from math import sqrt
@@ -697,6 +697,54 @@ def _empty_retrieved(
         },
     )
     return _with_retrieved(packet, retrieved, query=query)
+
+
+def _normalize_parent_id_fields(parent_id_fields: Iterable[str]) -> tuple[str, ...]:
+    raw_fields = (parent_id_fields,) if isinstance(parent_id_fields, str) else parent_id_fields
+    normalized = tuple(str(field).strip() for field in raw_fields if str(field).strip())
+    if not normalized:
+        raise ValueError("ParentEpisodeExpansionRetrieval requires at least one parent_id_field.")
+    return normalized
+
+
+def _score_dict_at(scores: list[dict[str, Any]], index: int) -> dict[str, Any]:
+    if index >= len(scores):
+        return {}
+    raw_score = scores[index]
+    return dict(raw_score) if isinstance(raw_score, Mapping) else {}
+
+
+def _numeric_score_value(score: Mapping[str, Any]) -> float | None:
+    value = score.get("score")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _explicit_record_id_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return str(value)
+
+
+def _explicit_parent_id_from_record(record, parent_id_fields: tuple[str, ...]) -> tuple[str | None, str | None, str | None]:
+    metadata = record.metadata if isinstance(getattr(record, "metadata", None), dict) else {}
+    for field in parent_id_fields:
+        parent_id = _explicit_record_id_value(metadata.get(field))
+        if parent_id is not None:
+            return parent_id, field, "metadata"
+
+    provenance = metadata.get("provenance")
+    if isinstance(provenance, dict):
+        for field in parent_id_fields:
+            parent_id = _explicit_record_id_value(provenance.get(field))
+            if parent_id is not None:
+                return parent_id, field, "provenance"
+
+    return None, None, None
 
 
 class RecencyRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
@@ -1529,6 +1577,201 @@ class GraphNeighborRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return replace(packet, retrieved=retrieved, trace=trace), store
 
 
+class ParentEpisodeExpansionRetrieval(RetrievalModule):
+    """Expand sentence/derivative retrieval hits to explicit parent episodes."""
+
+    DEFAULT_PARENT_ID_FIELDS: ClassVar[tuple[str, ...]] = (
+        "parent_episode_record_id",
+        "episode_record_id",
+        "source_episode_record_id",
+    )
+
+    spec = ModuleSpec(
+        name="parent_episode_expansion_retrieval",
+        slot="retrieval",
+        input_requirements=("retrieved.items", "record.metadata.parent_episode_record_id"),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        top_k: int = 3,
+        *,
+        episode_layer: str = "episodic",
+        parent_id_fields: Iterable[str] = DEFAULT_PARENT_ID_FIELDS,
+        source: str = "retrieved",
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("ParentEpisodeExpansionRetrieval requires top_k > 0.")
+        normalized_episode_layer = str(episode_layer).strip()
+        if not normalized_episode_layer:
+            raise ValueError("ParentEpisodeExpansionRetrieval requires a non-empty episode_layer.")
+        normalized_source = _normalize_retrieval_source(source)
+        if normalized_source != "retrieved":
+            raise ValueError("ParentEpisodeExpansionRetrieval only supports source='retrieved'.")
+        self.top_k = top_k
+        self.episode_layer = normalized_episode_layer
+        self.parent_id_fields = _normalize_parent_id_fields(parent_id_fields)
+        self.source = normalized_source
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        retrieved_input = packet.retrieved
+        hit_records = [] if retrieved_input is None else list(retrieved_input.items)
+        input_hit_ids = [getattr(record, "record_id", None) for record in hit_records]
+        if not hit_records:
+            packet = _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source=self.source,
+                episode_layer=self.episode_layer,
+                parent_id_fields=list(self.parent_id_fields),
+                candidate_count=0,
+                input_hit_ids=input_hit_ids,
+                successful_parent_ids=[],
+                missing_parent_count=0,
+                hit_to_parent=[],
+                duplicate_parent_count=0,
+                unresolved_parent_count=0,
+                returned_count=0,
+            )
+            return packet, store
+
+        parent_records_by_id: dict[str, Any] = {}
+        for record in store.iter_records(self.episode_layer):
+            parent_records_by_id.setdefault(record.record_id, record)
+
+        entries_by_parent_id: dict[str, dict[str, Any]] = {}
+        ordered_parent_ids: list[str] = []
+        successful_parent_ids: list[str] = []
+        seen_successful_parent_ids: set[str] = set()
+        hit_to_parent: list[dict[str, Any]] = []
+        missing_parent_count = 0
+        duplicate_parent_count = 0
+        unresolved_parent_count = 0
+
+        input_scores = retrieved_input.scores if retrieved_input is not None else []
+        for hit_index, hit_record in enumerate(hit_records):
+            hit_record_id = getattr(hit_record, "record_id", None)
+            source_score = _score_dict_at(input_scores, hit_index)
+            parent_id, parent_id_field, parent_id_source = _explicit_parent_id_from_record(
+                hit_record,
+                self.parent_id_fields,
+            )
+            if parent_id is None:
+                missing_parent_count += 1
+                hit_to_parent.append(
+                    {
+                        "hit_record_id": hit_record_id,
+                        "parent_record_id": None,
+                        "parent_id_field": None,
+                        "parent_id_source": None,
+                        "status": "missing_parent_id",
+                    }
+                )
+                continue
+
+            parent_record = parent_records_by_id.get(parent_id)
+            if parent_record is None:
+                unresolved_parent_count += 1
+                hit_to_parent.append(
+                    {
+                        "hit_record_id": hit_record_id,
+                        "parent_record_id": parent_id,
+                        "parent_id_field": parent_id_field,
+                        "parent_id_source": parent_id_source,
+                        "status": "parent_not_found",
+                    }
+                )
+                continue
+
+            hit_to_parent.append(
+                {
+                    "hit_record_id": hit_record_id,
+                    "parent_record_id": parent_id,
+                    "parent_id_field": parent_id_field,
+                    "parent_id_source": parent_id_source,
+                    "status": "resolved",
+                }
+            )
+            if parent_id not in seen_successful_parent_ids:
+                seen_successful_parent_ids.add(parent_id)
+                successful_parent_ids.append(parent_id)
+
+            metadata = hit_record.metadata if isinstance(getattr(hit_record, "metadata", None), dict) else {}
+            hit_provenance = metadata.get("provenance")
+            copied_hit_provenance = dict(hit_provenance) if isinstance(hit_provenance, dict) else None
+            numeric_score = _numeric_score_value(source_score)
+
+            entry = entries_by_parent_id.get(parent_id)
+            if entry is None:
+                entries_by_parent_id[parent_id] = {
+                    "record": parent_record,
+                    "first_hit_record_id": hit_record_id,
+                    "best_score": source_score,
+                    "best_numeric_score": numeric_score,
+                    "source_hit_record_id": hit_record_id,
+                    "parent_id_field": parent_id_field,
+                    "parent_id_source": parent_id_source,
+                    "hit_provenance": copied_hit_provenance,
+                }
+                ordered_parent_ids.append(parent_id)
+                continue
+
+            duplicate_parent_count += 1
+            best_numeric_score = entry["best_numeric_score"]
+            if numeric_score is not None and (best_numeric_score is None or numeric_score > best_numeric_score):
+                entry["best_score"] = source_score
+                entry["best_numeric_score"] = numeric_score
+                entry["source_hit_record_id"] = hit_record_id
+                entry["parent_id_field"] = parent_id_field
+                entry["parent_id_source"] = parent_id_source
+                entry["hit_provenance"] = copied_hit_provenance
+
+        selected_parent_ids = ordered_parent_ids[: self.top_k]
+        items = [entries_by_parent_id[parent_id]["record"] for parent_id in selected_parent_ids]
+        scores: list[dict[str, Any]] = []
+        for rank, parent_id in enumerate(selected_parent_ids, start=1):
+            entry = entries_by_parent_id[parent_id]
+            score_info: dict[str, Any] = {
+                "record_id": parent_id,
+                "rank": rank,
+                "strategy": "parent_episode_expansion",
+                "source_score": dict(entry["best_score"]),
+                "source_hit_record_id": entry["source_hit_record_id"],
+                "first_hit_record_id": entry["first_hit_record_id"],
+                "parent_id_field": entry["parent_id_field"],
+                "parent_id_source": entry["parent_id_source"],
+            }
+            numeric_score = _numeric_score_value(score_info["source_score"])
+            if numeric_score is not None:
+                score_info["score"] = numeric_score
+            if entry["hit_provenance"] is not None:
+                score_info["hit_provenance"] = dict(entry["hit_provenance"])
+            scores.append(score_info)
+
+        retrieved = RetrievedSet(
+            items=items,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "source": self.source,
+                "episode_layer": self.episode_layer,
+                "parent_id_fields": list(self.parent_id_fields),
+                "candidate_count": len(hit_records),
+                "input_hit_ids": input_hit_ids,
+                "successful_parent_ids": successful_parent_ids,
+                "missing_parent_count": missing_parent_count,
+                "hit_to_parent": hit_to_parent,
+                "duplicate_parent_count": duplicate_parent_count,
+                "unresolved_parent_count": unresolved_parent_count,
+                "returned_count": len(items),
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+
 class ExpandRetrievedGraphNeighbors(RetrievalModule):
     """Expand graph neighbors from ``packet.retrieved.items`` seed records."""
 
@@ -2164,6 +2407,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     TripleMemoryRetrieval,
     BM25Retrieval,
     GraphNeighborRetrieval,
+    ParentEpisodeExpansionRetrieval,
     ExpandRetrievedGraphNeighbors,
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
