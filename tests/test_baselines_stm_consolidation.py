@@ -40,6 +40,7 @@ def _store() -> MemoryStore:
             [
                 StoreLayerSpec(name="working"),
                 StoreLayerSpec(name="episodic"),
+                StoreLayerSpec(name="sentence"),
                 StoreLayerSpec(name="session_summary"),
             ]
         )
@@ -216,6 +217,47 @@ def test_stm_consolidation_ltm_raw_episode_text_is_not_replaced_by_summary(
 
     assert store.iter_records("episodic")[0].text == "raw first episode"
     assert store.iter_records("session_summary")[0].text == "summary::stm-1"
+
+
+def test_stm_consolidation_indexes_sentence_derivatives_for_new_ltm_episodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memprimitive.baselines import STMConsolidationEvolution
+    from memprimitive.utils import _runtime
+
+    fake_runtime = _FakeSTMSummarizationRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    store = _store()
+    _append_record(
+        store,
+        layer="working",
+        record_id="stm-1",
+        text="Alice likes tea. Bob asks why.",
+        session_id="sess-1",
+    )
+    _append_record(
+        store,
+        layer="working",
+        record_id="stm-2",
+        text="Retained episode.",
+        session_id="sess-1",
+    )
+
+    packet_out, store = STMConsolidationEvolution(record_budget=1).run(Packet(), store)
+
+    ltm_record = store.iter_records("episodic")[0]
+    sentence_records = store.iter_records("sentence")
+    assert [record.text for record in sentence_records] == ["Alice likes tea.", "Bob asks why."]
+    assert [record.metadata["sentence_index"] for record in sentence_records] == [0, 1]
+    assert all(record.metadata["parent_episode_record_id"] == ltm_record.record_id for record in sentence_records)
+    assert all(record.metadata["source_episode_record_id"] == ltm_record.record_id for record in sentence_records)
+    assert [record.metadata["provenance"]["sentence_index"] for record in sentence_records] == [0, 1]
+    assert all(
+        record.metadata["provenance"]["parent_episode_record_id"] == ltm_record.record_id for record in sentence_records
+    )
+    trace = packet_out.trace["memory_evolution"]
+    assert trace["indexed_sentence_record_ids"] == [record.record_id for record in sentence_records]
+    assert trace["effects"][0]["indexed_sentence_record_ids"] == [record.record_id for record in sentence_records]
 
 
 def test_stm_consolidation_is_registered_and_exported() -> None:

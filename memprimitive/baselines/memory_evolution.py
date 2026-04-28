@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 from math import sqrt
+import re
 from typing import Any, Final
 
 from ..contracts import RECORD_GRAPH_LINKS_CONTRACT, TOPOLOGY_GRAPH_LAYER_CONTRACT
@@ -77,6 +78,15 @@ def _record_token_count(record: MemoryRecord) -> int:
     return len(record.text.split())
 
 
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    raw_parts = _SENTENCE_BOUNDARY.split(text.strip())
+    sentences = [part.strip() for part in raw_parts if part.strip()]
+    return sentences or [text.strip()]
+
+
 class AppendOnlyEvolution(MemoryEvolutionModule):
     """Run an optional extra evolution pass over already-organized memory.
 
@@ -144,6 +154,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
         *,
         working_layer: str = "working",
         ltm_episode_layer: str = "episodic",
+        ltm_sentence_layer: str = "sentence",
         summary_layer: str = "session_summary",
         record_budget: int | None = 20,
         token_budget: int | None = None,
@@ -152,11 +163,14 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
     ) -> None:
         self.working_layer = str(working_layer).strip()
         self.ltm_episode_layer = str(ltm_episode_layer).strip()
+        self.ltm_sentence_layer = str(ltm_sentence_layer).strip()
         self.summary_layer = str(summary_layer).strip()
         if not self.working_layer:
             raise ValueError("working_layer must be non-empty.")
         if not self.ltm_episode_layer:
             raise ValueError("ltm_episode_layer must be non-empty.")
+        if not self.ltm_sentence_layer:
+            raise ValueError("ltm_sentence_layer must be non-empty.")
         if not self.summary_layer:
             raise ValueError("summary_layer must be non-empty.")
         if record_budget is None and token_budget is None:
@@ -183,6 +197,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
         effects: list[dict[str, Any]] = []
         evicted_record_ids: list[str] = []
         moved_ltm_record_ids: list[str] = []
+        indexed_sentence_record_ids: list[str] = []
         deleted_working_record_ids: list[str] = []
         summary_updates: list[dict[str, Any]] = []
 
@@ -201,6 +216,15 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
                 self._build_ltm_episode_record(store, source_record=record, session_scope=scope)
                 for record in evicted_records
             ]
+            sentence_records = [
+                sentence_record
+                for ltm_record in ltm_records
+                for sentence_record in self._build_ltm_sentence_records(
+                    store,
+                    episode_record=ltm_record,
+                    session_scope=scope,
+                )
+            ]
             new_summary_text = self._rewrite_summary(
                 old_summary_record=old_summary_record,
                 evicted_records=evicted_records,
@@ -216,6 +240,8 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
 
             for ltm_record in ltm_records:
                 store.append(ltm_record)
+            for sentence_record in sentence_records:
+                store.append(sentence_record)
             store.append(new_summary_record)
             for old_record in old_summary_records:
                 try:
@@ -228,8 +254,10 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
 
             current_evicted_ids = [record.record_id for record in evicted_records]
             current_ltm_ids = [record.record_id for record in ltm_records]
+            current_sentence_ids = [record.record_id for record in sentence_records]
             evicted_record_ids.extend(current_evicted_ids)
             moved_ltm_record_ids.extend(current_ltm_ids)
+            indexed_sentence_record_ids.extend(current_sentence_ids)
             summary_update = {
                 "session_scope": deepcopy(scope),
                 "summary_old_record_id": old_summary_record.record_id if old_summary_record is not None else None,
@@ -243,6 +271,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
                     "evicted_record_ids": current_evicted_ids,
                     "retained_record_ids": [record.record_id for record in retained_records],
                     "moved_ltm_record_ids": current_ltm_ids,
+                    "indexed_sentence_record_ids": current_sentence_ids,
                     "summary_old_record_id": summary_update["summary_old_record_id"],
                     "summary_new_record_id": new_summary_record.record_id,
                 }
@@ -253,6 +282,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
             "module": self.spec.name,
             "working_layer": self.working_layer,
             "ltm_episode_layer": self.ltm_episode_layer,
+            "ltm_sentence_layer": self.ltm_sentence_layer,
             "summary_layer": self.summary_layer,
             "record_budget": self.record_budget,
             "token_budget": self.token_budget,
@@ -260,6 +290,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
             "scope_metadata_keys": list(self.scope_metadata_keys),
             "evicted_record_ids": evicted_record_ids,
             "moved_ltm_record_ids": moved_ltm_record_ids,
+            "indexed_sentence_record_ids": indexed_sentence_record_ids,
             "deleted_working_record_ids": deleted_working_record_ids,
             "summary_updates": summary_updates,
             "effects": effects,
@@ -330,6 +361,53 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
             embedding=None if source_record.embedding is None else list(source_record.embedding),
             metadata=metadata,
         )
+
+    def _build_ltm_sentence_records(
+        self,
+        store: MemoryStore,
+        *,
+        episode_record: MemoryRecord,
+        session_scope: dict[str, Any],
+    ) -> list[MemoryRecord]:
+        if not store.has_layer(self.ltm_sentence_layer):
+            return []
+
+        sentence_records: list[MemoryRecord] = []
+        for sentence_index, sentence_text in enumerate(_split_sentences(episode_record.text)):
+            sequence_id = store.next_sequence_id()
+            metadata = deepcopy(episode_record.metadata)
+            provenance = metadata.get("provenance")
+            if not isinstance(provenance, dict):
+                provenance = {}
+            provenance = {
+                **deepcopy(provenance),
+                "source": "stm_consolidation_sentence_split",
+                "parent_episode_record_id": episode_record.record_id,
+                "sentence_index": sentence_index,
+            }
+            metadata["provenance"] = provenance
+            metadata["sentence_index"] = sentence_index
+            metadata["parent_episode_record_id"] = episode_record.record_id
+            metadata["source_episode_record_id"] = episode_record.record_id
+            metadata["stm_consolidation_sentence"] = {
+                "episode_layer": self.ltm_episode_layer,
+                "sentence_layer": self.ltm_sentence_layer,
+                "parent_episode_record_id": episode_record.record_id,
+                "sentence_index": sentence_index,
+                "session_scope": deepcopy(session_scope),
+            }
+            sentence_records.append(
+                MemoryRecord(
+                    record_id=f"rec-{sequence_id}",
+                    unit_id=f"{episode_record.unit_id}:sentence:{sentence_index}",
+                    layer=self.ltm_sentence_layer,
+                    text=sentence_text,
+                    timestamp=episode_record.timestamp,
+                    embedding=None,
+                    metadata=metadata,
+                )
+            )
+        return sentence_records
 
     def _rewrite_summary(
         self,

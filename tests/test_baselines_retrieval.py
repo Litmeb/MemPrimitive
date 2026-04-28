@@ -1565,7 +1565,7 @@ def test_episode_cluster_rerank_dedupes_overlapping_clusters_and_merges_provenan
     assert packet_out.retrieved.trace["deduped_duplicate_count"] == 2
 
 
-def test_episode_cluster_rerank_partial_budget_keeps_nucleus_then_nearest_neighbors() -> None:
+def test_episode_cluster_rerank_partial_budget_prefers_forward_neighbor_before_backward_on_ties() -> None:
     from memprimitive.baselines import EpisodeClusterRerankRetrieval
 
     store, records = _temporal_episode_store(
@@ -1596,7 +1596,7 @@ def test_episode_cluster_rerank_partial_budget_keeps_nucleus_then_nearest_neighb
     )
 
     assert packet_out.retrieved is not None
-    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-3", "ep-2", "ep-4"]
+    assert [record.record_id for record in packet_out.retrieved.items] == ["ep-3", "ep-4", "ep-2"]
     assert packet_out.retrieved.trace["budget_truncated_count"] == 2
 
 
