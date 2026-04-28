@@ -278,10 +278,15 @@ def builtin_write_tool_spec(name: str, *, module_name: str) -> WriteToolSpec:
             },
             executor=_build_graph_link_delete_executor(module_name=module_name),
         )
+    if normalized in {"UPSERT_PROFILE_FEATURE", "DELETE_PROFILE_FEATURE"}:
+        from ._profile_feature_tools import profile_feature_tool_spec
+
+        return profile_feature_tool_spec(normalized, module_name=module_name)
     raise ValueError(
         f"Unknown built-in write tool {name!r}. Supported values: "
         "ADD, UPDATE, DELETE, GRAPH_ADD, GRAPH_UPDATE, GRAPH_DELETE, "
-        "GRAPH_ADD_LINK, GRAPH_UPDATE_LINK, GRAPH_DELETE_LINK."
+        "GRAPH_ADD_LINK, GRAPH_UPDATE_LINK, GRAPH_DELETE_LINK, "
+        "UPSERT_PROFILE_FEATURE, DELETE_PROFILE_FEATURE."
     )
 
 

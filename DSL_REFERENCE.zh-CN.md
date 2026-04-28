@@ -1802,7 +1802,7 @@ class WriteToolResult:
     store: MemoryStore
 ```
 
-### 10.2 九个内置 write tools
+### 10.2 十一个内置 write tools
 
 1. `ADD`
    新增普通 memory record。
@@ -1838,17 +1838,43 @@ class WriteToolResult:
    全量替换 outgoing links。
 9. `GRAPH_DELETE_LINK`
    删除部分 outgoing links。
+10. `UPSERT_PROFILE_FEATURE`
+   新增或更新一条结构化 profile feature。
+   身份键为：
+   1. `target_layer`
+   2. `set_id`
+   3. `category`
+   4. `tag`
+   5. `feature`
+   参数：
+   1. `category` 必填
+   2. `tag` 必填
+   3. `feature` 必填
+   4. `value` 必填，作为 record text
+   5. `set_id` 可选
+   6. `target_layer` 可选；没有时使用模块的 `target_layer`
+   7. `source_episode_record_ids` 可选
+   8. `citation_record_ids` 可选
+   9. `metadata` 可选
+   写入时会同时维护 `metadata["profile_feature"]`、顶层 `category/tag/feature/value`，以及 `source_episode_record_ids` / `citation_record_ids` / `citations`。
+11. `DELETE_PROFILE_FEATURE`
+   删除一条结构化 profile feature。
+   参数：
+   1. `record_id` 可选
+   2. 或使用 `category` / `tag` / `feature` / `set_id` / `target_layer` 做精确 key 删除
+   3. `reason` 可选
 
 ### 10.3 默认工具的行为要点
 
 1. 所有工具都要求参数是 JSON object。
 2. 参数检查基于 `parameters_json_schema` 做最小 JSON type 校验。
-3. graph link 三个工具只改：
+3. profile feature 工具只把结构化 feature 存成普通 `MemoryRecord`，不新增 pipeline slot；通常配合 `LLMFunctionCallEvolution(tools=["UPSERT_PROFILE_FEATURE", "DELETE_PROFILE_FEATURE"])` 使用。
+4. graph link 三个工具只改：
    1. `metadata["graph"]["links"]`
    2. `link_count`
    3. `last_linked_at`
    不会顺便改文本或 triples。
-4. tool 执行结果会累计到 trace：
+5. tool 执行结果会累计到 trace：
    1. `tool_calls`
    2. `effects`
    3. `written_record_ids`
