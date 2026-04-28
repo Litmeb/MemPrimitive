@@ -347,7 +347,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 ### Other Boundary Papers
 
-- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can now cover the contextualized episodic recall spine of the memory system at a mechanism level. The remaining gaps are not the sentence-hit -> parent -> temporal-context -> cluster-rerank recall path, but the surrounding STM consolidation, structured profile maintenance, and optional retrieval-agent orchestration.
+- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can now cover the contextualized episodic recall spine and explicit STM overflow/consolidation path at a mechanism level. The remaining gaps are structured profile maintenance and optional retrieval-agent orchestration.
 - What the current framework can already approximate without new modules:
   - working/short-term episodes -> bounded temporal layer plus `BufferRetrieval` / `RecencyRetrieval`
   - STM/session summary -> `HierarchicalEvolution` or `LLMRepresentation` + summary rewrite/retention
@@ -359,10 +359,10 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
   - `ParentEpisodeExpansionRetrieval` now covers the sentence/derivative hit -> source episode expansion step using explicit metadata/provenance parent ids, without record-text parsing.
   - `TemporalNeighborExpansionRetrieval` now covers bounded previous/following episode expansion around retrieved nucleus episodes within matching session/user/agent scope, with chronological dedupe and per-nucleus cluster trace.
   - `EpisodeClusterRerankRetrieval` now covers the final contextualized episodic recall stage: consume temporal episode clusters, rerank clusters through the shared runtime reranker, unify/dedupe under an episode budget with nucleus-near fallback when budget is tight, and return final episodes chronologically.
+  - `STMConsolidationEvolution` now covers explicit STM overflow/consolidation: per session scope it keeps the newest working records, copy-appends evicted raw episodes into LTM, rewrites one current session summary, and deletes consolidated STM records with trace provenance.
 - Follow-up audit note: `EpisodeClusterRerankRetrieval` has focused code coverage, is registered/exported, and now has a matching `DSL_REFERENCE.zh-CN.md` retrieval-section entry.
 - Together, those three retrieval modules cover MemMachine's sentence-derived hit -> parent episode -> temporal neighbor cluster -> cluster-level rerank/unify/chronological-return path without adding a combined paper-specific `ContextualizedEpisodeRetrieval`.
 - Modules still needed for a faithful reconstruction:
-  - `STMConsolidationEvolution`: expose STM overflow as an explicit event that summarizes evicted episodes, retains/update a session summary, and copies raw evicted episodes into LTM. Current sliding-window trimming does not preserve enough eviction provenance for this declaratively.
   - `ProfileFeatureEvolution`: maintain structured profile features with category/tag/feature/value plus citations/source episode ids, supporting add/delete/consolidate or upsert-style updates rather than only free-text profile records.
   - Optional `RetrievalAgentRetrieval`: route direct retrieval vs split-query vs chain-of-query, run sub-queries/iterative rewrites, and rerank final candidates against the concatenated multi-query history.
 - `MemGPT`: latest paper + upstream repo audit suggests the current framework can cover a mechanism-level, memory-only reconstruction without adding new baseline primitive families if scope is limited to the storage/retrieval/update surfaces and allows thin example-level orchestration.

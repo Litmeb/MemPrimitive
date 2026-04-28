@@ -34,7 +34,7 @@ from ..utils._llm_function_tools import (
     project_tool_specs_for_prompt,
     write_tool_specs_require_graph_contracts,
 )
-from ..utils._runtime import Runtime
+from ..utils._runtime import Runtime, get_runtime
 from ..utils._template import (
     PromptPlan,
     ensure_prompt_plan,
@@ -55,6 +55,26 @@ def _merge_visible_records(*record_groups: list[MemoryRecord]) -> list[MemoryRec
             seen.add(record.record_id)
             merged.append(record)
     return merged
+
+
+def _metadata_token(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _scope_for_record(record: MemoryRecord, scope_metadata_keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: deepcopy(record.metadata.get(key)) for key in scope_metadata_keys}
+
+
+def _scope_group_key(scope: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    return tuple((key, _metadata_token(value)) for key, value in scope.items())
+
+
+def _record_matches_scope(record: MemoryRecord, scope: dict[str, Any]) -> bool:
+    return all(record.metadata.get(key) == value for key, value in scope.items())
+
+
+def _record_token_count(record: MemoryRecord) -> int:
+    return len(record.text.split())
 
 
 class AppendOnlyEvolution(MemoryEvolutionModule):
@@ -100,6 +120,293 @@ class AppendOnlyEvolution(MemoryEvolutionModule):
             "effects": [],
         }
         return replace(packet, trace=trace), store
+
+
+class STMConsolidationEvolution(MemoryEvolutionModule):
+    """Consolidate STM overflow into raw LTM episodes plus one session summary.
+
+    This module scans ``working_layer`` directly instead of relying on store
+    sliding-window trimming. For each metadata scope, it keeps the newest STM
+    records within the configured budget, copy-appends older records into the
+    LTM episode layer, rewrites the current session summary, and then deletes
+    the consolidated STM records.
+    """
+
+    spec = ModuleSpec(
+        name="stm_consolidation_evolution",
+        slot="memory_evolution",
+        output_guarantees=("trace.memory_evolution.effects",),
+        side_effects=("modify_store", "append_records", "rewrite_records", "delete_records"),
+    )
+
+    def __init__(
+        self,
+        *,
+        working_layer: str = "working",
+        ltm_episode_layer: str = "episodic",
+        summary_layer: str = "session_summary",
+        record_budget: int | None = 20,
+        token_budget: int | None = None,
+        summary_max_sentences: int = 3,
+        scope_metadata_keys: tuple[str, ...] = ("session_id",),
+    ) -> None:
+        self.working_layer = str(working_layer).strip()
+        self.ltm_episode_layer = str(ltm_episode_layer).strip()
+        self.summary_layer = str(summary_layer).strip()
+        if not self.working_layer:
+            raise ValueError("working_layer must be non-empty.")
+        if not self.ltm_episode_layer:
+            raise ValueError("ltm_episode_layer must be non-empty.")
+        if not self.summary_layer:
+            raise ValueError("summary_layer must be non-empty.")
+        if record_budget is None and token_budget is None:
+            raise ValueError("STMConsolidationEvolution requires at least one active budget.")
+        if record_budget is not None and int(record_budget) <= 0:
+            raise ValueError("record_budget must be positive when provided.")
+        if token_budget is not None and int(token_budget) <= 0:
+            raise ValueError("token_budget must be positive when provided.")
+        if int(summary_max_sentences) <= 0:
+            raise ValueError("summary_max_sentences must be positive.")
+        normalized_scope_keys = tuple(str(key).strip() for key in scope_metadata_keys)
+        if not normalized_scope_keys or any(not key for key in normalized_scope_keys):
+            raise ValueError("scope_metadata_keys must contain at least one non-empty key.")
+
+        self.record_budget = None if record_budget is None else int(record_budget)
+        self.token_budget = None if token_budget is None else int(token_budget)
+        self.summary_max_sentences = int(summary_max_sentences)
+        self.scope_metadata_keys = tuple(dict.fromkeys(normalized_scope_keys))
+
+    def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        self._validate_store_layers(store)
+        scoped_groups = self._group_working_records(store)
+
+        effects: list[dict[str, Any]] = []
+        evicted_record_ids: list[str] = []
+        moved_ltm_record_ids: list[str] = []
+        deleted_working_record_ids: list[str] = []
+        summary_updates: list[dict[str, Any]] = []
+
+        for group in scoped_groups:
+            scope = group["session_scope"]
+            records = group["records"]
+            retained_records = self._select_retained_records(records)
+            retained_ids = {record.record_id for record in retained_records}
+            evicted_records = [record for record in records if record.record_id not in retained_ids]
+            if not evicted_records:
+                continue
+
+            old_summary_records = self._summary_records_for_scope(store, scope)
+            old_summary_record = old_summary_records[-1] if old_summary_records else None
+            ltm_records = [
+                self._build_ltm_episode_record(store, source_record=record, session_scope=scope)
+                for record in evicted_records
+            ]
+            new_summary_text = self._rewrite_summary(
+                old_summary_record=old_summary_record,
+                evicted_records=evicted_records,
+                session_scope=scope,
+            )
+            new_summary_record = self._build_summary_record(
+                store,
+                summary_text=new_summary_text,
+                session_scope=scope,
+                old_summary_record=old_summary_record,
+                evicted_records=evicted_records,
+            )
+
+            for ltm_record in ltm_records:
+                store.append(ltm_record)
+            store.append(new_summary_record)
+            for old_record in old_summary_records:
+                try:
+                    store.delete_record(self.summary_layer, old_record.record_id)
+                except KeyError:
+                    pass
+            for evicted_record in evicted_records:
+                deleted = store.delete_record(self.working_layer, evicted_record.record_id)
+                deleted_working_record_ids.append(deleted.record_id)
+
+            current_evicted_ids = [record.record_id for record in evicted_records]
+            current_ltm_ids = [record.record_id for record in ltm_records]
+            evicted_record_ids.extend(current_evicted_ids)
+            moved_ltm_record_ids.extend(current_ltm_ids)
+            summary_update = {
+                "session_scope": deepcopy(scope),
+                "summary_old_record_id": old_summary_record.record_id if old_summary_record is not None else None,
+                "summary_new_record_id": new_summary_record.record_id,
+            }
+            summary_updates.append(summary_update)
+            effects.append(
+                {
+                    "effect_type": "stm_consolidation",
+                    "session_scope": deepcopy(scope),
+                    "evicted_record_ids": current_evicted_ids,
+                    "retained_record_ids": [record.record_id for record in retained_records],
+                    "moved_ltm_record_ids": current_ltm_ids,
+                    "summary_old_record_id": summary_update["summary_old_record_id"],
+                    "summary_new_record_id": new_summary_record.record_id,
+                }
+            )
+
+        trace = copy_trace(packet)
+        trace["memory_evolution"] = {
+            "module": self.spec.name,
+            "working_layer": self.working_layer,
+            "ltm_episode_layer": self.ltm_episode_layer,
+            "summary_layer": self.summary_layer,
+            "record_budget": self.record_budget,
+            "token_budget": self.token_budget,
+            "summary_max_sentences": self.summary_max_sentences,
+            "scope_metadata_keys": list(self.scope_metadata_keys),
+            "evicted_record_ids": evicted_record_ids,
+            "moved_ltm_record_ids": moved_ltm_record_ids,
+            "deleted_working_record_ids": deleted_working_record_ids,
+            "summary_updates": summary_updates,
+            "effects": effects,
+        }
+        return replace(packet, trace=trace), store
+
+    def _validate_store_layers(self, store: MemoryStore) -> None:
+        for layer in (self.working_layer, self.ltm_episode_layer, self.summary_layer):
+            if not store.has_layer(layer):
+                raise ValueError(
+                    f"STMConsolidationEvolution requires layer {layer!r} to be declared in the store topology."
+                )
+
+    def _group_working_records(self, store: MemoryStore) -> list[dict[str, Any]]:
+        groups: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
+        for record in store.iter_records(self.working_layer):
+            scope = _scope_for_record(record, self.scope_metadata_keys)
+            key = _scope_group_key(scope)
+            group = groups.setdefault(key, {"session_scope": scope, "records": []})
+            group["records"].append(record)
+        return list(groups.values())
+
+    def _select_retained_records(self, records: list[MemoryRecord]) -> list[MemoryRecord]:
+        retained_reversed: list[MemoryRecord] = []
+        retained_tokens = 0
+        for record in reversed(records):
+            if self.record_budget is not None and len(retained_reversed) >= self.record_budget:
+                break
+            token_count = _record_token_count(record)
+            if self.token_budget is not None and retained_reversed and retained_tokens + token_count > self.token_budget:
+                break
+            retained_reversed.append(record)
+            retained_tokens += token_count
+        return list(reversed(retained_reversed))
+
+    def _summary_records_for_scope(self, store: MemoryStore, session_scope: dict[str, Any]) -> list[MemoryRecord]:
+        return [
+            record
+            for record in store.iter_records(self.summary_layer)
+            if _record_matches_scope(record, session_scope)
+        ]
+
+    def _build_ltm_episode_record(
+        self,
+        store: MemoryStore,
+        *,
+        source_record: MemoryRecord,
+        session_scope: dict[str, Any],
+    ) -> MemoryRecord:
+        sequence_id = store.next_sequence_id()
+        metadata = deepcopy(source_record.metadata)
+        metadata["stm_consolidation_source_record_id"] = source_record.record_id
+        metadata["stm_consolidation"] = {
+            "source_layer": self.working_layer,
+            "target_layer": self.ltm_episode_layer,
+            "summary_layer": self.summary_layer,
+            "source_record_id": source_record.record_id,
+            "source_unit_id": source_record.unit_id,
+            "session_scope": deepcopy(session_scope),
+            "copy_style": "raw_episode_copy_append",
+        }
+        return MemoryRecord(
+            record_id=f"rec-{sequence_id}",
+            unit_id=source_record.unit_id,
+            layer=self.ltm_episode_layer,
+            text=source_record.text,
+            timestamp=source_record.timestamp,
+            embedding=None if source_record.embedding is None else list(source_record.embedding),
+            metadata=metadata,
+        )
+
+    def _rewrite_summary(
+        self,
+        *,
+        old_summary_record: MemoryRecord | None,
+        evicted_records: list[MemoryRecord],
+        session_scope: dict[str, Any],
+    ) -> str:
+        runtime = get_runtime()
+        if hasattr(runtime, "require_llm"):
+            runtime.require_llm(capability="STMConsolidationEvolution summary rewrite")
+        records_payload: list[dict[str, Any]] = []
+        if old_summary_record is not None:
+            records_payload.append(self._serialize_summary_input_record(old_summary_record, role="previous_summary"))
+        records_payload.extend(
+            self._serialize_summary_input_record(record, role="evicted_episode")
+            for record in evicted_records
+        )
+        instruction = (
+            "Rewrite the current session summary for the provided STM consolidation scope. "
+            "Use the previous summary when present and incorporate the evicted raw STM episodes. "
+            f"Keep at most {self.summary_max_sentences} concise factual sentences. "
+            f"Session scope: {json.dumps(session_scope, ensure_ascii=False, sort_keys=True, default=str)}."
+        )
+        summary = runtime.summarize_records(
+            records=records_payload,
+            instruction=instruction,
+            max_sentences=self.summary_max_sentences,
+        )
+        return str(summary).strip() or "No summary generated."
+
+    @staticmethod
+    def _serialize_summary_input_record(record: MemoryRecord, *, role: str) -> dict[str, Any]:
+        return {
+            "role": role,
+            "record_id": record.record_id,
+            "unit_id": record.unit_id,
+            "layer": record.layer,
+            "text": record.text,
+            "timestamp": record.timestamp,
+            "metadata": deepcopy(record.metadata),
+        }
+
+    def _build_summary_record(
+        self,
+        store: MemoryStore,
+        *,
+        summary_text: str,
+        session_scope: dict[str, Any],
+        old_summary_record: MemoryRecord | None,
+        evicted_records: list[MemoryRecord],
+    ) -> MemoryRecord:
+        sequence_id = store.next_sequence_id()
+        metadata = {
+            **deepcopy(session_scope),
+            "unit_type": "summary",
+            "stm_consolidation_summary": {
+                "source_layer": self.working_layer,
+                "ltm_episode_layer": self.ltm_episode_layer,
+                "summary_layer": self.summary_layer,
+                "session_scope": deepcopy(session_scope),
+                "source_record_ids": [record.record_id for record in evicted_records],
+                "source_unit_ids": list(dict.fromkeys(record.unit_id for record in evicted_records)),
+                "old_summary_record_id": old_summary_record.record_id if old_summary_record is not None else None,
+                "summary_max_sentences": self.summary_max_sentences,
+                "relation": "stm_consolidation_summary",
+                "current": True,
+            },
+        }
+        return MemoryRecord(
+            record_id=f"rec-{sequence_id}",
+            unit_id=old_summary_record.unit_id if old_summary_record is not None else f"unit-stm-summary-{sequence_id}",
+            layer=self.summary_layer,
+            text=summary_text,
+            timestamp=evicted_records[-1].timestamp,
+            metadata=metadata,
+        )
 
 
 class TraceOnlyEvolution(MemoryEvolutionModule):
@@ -1041,6 +1348,7 @@ class LLMFunctionCallEvolution(MemoryEvolutionModule):
 BASELINE_SLOT: Final[str] = "memory_evolution"
 BASELINE_CLASSES: Final[tuple[type[MemoryEvolutionModule], ...]] = (
     AppendOnlyEvolution,
+    STMConsolidationEvolution,
     TraceOnlyEvolution,
     SummaryRewriteEvolution,
     LayerMoveEvolution,
