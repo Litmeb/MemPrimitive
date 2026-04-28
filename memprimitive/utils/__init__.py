@@ -24,6 +24,10 @@ _mem0_family
     Shared Mem0/Mem0g example helpers: per-fact profile recall, fixed-layer
     profile write tools, pair-context builders, and common turn orchestration.
 
+_profile_feature_tools
+    MemMachine-style structured profile-feature write tools for
+    category/tag/feature/value records with source episode citations.
+
 _reflexion_family
     Reflexion-like helpers: control parsing, prompt-context formatting,
     reflection generation payloads, and strategy constants.
