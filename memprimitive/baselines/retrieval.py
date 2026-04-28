@@ -2502,7 +2502,12 @@ class EpisodeClusterRerankRetrieval(RetrievalModule):
             record
             for _, record in sorted(
                 indexed_records,
-                key=lambda item: (abs(item[0] - nucleus_index), item[0]),
+                key=lambda item: (
+                    abs(item[0] - nucleus_index),
+                    0 if item[0] >= nucleus_index else 1,
+                    abs(item[0] - nucleus_index),
+                    item[0],
+                ),
             )
         ]
 
