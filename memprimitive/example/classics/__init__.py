@@ -7,6 +7,11 @@ from .memory_sharing_memory import (
     recall_memory_examples,
     store_prompt_answer_memory,
 )
+from .memmachine_memory import (
+    build_memmachine_memory_system,
+    ingest_episode as ingest_memmachine_episode,
+    recall_memmachine_context,
+)
 from .reflexion_memory import (
     build_reflexion_memory_system,
     ingest_failed_trial as ingest_reflexion_failed_trial,

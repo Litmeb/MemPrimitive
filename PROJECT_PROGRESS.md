@@ -79,6 +79,7 @@ Avoid re-documenting these in detail unless something materially changes.
   - benchmark predictions now copy LoCoMo recall metadata into the general `prediction.metadata` payload so speaker ids and memory counts are easy to read without depending on `memory_metadata`
   - the Mem0-style evaluator now accepts both legacy JSONL and prediction-shaped JSONL without misclassifying multi-line JSONL as a single JSON object
 - The benchmark CLI can now filter LoCoMo by `--locomo-users` using comma-separated conversation indices, `sample_id`s, or speaker names, and can run either the legacy minimal pipeline or the classics Mem0 reconstruction via `--memory-adapter minimal|mem0`.
+- The benchmark CLI can also run the classics MemMachine memory-layer reconstruction on LoCoMo via `--memory-adapter memmachine`. The adapter follows the existing Mem0 LoCoMo harness shape: two independent speaker-view systems per conversation, one memory load reused across that user's QA samples, real LLM-backed MemMachine profile/evolution calls during ingest, and the existing real LLM LoCoMo answer prompt for final answers.
 - The benchmark CLI now shows `tqdm` progress bars by default: one for Mem0 LoCoMo raw-dialogue memory generation by turn, and one for QA answering by sample/user; pass `--no-progress` to disable them.
 - Mem0 LoCoMo benchmark throughput has an initial parallelism pass:
   - the local Mem0 adapter can ingest and recall the two speaker-specific memory systems concurrently via `speaker_workers`
@@ -143,6 +144,7 @@ Avoid re-documenting these in detail unless something materially changes.
 - `memprimitive/example/classics` now contains executable reconstructions rather than an empty placeholder. The most important current examples are:
   - COMEDY / compressive-memory style hierarchical maintenance
   - A-MEM / Agentic Memory
+  - MemMachine memory layer
   - Mem0
   - Mem0g
   - RET-LLM / MemLLM-style triple memory
@@ -347,7 +349,8 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 
 ### Other Boundary Papers
 
-- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can now cover most of the contextualized episodic recall spine and explicit STM overflow/consolidation path at a mechanism level. The main remaining non-agent gap is structured profile maintenance.
+- `MemMachine` (arXiv:2604.04853): latest paper/docs/upstream-code audit suggests the current framework can now cover the memory-layer reconstruction at a mechanism level, including contextualized episodic recall, explicit STM overflow/consolidation, and structured profile feature maintenance when wired through the built-in profile feature tools.
+- `memprimitive/example/classics/memmachine_memory.py` now provides a compact executable memory-layer reconstruction: append raw episodes into working memory, maintain profile features through `LLMFunctionCallEvolution` + profile feature tools, consolidate STM overflow into episodic/sentence/session-summary layers, and recall by assembling STM summary, current working memory, contextualized LTM episodes, and profile memory. It intentionally excludes the optional Retrieval Agent router.
 - What the current framework can already approximate without new modules:
   - working/short-term episodes -> bounded temporal layer plus `BufferRetrieval` / `RecencyRetrieval`
   - STM/session summary -> `HierarchicalEvolution` or `LLMRepresentation` + summary rewrite/retention
@@ -363,7 +366,7 @@ The eventual "discover recurring memory motifs" goal depends on the DSL bridge p
 - Follow-up audit note: `EpisodeClusterRerankRetrieval` has focused code coverage, is registered/exported, and now has a matching `DSL_REFERENCE.zh-CN.md` retrieval-section entry.
 - Together, those three retrieval modules cover MemMachine's sentence-derived hit -> parent episode -> temporal neighbor cluster -> cluster-level rerank/unify/chronological-return path without adding a combined paper-specific `ContextualizedEpisodeRetrieval`, and STM consolidation can now populate the needed sentence-parent links automatically when the sentence layer is present.
 - Modules still needed or still unresolved for a faithful reconstruction:
-  - Profile feature fidelity now follows the leaner no-new-primitive path: `UPSERT_PROFILE_FEATURE` and `DELETE_PROFILE_FEATURE` are built-in `WriteToolSpec` tools usable through `LLMFunctionCallEvolution` / `LLMFunctionCallOrganization`. They store ordinary `MemoryRecord`s with structured `metadata["profile_feature"]`, category/tag/feature/value fields, and source episode citation ids. A dedicated `ProfileFeatureEvolution` module is only worth adding later if this behavior needs a first-class YAML/DSL module surface rather than tool-based wiring.
+  - No additional baseline module is currently required for the core memory layer if profile memory is implemented with `LLMFunctionCallEvolution` / `LLMFunctionCallOrganization` plus `UPSERT_PROFILE_FEATURE` and `DELETE_PROFILE_FEATURE`. These built-in `WriteToolSpec` tools store ordinary `MemoryRecord`s with structured `metadata["profile_feature"]`, category/tag/feature/value fields, and source episode citation ids. A dedicated `ProfileFeatureEvolution` module is only worth adding later if this behavior needs a first-class YAML/DSL module surface rather than tool-based wiring.
   - Optional `RetrievalAgentRetrieval`: route direct retrieval vs split-query vs chain-of-query, run sub-queries/iterative rewrites, and rerank final candidates against the concatenated multi-query history.
 - `MemGPT`: latest paper + upstream repo audit suggests the current framework can cover a mechanism-level, memory-only reconstruction without adding new baseline primitive families if scope is limited to the storage/retrieval/update surfaces and allows thin example-level orchestration.
 - The clean reusable mapping is:

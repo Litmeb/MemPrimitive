@@ -9,7 +9,7 @@ from typing import Any, Callable
 from ..config import load_pipeline_from_yaml
 from ..core import Observation, Query, Readout
 from ..pipeline import FreeMemoryPipeline, MemoryPipeline
-from ..example.classics import mem0_memory
+from ..example.classics import mem0_memory, memmachine_memory
 from ._types import BenchmarkSample, ConversationTurn, MemoryRecall, default_turn_to_observation
 
 
@@ -600,5 +600,327 @@ def create_mem0_memory_adapter(
         recent_top_k=6,
         recall_top_k=recall_top_k,
         similar_top_k=similar_top_k,
+        speaker_workers=speaker_workers,
+    )
+
+
+def _build_memmachine_locomo_systems(
+    *,
+    sentence_top_k: int,
+    episode_top_k: int,
+    profile_top_k: int,
+    stm_record_budget: int,
+) -> dict[str, object]:
+    return {
+        "speaker_1_system": memmachine_memory.build_memmachine_memory_system(
+            stm_record_budget=stm_record_budget,
+            sentence_top_k=sentence_top_k,
+            episode_top_k=episode_top_k,
+            profile_top_k=profile_top_k,
+        ),
+        "speaker_2_system": memmachine_memory.build_memmachine_memory_system(
+            stm_record_budget=stm_record_budget,
+            sentence_top_k=sentence_top_k,
+            episode_top_k=episode_top_k,
+            profile_top_k=profile_top_k,
+        ),
+    }
+
+
+def _load_memmachine_locomo_case(
+    system: dict[str, object],
+    sample: BenchmarkSample,
+    *,
+    progress_callback: Callable[..., None] | None = None,
+    speaker_workers: int = 1,
+) -> dict[str, Any]:
+    if not sample.history_turns:
+        raise ValueError("MemMachine LoCoMo adapter requires sample.history_turns.")
+    if speaker_workers <= 0:
+        raise ValueError("speaker_workers must be positive.")
+
+    speaker_a = str(sample.metadata.get("speaker_a", "")).strip() or "speaker_1"
+    speaker_b = str(sample.metadata.get("speaker_b", "")).strip() or "speaker_2"
+    speaker_a_user_id = _locomo_speaker_user_id(sample, speaker_key="speaker_a", fallback_name="speaker_1")
+    speaker_b_user_id = _locomo_speaker_user_id(sample, speaker_key="speaker_b", fallback_name="speaker_2")
+    speaker_1_system = system["speaker_1_system"]
+    speaker_2_system = system["speaker_2_system"]
+    total_turns = len(sample.history_turns)
+    loaded_turns = 0
+    pair_count = 0
+
+    if progress_callback is not None:
+        _call_with_supported_kwargs(
+            progress_callback,
+            phase="memory_init",
+            sample=sample,
+            total_turns=total_turns,
+        )
+
+    executor = ThreadPoolExecutor(max_workers=min(2, speaker_workers)) if speaker_workers > 1 else None
+    try:
+        for first_turn, second_turn in _iter_pairwise_turns(sample.history_turns):
+            pair_count += 1
+            timestamp = str(first_turn.session_timestamp).strip()
+            turn_id = str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip()
+            turns_in_pair = 2 if second_turn is not None else 1
+            session_id = str(first_turn.session_id).strip()
+
+            speaker_1_text = "\n".join(
+                part
+                for part in _locomo_pair_for_speaker(first_turn, second_turn, speaker_name=speaker_a)
+                if part.strip()
+            )
+            speaker_2_text = "\n".join(
+                part
+                for part in _locomo_pair_for_speaker(first_turn, second_turn, speaker_name=speaker_b)
+                if part.strip()
+            )
+            ingest_calls = []
+            if speaker_1_text:
+                ingest_calls.append(
+                    {
+                        "system": speaker_1_system,
+                        "text": speaker_1_text,
+                        "user_id": speaker_a_user_id,
+                        "producer": speaker_a,
+                    }
+                )
+            if speaker_2_text:
+                ingest_calls.append(
+                    {
+                        "system": speaker_2_system,
+                        "text": speaker_2_text,
+                        "user_id": speaker_b_user_id,
+                        "producer": speaker_b,
+                    }
+                )
+
+            if executor is None or len(ingest_calls) <= 1:
+                for call in ingest_calls:
+                    memmachine_memory.ingest_episode(
+                        call["system"],
+                        text=call["text"],
+                        session_id=session_id,
+                        user_id=call["user_id"],
+                        producer=call["producer"],
+                        timestamp=timestamp,
+                        metadata={"turn_id": turn_id, "benchmark": "locomo"},
+                    )
+            else:
+                futures = [
+                    executor.submit(
+                        memmachine_memory.ingest_episode,
+                        call["system"],
+                        text=call["text"],
+                        session_id=session_id,
+                        user_id=call["user_id"],
+                        producer=call["producer"],
+                        timestamp=timestamp,
+                        metadata={"turn_id": turn_id, "benchmark": "locomo"},
+                    )
+                    for call in ingest_calls
+                ]
+                for future in futures:
+                    future.result()
+
+            loaded_turns += turns_in_pair
+            if progress_callback is not None:
+                _call_with_supported_kwargs(
+                    progress_callback,
+                    phase="memory_turn_done",
+                    sample=sample,
+                    turn_index=loaded_turns,
+                    total_turns=total_turns,
+                    turn_id=turn_id,
+                    turn_increment=turns_in_pair,
+                )
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+    if progress_callback is not None:
+        _call_with_supported_kwargs(
+            progress_callback,
+            phase="memory_finish",
+            sample=sample,
+            total_turns=total_turns,
+            loaded_turns=loaded_turns,
+        )
+
+    return {
+        "loaded_pair_count": pair_count,
+        "loaded_turn_count": loaded_turns,
+        "load_source": "history_turn_pairs",
+        "speaker_1_user_id": speaker_a_user_id,
+        "speaker_2_user_id": speaker_b_user_id,
+        "speaker_1_name": speaker_a,
+        "speaker_2_name": speaker_b,
+        "speaker_workers": speaker_workers,
+    }
+
+
+def _recall_memmachine_locomo_case(
+    system: dict[str, object],
+    query: Query,
+    *,
+    sample: BenchmarkSample | None = None,
+    speaker_workers: int = 1,
+) -> MemoryRecall:
+    if speaker_workers <= 0:
+        raise ValueError("speaker_workers must be positive.")
+    sample_metadata = dict(sample.metadata) if sample is not None else {}
+    speaker_a = str(sample_metadata.get("speaker_a", "")).strip()
+    speaker_b = str(sample_metadata.get("speaker_b", "")).strip()
+    if sample is None:
+        speaker_a_user_id = "speaker_1"
+        speaker_b_user_id = "speaker_2"
+    else:
+        speaker_a_user_id = _locomo_speaker_user_id_from_metadata(
+            sample_metadata,
+            sample_id=str(sample.sample_id).strip(),
+            speaker_key="speaker_a",
+            fallback_name="speaker_1",
+        )
+        speaker_b_user_id = _locomo_speaker_user_id_from_metadata(
+            sample_metadata,
+            sample_id=str(sample.sample_id).strip(),
+            speaker_key="speaker_b",
+            fallback_name="speaker_2",
+        )
+
+    speaker_1_system = system["speaker_1_system"]
+    speaker_2_system = system["speaker_2_system"]
+    if speaker_workers > 1:
+        with ThreadPoolExecutor(max_workers=min(2, speaker_workers)) as executor:
+            speaker_1_future = executor.submit(
+                memmachine_memory.recall_memmachine_context,
+                speaker_1_system,
+                user_query=query.text,
+            )
+            speaker_2_future = executor.submit(
+                memmachine_memory.recall_memmachine_context,
+                speaker_2_system,
+                user_query=query.text,
+            )
+            speaker_1_memories = speaker_1_future.result()
+            speaker_2_memories = speaker_2_future.result()
+    else:
+        speaker_1_memories = memmachine_memory.recall_memmachine_context(speaker_1_system, user_query=query.text)
+        speaker_2_memories = memmachine_memory.recall_memmachine_context(speaker_2_system, user_query=query.text)
+
+    speaker_1_memories_text = str(speaker_1_memories).strip()
+    speaker_2_memories_text = str(speaker_2_memories).strip()
+    recall_text = "\n\n".join(
+        part
+        for part in (
+            f"{speaker_a_user_id or 'speaker_1'}\n{speaker_1_memories_text}" if speaker_1_memories_text else "",
+            f"{speaker_b_user_id or 'speaker_2'}\n{speaker_2_memories_text}" if speaker_2_memories_text else "",
+        )
+        if part
+    )
+    return MemoryRecall(
+        text=recall_text,
+        source_ids=[],
+        metadata={
+            "recall_helper": "recall_memmachine_context",
+            "speaker_1_user_id": speaker_a_user_id,
+            "speaker_2_user_id": speaker_b_user_id,
+            "speaker_1_memories": speaker_1_memories_text,
+            "speaker_2_memories": speaker_2_memories_text,
+            "num_speaker_1_memories": _count_nonempty_lines(speaker_1_memories_text),
+            "num_speaker_2_memories": _count_nonempty_lines(speaker_2_memories_text),
+            "speaker_1_name": speaker_a,
+            "speaker_2_name": speaker_b,
+        },
+    )
+
+
+class _MemMachineLoCoMoMemorySession:
+    def __init__(self, *, system_factory: Callable[[], dict[str, object]], speaker_workers: int) -> None:
+        if speaker_workers <= 0:
+            raise ValueError("speaker_workers must be positive.")
+        self.system = system_factory()
+        self.speaker_workers = speaker_workers
+        self.load_metadata: dict[str, Any] = {}
+
+    def load_case(self, sample: BenchmarkSample, *, progress_callback: Callable[..., None] | None = None) -> None:
+        self.load_metadata = _load_memmachine_locomo_case(
+            self.system,
+            sample,
+            progress_callback=progress_callback,
+            speaker_workers=self.speaker_workers,
+        )
+
+    def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
+        recall_result = _recall_memmachine_locomo_case(
+            self.system,
+            query,
+            sample=sample,
+            speaker_workers=self.speaker_workers,
+        )
+        return _coerce_memory_recall(recall_result, base_metadata=self.load_metadata)
+
+
+class MemMachineLoCoMoMemoryAdapter:
+    name = "memmachine"
+
+    def __init__(
+        self,
+        *,
+        sentence_top_k: int,
+        episode_top_k: int,
+        profile_top_k: int,
+        stm_record_budget: int,
+        speaker_workers: int = 1,
+        name: str = "memmachine",
+    ) -> None:
+        if speaker_workers <= 0:
+            raise ValueError("speaker_workers must be positive.")
+        self.sentence_top_k = sentence_top_k
+        self.episode_top_k = episode_top_k
+        self.profile_top_k = profile_top_k
+        self.stm_record_budget = stm_record_budget
+        self.speaker_workers = speaker_workers
+        self.name = str(name).strip() or "memmachine"
+
+    def create_session(self) -> _MemMachineLoCoMoMemorySession:
+        return _MemMachineLoCoMoMemorySession(
+            system_factory=lambda: _build_memmachine_locomo_systems(
+                sentence_top_k=self.sentence_top_k,
+                episode_top_k=self.episode_top_k,
+                profile_top_k=self.profile_top_k,
+                stm_record_budget=self.stm_record_budget,
+            ),
+            speaker_workers=self.speaker_workers,
+        )
+
+    def session_key(self, *, sample: BenchmarkSample) -> str:
+        sample_metadata = dict(sample.metadata)
+        locomo_sample_id = str(sample_metadata.get("locomo_sample_id", "")).strip()
+        if locomo_sample_id:
+            return locomo_sample_id
+        user_index = str(sample_metadata.get("locomo_user_index", "")).strip()
+        if user_index:
+            return f"locomo-user-{user_index}"
+        return str(sample.sample_id).split("-qa-", 1)[0]
+
+
+def create_memmachine_memory_adapter(
+    *,
+    name: str = "memmachine",
+    top_k: int | None = None,
+    stm_record_budget: int = 20,
+    speaker_workers: int = 1,
+) -> MemMachineLoCoMoMemoryAdapter:
+    """Create a LoCoMo adapter for the classic MemMachine reconstruction."""
+
+    recall_top_k = 30 if top_k is None else top_k
+    return MemMachineLoCoMoMemoryAdapter(
+        name=name,
+        sentence_top_k=recall_top_k,
+        episode_top_k=recall_top_k,
+        profile_top_k=10 if top_k is None else top_k,
+        stm_record_budget=stm_record_budget,
         speaker_workers=speaker_workers,
     )

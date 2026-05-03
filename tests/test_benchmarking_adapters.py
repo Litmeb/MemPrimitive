@@ -21,6 +21,7 @@ from memprimitive.benchmarking import (
     PipelineMemoryAdapter,
     MemoryRecall,
     create_mem0_memory_adapter,
+    create_memmachine_memory_adapter,
     create_yaml_pipeline_memory_adapter,
     run_benchmark,
 )
@@ -363,6 +364,124 @@ def test_create_mem0_memory_adapter_uses_per_speaker_systems(monkeypatch) -> Non
     ]
 
 
+def test_create_memmachine_memory_adapter_uses_per_speaker_systems(monkeypatch) -> None:
+    from memprimitive.example.classics import memmachine_memory
+
+    build_calls: list[dict[str, object]] = []
+    ingest_calls: list[dict[str, object]] = []
+
+    def _build_system(
+        *,
+        stm_record_budget: int,
+        sentence_top_k: int,
+        episode_top_k: int,
+        profile_top_k: int,
+    ) -> dict[str, object]:
+        build_calls.append(
+            {
+                "stm_record_budget": stm_record_budget,
+                "sentence_top_k": sentence_top_k,
+                "episode_top_k": episode_top_k,
+                "profile_top_k": profile_top_k,
+            }
+        )
+        return {"label": f"memmachine-{len(build_calls)}", "episodes": []}
+
+    def _ingest_episode(
+        system: dict[str, object],
+        *,
+        text: str,
+        session_id: str,
+        user_id: str,
+        producer: str,
+        timestamp: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        ingest_calls.append(
+            {
+                "system_label": system["label"],
+                "text": text,
+                "session_id": session_id,
+                "user_id": user_id,
+                "producer": producer,
+                "timestamp": timestamp,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        system["episodes"].append(text)
+
+    def _recall_context(system: dict[str, object], *, user_query: str) -> str:
+        return f"{system['label']} :: {user_query} :: {len(system['episodes'])} episodes"
+
+    monkeypatch.setattr(memmachine_memory, "build_memmachine_memory_system", _build_system)
+    monkeypatch.setattr(memmachine_memory, "ingest_episode", _ingest_episode)
+    monkeypatch.setattr(memmachine_memory, "recall_memmachine_context", _recall_context)
+
+    adapter = create_memmachine_memory_adapter(top_k=12, stm_record_budget=3)
+    session = adapter.create_session()
+    assert build_calls == [
+        {
+            "stm_record_budget": 3,
+            "sentence_top_k": 12,
+            "episode_top_k": 12,
+            "profile_top_k": 12,
+        },
+        {
+            "stm_record_budget": 3,
+            "sentence_top_k": 12,
+            "episode_top_k": 12,
+            "profile_top_k": 12,
+        },
+    ]
+
+    sample = BenchmarkSample(
+        sample_id="memmachine-timestamps",
+        benchmark_name="locomo",
+        history_observations=[],
+        history_turns=[
+            ConversationTurn(
+                turn_id="turn-1",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="user",
+                speaker="Alice",
+                text="likes tea.",
+            ),
+            ConversationTurn(
+                turn_id="turn-2",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="assistant",
+                speaker="Bob",
+                text="likes coffee.",
+            ),
+        ],
+        query=Query(text="What should be remembered?"),
+        reference_answer="unused",
+        metadata={
+            "speaker_a": "Alice",
+            "speaker_b": "Bob",
+            "locomo_user_index": 1,
+        },
+    )
+    session.load_case(sample)
+    recall = session.recall(Query(text="What should be remembered?"), sample=sample)
+
+    assert "memmachine-1 :: What should be remembered? :: 1 episodes" in recall.text
+    assert "memmachine-2 :: What should be remembered? :: 1 episodes" in recall.text
+    assert recall.metadata["loaded_pair_count"] == 1
+    assert recall.metadata["recall_helper"] == "recall_memmachine_context"
+    assert recall.metadata["speaker_1_user_id"] == "Alice_1"
+    assert recall.metadata["speaker_2_user_id"] == "Bob_1"
+    assert [call["system_label"] for call in ingest_calls] == ["memmachine-1", "memmachine-2"]
+    assert ingest_calls[0]["text"] == "Alice: likes tea.\nBob: likes coffee."
+    assert ingest_calls[1]["text"] == "Bob: likes coffee.\nAlice: likes tea."
+    assert [call["timestamp"] for call in ingest_calls] == [
+        "2026-04-17T08:00:00Z",
+        "2026-04-17T08:00:00Z",
+    ]
+
+
 def test_create_mem0_memory_adapter_defaults_to_upstream_top_k(monkeypatch) -> None:
     from memprimitive.example.classics import mem0_memory
 
@@ -431,8 +550,10 @@ def test_create_mem0_memory_adapter_accepts_write_time_similar_top_k(monkeypatch
 
 def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
     from memprimitive.example.classics import mem0_memory
+    from memprimitive.example.classics import memmachine_memory
 
     build_calls: list[dict[str, object]] = []
+    memmachine_build_calls: list[dict[str, object]] = []
 
     def _build_system(*, recent_top_k: int, similar_top_k: int, recall_top_k: int) -> dict[str, object]:
         build_calls.append(
@@ -444,13 +565,33 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
         )
         return {"pairs": []}
 
+    def _build_memmachine_system(
+        *,
+        stm_record_budget: int,
+        sentence_top_k: int,
+        episode_top_k: int,
+        profile_top_k: int,
+    ) -> dict[str, object]:
+        memmachine_build_calls.append(
+            {
+                "stm_record_budget": stm_record_budget,
+                "sentence_top_k": sentence_top_k,
+                "episode_top_k": episode_top_k,
+                "profile_top_k": profile_top_k,
+            }
+        )
+        return {"episodes": []}
+
     monkeypatch.setattr(mem0_memory, "build_mem0_memory_system", _build_system)
+    monkeypatch.setattr(memmachine_memory, "build_memmachine_memory_system", _build_memmachine_system)
 
     minimal_adapter = _create_cli_memory_adapter("minimal", top_k=None)
     mem0_adapter = _create_cli_memory_adapter("mem0", top_k=None)
+    memmachine_adapter = _create_cli_memory_adapter("memmachine", top_k=None)
 
     assert minimal_adapter.pipeline_factory().retrieval.top_k == 5
     mem0_adapter.create_session()
+    memmachine_adapter.create_session()
 
     assert build_calls == [
         {
@@ -462,6 +603,20 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
             "recent_top_k": 6,
             "similar_top_k": 5,
             "recall_top_k": 30,
+        },
+    ]
+    assert memmachine_build_calls == [
+        {
+            "stm_record_budget": 20,
+            "sentence_top_k": 30,
+            "episode_top_k": 30,
+            "profile_top_k": 10,
+        },
+        {
+            "stm_record_budget": 20,
+            "sentence_top_k": 30,
+            "episode_top_k": 30,
+            "profile_top_k": 10,
         },
     ]
 
