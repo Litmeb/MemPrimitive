@@ -25,7 +25,7 @@ from ._bench_adapters import (
     _iter_json_array_file,
     create_benchmark_adapter,
 )
-from ._memory_adapters import PipelineMemoryAdapter, create_mem0_memory_adapter
+from ._memory_adapters import PipelineMemoryAdapter, create_mem0_memory_adapter, create_memmachine_memory_adapter
 from ._runner import Mem0LoCoMoAnswerRunner, SingleRecallLLMAnswerRunner, run_benchmark, write_predictions_jsonl
 from ._types import AnswerRunner, BenchmarkPrediction, BenchmarkSample
 
@@ -242,6 +242,7 @@ def _create_cli_memory_adapter(
     top_k: int | None,
     similar_top_k: int = 5,
     mem0_speaker_workers: int = 2,
+    memmachine_stm_record_budget: int = 20,
 ):
     adapter_name = str(name).strip().casefold()
     if adapter_name == "minimal":
@@ -252,11 +253,17 @@ def _create_cli_memory_adapter(
             similar_top_k=similar_top_k,
             speaker_workers=mem0_speaker_workers,
         )
-    raise ValueError("Unsupported memory adapter. Choose from ['mem0', 'minimal'].")
+    if adapter_name == "memmachine":
+        return create_memmachine_memory_adapter(
+            top_k=top_k,
+            stm_record_budget=memmachine_stm_record_budget,
+            speaker_workers=mem0_speaker_workers,
+        )
+    raise ValueError("Unsupported memory adapter. Choose from ['mem0', 'memmachine', 'minimal'].")
 
 
 def _create_cli_answer_runner(*, benchmark_name: str, memory_adapter_name: str):
-    if benchmark_name == "locomo" and memory_adapter_name == "mem0":
+    if benchmark_name == "locomo" and memory_adapter_name in {"mem0", "memmachine"}:
         return Mem0LoCoMoAnswerRunner()
     return SingleRecallLLMAnswerRunner()
 
@@ -490,7 +497,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--mem0-speaker-workers",
         type=int,
         default=2,
-        help="Parallel speaker workers for Mem0 LoCoMo memory load and recall.",
+        help="Parallel speaker workers for Mem0/MemMachine LoCoMo memory load and recall.",
+    )
+    parser.add_argument(
+        "--memmachine-stm-record-budget",
+        type=int,
+        default=20,
+        help="MemMachine STM working-record budget before consolidation. Only used with --memory-adapter memmachine.",
     )
     parser.add_argument(
         "--max-workers",
@@ -500,9 +513,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory-adapter",
-        choices=("minimal", "mem0"),
+        choices=("minimal", "mem0", "memmachine"),
         default="minimal",
-        help="Memory system to evaluate. 'minimal' preserves the legacy baseline; 'mem0' runs the classics Mem0 reconstruction.",
+        help=(
+            "Memory system to evaluate. 'minimal' preserves the legacy baseline; "
+            "'mem0' and 'memmachine' run classics reconstructions."
+        ),
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable the tqdm benchmark progress bar.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
@@ -530,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
         top_k=args.top_k,
         similar_top_k=args.similar_top_k,
         mem0_speaker_workers=args.mem0_speaker_workers,
+        memmachine_stm_record_budget=args.memmachine_stm_record_budget,
     )
     answer_runner = _create_cli_answer_runner(
         benchmark_name=benchmark_name,
