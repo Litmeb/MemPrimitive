@@ -523,6 +523,198 @@ def test_bm25_retrieval_source_retrieved_only_scores_candidate_subset() -> None:
     assert packet_out.retrieved.trace["candidate_count"] == 2
 
 
+def test_reranker_retrieval_reranks_existing_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import RerankerRetrieval
+    from memprimitive.utils import _runtime
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeRuntime:
+        def rerank(self, **kwargs: Any) -> list[dict[str, Any]]:
+            calls.append(kwargs)
+            return [
+                {"id": "rec-2", "score": 0.91, "rationale": "matches tea"},
+                {"id": "rec-1", "score": 0.2, "rationale": ""},
+            ]
+
+    monkeypatch.setattr(_runtime, "get_runtime", lambda: FakeRuntime())
+    candidate_a = MemoryRecord(
+        record_id="rec-1",
+        unit_id="unit-1",
+        layer="default",
+        text="Alice likes coffee.",
+        timestamp="2026-01-01T00:00:00+00:00",
+    )
+    candidate_b = MemoryRecord(
+        record_id="rec-2",
+        unit_id="unit-2",
+        layer="default",
+        text="Alice likes jasmine tea.",
+        timestamp="2026-01-01T00:00:01+00:00",
+    )
+
+    packet_out, _ = RerankerRetrieval().run(
+        Packet(
+            query=Query(text="tea preference"),
+            retrieved=RetrievedSet(items=[candidate_a, candidate_b], scores=[]),
+        ),
+        MemoryStore(),
+    )
+
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-2", "rec-1"]
+    assert packet_out.retrieved.scores == [
+        {
+            "record_id": "rec-2",
+            "rank": 1,
+            "score": 0.91,
+            "rationale": "matches tea",
+            "strategy": "runtime_rerank",
+        },
+        {
+            "record_id": "rec-1",
+            "rank": 2,
+            "score": 0.2,
+            "rationale": "",
+            "strategy": "runtime_rerank",
+        },
+    ]
+    assert calls == [
+        {
+            "query": "tea preference",
+            "candidates": [
+                {"id": "rec-1", "content": "Alice likes coffee."},
+                {"id": "rec-2", "content": "Alice likes jasmine tea."},
+            ],
+            "task": "Rerank memory records for retrieval relevance.",
+            "top_k": 2,
+        }
+    ]
+    assert packet_out.retrieved.trace["source"] == "retrieved"
+    assert packet_out.retrieved.trace["top_k"] is None
+    assert packet_out.retrieved.trace["effective_top_k"] == 2
+    assert packet_out.retrieved.trace["returned_ids"] == ["rec-2", "rec-1"]
+
+
+def test_reranker_retrieval_top_k_limits_runtime_and_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import RerankerRetrieval
+    from memprimitive.utils import _runtime
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeRuntime:
+        def rerank(self, **kwargs: Any) -> list[dict[str, Any]]:
+            calls.append(kwargs)
+            return [{"id": "rec-3", "score": 0.8, "rationale": ""}]
+
+    monkeypatch.setattr(_runtime, "get_runtime", lambda: FakeRuntime())
+    candidates = [
+        MemoryRecord(
+            record_id=f"rec-{index}",
+            unit_id=f"unit-{index}",
+            layer="default",
+            text=f"candidate {index}",
+            timestamp=f"2026-01-01T00:00:0{index}+00:00",
+        )
+        for index in range(1, 4)
+    ]
+
+    packet_out, _ = RerankerRetrieval(top_k=1).run(
+        Packet(query=Query(text="candidate 3"), retrieved=RetrievedSet(items=candidates, scores=[])),
+        MemoryStore(),
+    )
+
+    assert calls[0]["top_k"] == 1
+    assert [record.record_id for record in packet_out.retrieved.items] == ["rec-3"]
+    assert packet_out.retrieved.trace["effective_top_k"] == 1
+    assert packet_out.retrieved.trace["selected_count"] == 1
+
+
+def test_reranker_retrieval_source_store_filters_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import RerankerRetrieval
+    from memprimitive.utils import _runtime
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeRuntime:
+        def rerank(self, **kwargs: Any) -> list[dict[str, Any]]:
+            calls.append(kwargs)
+            return [{"id": "profile-2", "score": 0.7, "rationale": ""}]
+
+    monkeypatch.setattr(_runtime, "get_runtime", lambda: FakeRuntime())
+    store = MemoryStore(
+        topology=StoreTopology.from_layers([StoreLayerSpec(name="profile"), StoreLayerSpec(name="history")])
+    )
+    for record in (
+        MemoryRecord(
+            record_id="profile-1",
+            unit_id="unit-1",
+            layer="profile",
+            text="profile coffee",
+            timestamp="2026-01-01T00:00:00+00:00",
+        ),
+        MemoryRecord(
+            record_id="profile-2",
+            unit_id="unit-2",
+            layer="profile",
+            text="profile tea",
+            timestamp="2026-01-01T00:00:01+00:00",
+        ),
+        MemoryRecord(
+            record_id="history-1",
+            unit_id="unit-3",
+            layer="history",
+            text="history tea",
+            timestamp="2026-01-01T00:00:02+00:00",
+        ),
+    ):
+        store.append(record)
+
+    packet_out, _ = RerankerRetrieval(source="store", layer="profile").run(Packet(query=Query(text="tea")), store)
+
+    assert [candidate["id"] for candidate in calls[0]["candidates"]] == ["profile-1", "profile-2"]
+    assert [record.record_id for record in packet_out.retrieved.items] == ["profile-2"]
+    assert packet_out.retrieved.trace["source"] == "store"
+    assert packet_out.retrieved.trace["layer"] == "profile"
+
+
+def test_reranker_retrieval_empty_candidates_skip_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import RerankerRetrieval
+    from memprimitive.utils import _runtime
+
+    monkeypatch.setattr(_runtime, "get_runtime", lambda: pytest.fail("reranker should not be called"))
+
+    packet_out, _ = RerankerRetrieval().run(
+        Packet(query=Query(text="tea"), retrieved=RetrievedSet(items=[], scores=[])),
+        MemoryStore(),
+    )
+
+    assert packet_out.retrieved.items == []
+    assert packet_out.retrieved.scores == []
+    assert packet_out.retrieved.trace["candidate_count"] == 0
+    assert packet_out.retrieved.trace["selected_count"] == 0
+
+
+def test_reranker_retrieval_requires_query() -> None:
+    from memprimitive.baselines import RerankerRetrieval
+
+    with pytest.raises(ValueError, match="packet.query"):
+        RerankerRetrieval().run(Packet(), MemoryStore())
+
+
+def test_reranker_retrieval_requires_positive_top_k() -> None:
+    from memprimitive.baselines import RerankerRetrieval
+
+    with pytest.raises(ValueError, match="top_k > 0"):
+        RerankerRetrieval(top_k=0)
+
+
+def test_reranker_retrieval_is_registered() -> None:
+    from memprimitive.baselines import RerankerRetrieval, registered_baseline_class_names
+
+    assert "RerankerRetrieval" in registered_baseline_class_names()
+    assert RerankerRetrieval.spec.name == "reranker_retrieval"
+
+
 def test_entity_retrieval_prefers_entity_overlap() -> None:
     from memprimitive.baselines import AlwaysTrigger, AppendOrganization, EntityRetrieval, LLMRepresentation, PassThroughUnitFormation
 

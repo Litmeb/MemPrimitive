@@ -1588,6 +1588,119 @@ class BM25Retrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return _with_retrieved(packet, retrieved), store
 
 
+class RerankerRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
+    """Rerank candidate records through the dedicated runtime reranker."""
+
+    spec = ModuleSpec(
+        name="reranker_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+    )
+
+    def __init__(
+        self,
+        top_k: int | None = None,
+        layer: str | None = None,
+        *,
+        source: str = "retrieved",
+        task: str = "Rerank memory records for retrieval relevance.",
+    ) -> None:
+        if top_k is not None and top_k <= 0:
+            raise ValueError("RerankerRetrieval requires top_k > 0 when provided.")
+        self.top_k = top_k
+        self.layer = layer
+        self.source = _normalize_retrieval_source(source)
+        self.task = str(task)
+
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("RerankerRetrieval requires packet.query.")
+
+        candidates = _candidate_records(packet, store, source=self.source, layer=self.layer)
+        effective_top_k = len(candidates) if self.top_k is None else min(self.top_k, len(candidates))
+        if not candidates:
+            retrieved = RetrievedSet(
+                items=[],
+                scores=[],
+                trace={
+                    "module": self.spec.name,
+                    "top_k": self.top_k,
+                    "effective_top_k": 0,
+                    "source": self.source,
+                    "layer": self.layer,
+                    "candidate_count": 0,
+                    "selected_count": 0,
+                    "candidate_record_ids": [],
+                    "returned_ids": [],
+                    "ignored_result_count": 0,
+                    "missing_candidate_count": 0,
+                    "missing_or_ignored_count": 0,
+                },
+            )
+            return _with_retrieved(packet, retrieved), store
+
+        payload = [{"id": record.record_id, "content": record.text} for record in candidates]
+        from ..utils._runtime import get_runtime
+
+        reranked = get_runtime().rerank(
+            query=packet.query.text,
+            candidates=payload,
+            task=self.task,
+            top_k=effective_top_k,
+        )
+        record_by_id = {record.record_id: record for record in candidates}
+        selected_records = []
+        scores: list[dict[str, Any]] = []
+        used_ids: set[str] = set()
+        ignored_result_count = 0
+        for item in reranked:
+            if not isinstance(item, Mapping):
+                ignored_result_count += 1
+                continue
+            record_id = _explicit_record_id_value(item.get("id"))
+            if record_id is None or record_id in used_ids or record_id not in record_by_id:
+                ignored_result_count += 1
+                continue
+            record = record_by_id[record_id]
+            used_ids.add(record_id)
+            selected_records.append(record)
+            raw_score = item.get("score", 0.0)
+            score = raw_score if not isinstance(raw_score, bool) and isinstance(raw_score, (int, float)) else 0.0
+            scores.append(
+                {
+                    "record_id": record_id,
+                    "rank": len(selected_records),
+                    "score": float(score),
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "strategy": "runtime_rerank",
+                }
+            )
+            if len(selected_records) >= effective_top_k:
+                break
+
+        missing_candidate_count = max(0, effective_top_k - len(selected_records))
+        retrieved = RetrievedSet(
+            items=selected_records,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "effective_top_k": effective_top_k,
+                "source": self.source,
+                "layer": self.layer,
+                "candidate_count": len(candidates),
+                "selected_count": len(selected_records),
+                "candidate_record_ids": [record.record_id for record in candidates],
+                "returned_ids": [record.record_id for record in selected_records],
+                "ignored_result_count": ignored_result_count,
+                "missing_candidate_count": missing_candidate_count,
+                "missing_or_ignored_count": missing_candidate_count + ignored_result_count,
+            },
+        )
+        return _with_retrieved(packet, retrieved), store
+
+
 class GraphNeighborRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Expand explicit graph seed record ids into their linked neighbors.
 
@@ -3198,6 +3311,7 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     EntityRetrieval,
     TripleMemoryRetrieval,
     BM25Retrieval,
+    RerankerRetrieval,
     GraphNeighborRetrieval,
     ParentEpisodeExpansionRetrieval,
     TemporalNeighborExpansionRetrieval,
