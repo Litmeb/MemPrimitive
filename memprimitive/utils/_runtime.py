@@ -4,6 +4,8 @@ import json
 import math
 import os
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +113,9 @@ class Runtime:
         embedding_provider: str | None = None,
         embedding_api_key: str | None = None,
         embedding_base_url: str | None = None,
+        rerank_api_key: str | None = None,
+        rerank_base_url: str | None = None,
+        rerank_model: str | None = None,
     ) -> None:
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
@@ -142,6 +147,21 @@ class Runtime:
             embedding_base_url
             if embedding_base_url is not None
             else env.get("MEMPRIMITIVE_EMBEDDING_BASE_URL", "")
+        )
+        self.rerank_api_key = (
+            rerank_api_key
+            if rerank_api_key is not None
+            else env.get("MEMPRIMITIVE_RERANK_API_KEY", "")
+        )
+        self.rerank_base_url = (
+            rerank_base_url
+            if rerank_base_url is not None
+            else env.get("MEMPRIMITIVE_RERANK_BASE_URL", "")
+        )
+        self.rerank_model = (
+            rerank_model
+            if rerank_model is not None
+            else env.get("MEMPRIMITIVE_RERANK_MODEL", "")
         )
         # Non-OpenAI-compatible providers often do not support the default tracing path.
         set_tracing_disabled(disabled=True)
@@ -223,6 +243,14 @@ class Runtime:
             "MEMPRIMITIVE_EMBEDDING_BASE_URL, and MEMPRIMITIVE_EMBEDDING_MODEL."
         )
 
+    def require_rerank_api(self) -> None:
+        if self.rerank_api_key and self.rerank_base_url and self.rerank_model:
+            return
+        raise ValueError(
+            "Reranker API access requires MEMPRIMITIVE_RERANK_API_KEY, "
+            "MEMPRIMITIVE_RERANK_BASE_URL, and MEMPRIMITIVE_RERANK_MODEL."
+        )
+
     def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
         output = self.run_agent(
             name="MemPrimitiveTextAgent",
@@ -276,56 +304,87 @@ class Runtime:
     ) -> list[dict[str, Any]]:
         if not candidates:
             return []
-        payload = json.dumps(
-            {
-                "query": query,
-                "task": task,
-                "top_k": top_k,
-                "candidates": candidates,
-            },
-            ensure_ascii=False,
-        )
-        result = self.json(
-            system=(
-                "You rank memory candidates for retrieval. "
-                "Output JSON as a list of objects with keys: id, score, rationale. "
-                "Scores must be floats in [0, 1]. Higher is better."
-            ),
-            user=payload,
-        )
-        if not isinstance(result, list):
-            raise ValueError("Reranker must return a JSON list.")
-        normalized: list[dict[str, Any]] = []
-        for item in result:
-            if not isinstance(item, dict):
-                continue
-            candidate_id = str(item.get("id", "")).strip()
+        if top_k <= 0:
+            return []
+        self.require_rerank_api()
+
+        ranked_candidates: list[dict[str, Any]] = []
+        documents: list[str] = []
+        for candidate in candidates:
+            candidate_id = str(candidate.get("id", "")).strip()
             if not candidate_id:
                 continue
-            score = item.get("score", 0.0)
-            if isinstance(score, bool):
-                score = 0.0
-            elif not isinstance(score, (int, float)):
-                score = 0.0
-            normalized.append(
+            ranked_candidates.append(candidate)
+            documents.append(str(candidate.get("content", candidate.get("text", ""))))
+        if not ranked_candidates:
+            return []
+
+        payload = {
+            "model": self.rerank_model,
+            "query": query,
+            "documents": documents,
+            "top_n": min(int(top_k), len(documents)),
+            "return_documents": False,
+        }
+        result = self._post_rerank(payload)
+        if not isinstance(result, dict):
+            raise ValueError("Reranker API must return a JSON object.")
+        raw_results = result.get("results")
+        if not isinstance(raw_results, list):
+            raise ValueError("Reranker API response must include a results list.")
+
+        seen_indexes: set[int] = set()
+        ordered: list[dict[str, Any]] = []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            index = item.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                continue
+            if index < 0 or index >= len(ranked_candidates) or index in seen_indexes:
+                continue
+            score = item.get("relevance_score", item.get("score", 0.0))
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                continue
+            candidate_id = str(ranked_candidates[index]["id"]).strip()
+            if not candidate_id:
+                continue
+            seen_indexes.add(index)
+            ordered.append(
                 {
                     "id": candidate_id,
                     "score": max(0.0, min(float(score), 1.0)),
-                    "rationale": str(item.get("rationale", "")).strip(),
+                    "rationale": "",
                 }
             )
-        by_id = {str(candidate["id"]): candidate for candidate in candidates}
-        seen: set[str] = set()
-        ordered: list[dict[str, Any]] = []
-        for item in normalized:
-            candidate_id = item["id"]
-            if candidate_id not in by_id or candidate_id in seen:
-                continue
-            seen.add(candidate_id)
-            ordered.append(item)
             if len(ordered) >= top_k:
                 break
         return ordered
+
+    def _post_rerank(self, payload: dict[str, Any]) -> Any:
+        url = f"{self.rerank_base_url.rstrip('/')}/rerank"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.rerank_api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ValueError(f"Reranker API request failed with HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise ValueError(f"Reranker API request failed: {exc.reason}") from exc
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            preview = body[:500].replace("\n", "\\n")
+            raise ValueError(f"Reranker API returned non-JSON content: {preview!r}") from exc
 
     @staticmethod
     def cosine_similarity(left: list[float] | None, right: list[float] | None) -> float:

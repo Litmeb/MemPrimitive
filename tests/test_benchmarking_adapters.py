@@ -20,6 +20,7 @@ from memprimitive.benchmarking import (
     PairwiseDialogueMemoryAdapter,
     PipelineMemoryAdapter,
     MemoryRecall,
+    create_dual_speaker_locomo_memory_adapter,
     create_mem0_memory_adapter,
     create_memmachine_memory_adapter,
     create_yaml_pipeline_memory_adapter,
@@ -343,7 +344,7 @@ def test_create_mem0_memory_adapter_uses_per_speaker_systems(monkeypatch) -> Non
     assert "system-1 :: What should be remembered? :: 2 pairs" in recall.text
     assert "system-2 :: What should be remembered? :: 1 pairs" in recall.text
     assert recall.metadata["loaded_pair_count"] == 2
-    assert recall.metadata["recall_helper"] == "recall_profile"
+    assert recall.metadata["recall_helper"] == "mem0.recall"
     assert recall.metadata["speaker_1_user_id"] == "Alice_1"
     assert recall.metadata["speaker_2_user_id"] == "Bob_1"
     assert recall.metadata["speaker_1_memories"] == "system-1 :: What should be remembered? :: 2 pairs"
@@ -364,7 +365,7 @@ def test_create_mem0_memory_adapter_uses_per_speaker_systems(monkeypatch) -> Non
     ]
 
 
-def test_create_memmachine_memory_adapter_uses_per_speaker_systems(monkeypatch) -> None:
+def test_create_memmachine_memory_adapter_uses_shared_conversation_system(monkeypatch) -> None:
     from memprimitive.example.classics import memmachine_memory
 
     build_calls: list[dict[str, object]] = []
@@ -373,13 +374,17 @@ def test_create_memmachine_memory_adapter_uses_per_speaker_systems(monkeypatch) 
     def _build_system(
         *,
         stm_record_budget: int,
-        sentence_top_k: int,
-        episode_top_k: int,
+        limit: int,
+        expand_context: int,
+        sentence_top_k: int | None = None,
+        episode_top_k: int | None = None,
         profile_top_k: int,
     ) -> dict[str, object]:
         build_calls.append(
             {
                 "stm_record_budget": stm_record_budget,
+                "limit": limit,
+                "expand_context": expand_context,
                 "sentence_top_k": sentence_top_k,
                 "episode_top_k": episode_top_k,
                 "profile_top_k": profile_top_k,
@@ -410,28 +415,25 @@ def test_create_memmachine_memory_adapter_uses_per_speaker_systems(monkeypatch) 
         )
         system["episodes"].append(text)
 
-    def _recall_context(system: dict[str, object], *, user_query: str) -> str:
-        return f"{system['label']} :: {user_query} :: {len(system['episodes'])} episodes"
+    def _recall_memory(system: dict[str, object], *, user_query: str, include_profile: bool = False):
+        del include_profile
+        return MemoryRecall(text=f"{system['label']} :: {user_query} :: {len(system['episodes'])} episodes")
 
     monkeypatch.setattr(memmachine_memory, "build_memmachine_memory_system", _build_system)
     monkeypatch.setattr(memmachine_memory, "ingest_episode", _ingest_episode)
-    monkeypatch.setattr(memmachine_memory, "recall_memmachine_context", _recall_context)
+    monkeypatch.setattr(memmachine_memory, "recall_memmachine_memory", _recall_memory)
 
     adapter = create_memmachine_memory_adapter(top_k=12, stm_record_budget=3)
     session = adapter.create_session()
     assert build_calls == [
         {
             "stm_record_budget": 3,
-            "sentence_top_k": 12,
-            "episode_top_k": 12,
+            "limit": 12,
+            "expand_context": 3,
+            "sentence_top_k": None,
+            "episode_top_k": None,
             "profile_top_k": 12,
-        },
-        {
-            "stm_record_budget": 3,
-            "sentence_top_k": 12,
-            "episode_top_k": 12,
-            "profile_top_k": 12,
-        },
+        }
     ]
 
     sample = BenchmarkSample(
@@ -467,19 +469,80 @@ def test_create_memmachine_memory_adapter_uses_per_speaker_systems(monkeypatch) 
     session.load_case(sample)
     recall = session.recall(Query(text="What should be remembered?"), sample=sample)
 
-    assert "memmachine-1 :: What should be remembered? :: 1 episodes" in recall.text
-    assert "memmachine-2 :: What should be remembered? :: 1 episodes" in recall.text
-    assert recall.metadata["loaded_pair_count"] == 1
-    assert recall.metadata["recall_helper"] == "recall_memmachine_context"
-    assert recall.metadata["speaker_1_user_id"] == "Alice_1"
-    assert recall.metadata["speaker_2_user_id"] == "Bob_1"
-    assert [call["system_label"] for call in ingest_calls] == ["memmachine-1", "memmachine-2"]
-    assert ingest_calls[0]["text"] == "Alice: likes tea.\nBob: likes coffee."
-    assert ingest_calls[1]["text"] == "Bob: likes coffee.\nAlice: likes tea."
+    assert "memmachine-1 :: What should be remembered? :: 2 episodes" in recall.text
+    assert recall.metadata["loaded_message_count"] == 2
+    assert recall.metadata["recall_helper"] == "memmachine.recall"
+    assert recall.metadata["conversation_user_id"] == "conversation:locomo-user-1"
+    assert [call["system_label"] for call in ingest_calls] == ["memmachine-1", "memmachine-1"]
+    assert ingest_calls[0]["text"] == "likes tea."
+    assert ingest_calls[1]["text"] == "likes coffee."
+    assert ingest_calls[0]["user_id"] == "conversation:locomo-user-1"
+    assert ingest_calls[1]["user_id"] == "conversation:locomo-user-1"
+    assert ingest_calls[0]["metadata"]["source_speaker"] == "Alice"
+    assert ingest_calls[1]["metadata"]["source_speaker"] == "Bob"
     assert [call["timestamp"] for call in ingest_calls] == [
         "2026-04-17T08:00:00Z",
         "2026-04-17T08:00:00Z",
     ]
+
+
+def test_dual_speaker_locomo_adapter_accepts_any_memory_binding() -> None:
+    events_by_system: dict[str, list[str]] = {}
+
+    class _Binding:
+        name = "custom"
+
+        def build_system(self) -> dict[str, object]:
+            system_id = f"system-{len(events_by_system) + 1}"
+            events_by_system[system_id] = []
+            return {"system_id": system_id}
+
+        def ingest_event(self, system: dict[str, object], event) -> None:
+            events_by_system[str(system["system_id"])].append(f"{event.user_id}: {event.text} -> {event.context_text}")
+
+        def recall(self, system: dict[str, object], query: Query, *, context):
+            return MemoryRecall(
+                text=f"{context.user_id} sees {len(events_by_system[str(system['system_id'])])} events for {query.text}"
+            )
+
+    adapter = create_dual_speaker_locomo_memory_adapter(lambda: _Binding(), name="custom", speaker_workers=1)
+    sample = BenchmarkSample(
+        sample_id="custom-binding",
+        benchmark_name="locomo",
+        history_observations=[],
+        history_turns=[
+            ConversationTurn(
+                turn_id="turn-1",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="user",
+                speaker="Alice",
+                text="likes tea.",
+            ),
+            ConversationTurn(
+                turn_id="turn-2",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="assistant",
+                speaker="Bob",
+                text="likes coffee.",
+            ),
+        ],
+        query=Query(text="tea"),
+        reference_answer="unused",
+        metadata={"speaker_a": "Alice", "speaker_b": "Bob", "locomo_user_index": 1},
+    )
+
+    session = adapter.create_session()
+    session.load_case(sample)
+    recall = session.recall(sample.query, sample=sample)
+
+    assert adapter.session_key(sample=sample) == "locomo-user-1"
+    assert events_by_system["system-1"] == ["Alice_1: Alice: likes tea. -> Bob: likes coffee."]
+    assert events_by_system["system-2"] == ["Bob_1: Bob: likes coffee. -> Alice: likes tea."]
+    assert "Alice_1 sees 1 events for tea" in recall.text
+    assert "Bob_1 sees 1 events for tea" in recall.text
+    assert recall.metadata["recall_helper"] == "custom.recall"
 
 
 def test_create_mem0_memory_adapter_defaults_to_upstream_top_k(monkeypatch) -> None:
@@ -568,13 +631,17 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
     def _build_memmachine_system(
         *,
         stm_record_budget: int,
-        sentence_top_k: int,
-        episode_top_k: int,
+        limit: int,
+        expand_context: int,
+        sentence_top_k: int | None = None,
+        episode_top_k: int | None = None,
         profile_top_k: int,
     ) -> dict[str, object]:
         memmachine_build_calls.append(
             {
                 "stm_record_budget": stm_record_budget,
+                "limit": limit,
+                "expand_context": expand_context,
                 "sentence_top_k": sentence_top_k,
                 "episode_top_k": episode_top_k,
                 "profile_top_k": profile_top_k,
@@ -608,16 +675,12 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
     assert memmachine_build_calls == [
         {
             "stm_record_budget": 20,
-            "sentence_top_k": 30,
-            "episode_top_k": 30,
+            "limit": 30,
+            "expand_context": 3,
+            "sentence_top_k": None,
+            "episode_top_k": None,
             "profile_top_k": 10,
-        },
-        {
-            "stm_record_budget": 20,
-            "sentence_top_k": 30,
-            "episode_top_k": 30,
-            "profile_top_k": 10,
-        },
+        }
     ]
 
 

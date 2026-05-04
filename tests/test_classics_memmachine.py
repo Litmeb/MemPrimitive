@@ -64,12 +64,13 @@ def test_memmachine_classic_wires_contextual_ltm_and_profile_tools(monkeypatch: 
 
     monkeypatch.setattr(LLMFunctionCallEvolution, "_run_agent", _fake_profile_agent)
 
-    system = build_memmachine_memory_system(stm_record_budget=1, sentence_top_k=4, episode_top_k=4)
+    system = build_memmachine_memory_system(stm_record_budget=1, limit=4)
     ingest_episode(
         system,
         text="Alice is comparing memory systems for long-running agents.",
         session_id="sess-1",
         user_id="alice",
+        producer="Alice",
         timestamp="2026-04-28T00:01:00Z",
     )
     ingest_episode(
@@ -77,6 +78,7 @@ def test_memmachine_classic_wires_contextual_ltm_and_profile_tools(monkeypatch: 
         text="Alice says she prefers jasmine tea during late-night coding.",
         session_id="sess-1",
         user_id="alice",
+        producer="Alice",
         timestamp="2026-04-28T00:02:00Z",
     )
     ingest_episode(
@@ -84,13 +86,14 @@ def test_memmachine_classic_wires_contextual_ltm_and_profile_tools(monkeypatch: 
         text="The assistant suggests keeping raw episodes available for audit.",
         session_id="sess-1",
         user_id="alice",
+        producer="assistant",
         timestamp="2026-04-28T00:03:00Z",
     )
 
     store = system["store"]
     assert store.count("working") == 1
-    assert store.count("episodic") == 2
-    assert store.count("sentence") == 2
+    assert store.count("episodic") == 3
+    assert store.count("sentence") == 3
     assert store.count("session_summary") == 1
 
     profile_records = store.iter_records("profile")
@@ -98,9 +101,38 @@ def test_memmachine_classic_wires_contextual_ltm_and_profile_tools(monkeypatch: 
     assert profile_records[0].metadata[PROFILE_FEATURE_METADATA_KEY]["feature"] == "tea"
 
     context = recall_memmachine_context(system, user_query="What tea does Alice prefer?")
-    assert "## Long-Term Episodes" in context
+    assert "<LONG TERM MEMORY EPISODES>" in context
+    assert "[2026-04-28T00:02:00Z] Alice: Alice says she prefers jasmine tea during late-night coding." in context
     assert "jasmine tea" in context
-    assert "## Working Memory" in context
+    assert "[2026-04-28T00:03:00Z] assistant: The assistant suggests keeping raw episodes available for audit." in context
     assert "raw episodes available" in context
-    assert "## Profile Memory" in context
+    assert "<PROFILE MEMORY>" in context
     assert "Alice prefers jasmine tea." in context
+
+
+def test_memmachine_indexes_ltm_before_stm_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import EmbeddingSimilarityRetrieval, LLMFunctionCallEvolution
+    from memprimitive.utils import _runtime
+
+    fake_runtime = _FakeMemMachineRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(EmbeddingSimilarityRetrieval, "_embed_text", lambda self, text: fake_runtime.embed(text))
+    monkeypatch.setattr(LLMFunctionCallEvolution, "_run_agent", lambda self, **kwargs: "DONE")
+
+    system = build_memmachine_memory_system(stm_record_budget=20, limit=4)
+    ingest_episode(
+        system,
+        text="Caroline went to a LGBTQ support group yesterday.",
+        session_id="session_1",
+        user_id="conversation:conv-26",
+        producer="Caroline",
+        timestamp="1:56 pm on 8 May, 2023",
+    )
+
+    store = system["store"]
+    assert store.count("working") == 1
+    assert store.count("episodic") == 1
+    assert store.count("sentence") == 1
+
+    recall = recall_memmachine_context(system, user_query="When did Caroline mention the support group?")
+    assert "[1:56 pm on 8 May, 2023] Caroline: Caroline went to a LGBTQ support group yesterday." in recall

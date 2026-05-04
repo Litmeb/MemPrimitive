@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -25,8 +26,19 @@ from ._bench_adapters import (
     _iter_json_array_file,
     create_benchmark_adapter,
 )
-from ._memory_adapters import PipelineMemoryAdapter, create_mem0_memory_adapter, create_memmachine_memory_adapter
-from ._runner import Mem0LoCoMoAnswerRunner, SingleRecallLLMAnswerRunner, run_benchmark, write_predictions_jsonl
+from ._memory_adapters import (
+    PipelineMemoryAdapter,
+    create_dual_speaker_locomo_memory_adapter,
+    create_mem0_memory_adapter,
+    create_memmachine_memory_adapter,
+)
+from ._runner import (
+    MemMachineLoCoMoAnswerRunner,
+    Mem0LoCoMoAnswerRunner,
+    SingleRecallLLMAnswerRunner,
+    run_benchmark,
+    write_predictions_jsonl,
+)
 from ._types import AnswerRunner, BenchmarkPrediction, BenchmarkSample
 
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[2] / "benchmarks" / "outputs" / "minimal_baseline_predictions.jsonl"
@@ -243,6 +255,8 @@ def _create_cli_memory_adapter(
     similar_top_k: int = 5,
     mem0_speaker_workers: int = 2,
     memmachine_stm_record_budget: int = 20,
+    memory_binding: str | None = None,
+    memory_binding_kwargs: dict[str, Any] | None = None,
 ):
     adapter_name = str(name).strip().casefold()
     if adapter_name == "minimal":
@@ -259,11 +273,44 @@ def _create_cli_memory_adapter(
             stm_record_budget=memmachine_stm_record_budget,
             speaker_workers=mem0_speaker_workers,
         )
-    raise ValueError("Unsupported memory adapter. Choose from ['mem0', 'memmachine', 'minimal'].")
+    if adapter_name == "binding":
+        binding_factory = _load_memory_binding_factory(
+            memory_binding,
+            kwargs=dict(memory_binding_kwargs or {}),
+        )
+        return create_dual_speaker_locomo_memory_adapter(
+            binding_factory,
+            name=_binding_adapter_name(memory_binding),
+            speaker_workers=mem0_speaker_workers,
+        )
+    raise ValueError("Unsupported memory adapter. Choose from ['binding', 'mem0', 'memmachine', 'minimal'].")
+
+
+def _load_memory_binding_factory(spec: str | None, *, kwargs: dict[str, Any]):
+    if not spec:
+        raise ValueError("--memory-binding is required when --memory-adapter binding.")
+    module_name, separator, attr_name = str(spec).strip().partition(":")
+    if not separator:
+        module_name, _, attr_name = str(spec).strip().rpartition(".")
+    if not module_name or not attr_name:
+        raise ValueError("--memory-binding must be in 'module:factory' or 'module.factory' form.")
+    target = getattr(import_module(module_name), attr_name)
+    if not callable(target):
+        raise TypeError(f"Memory binding target {spec!r} is not callable.")
+    return lambda: target(**kwargs)
+
+
+def _binding_adapter_name(spec: str | None) -> str:
+    if not spec:
+        return "binding"
+    tail = str(spec).strip().replace(":", ".").rsplit(".", 1)[-1]
+    return tail or "binding"
 
 
 def _create_cli_answer_runner(*, benchmark_name: str, memory_adapter_name: str):
-    if benchmark_name == "locomo" and memory_adapter_name in {"mem0", "memmachine"}:
+    if benchmark_name == "locomo" and memory_adapter_name == "memmachine":
+        return MemMachineLoCoMoAnswerRunner()
+    if benchmark_name == "locomo" and memory_adapter_name in {"binding", "mem0"}:
         return Mem0LoCoMoAnswerRunner()
     return SingleRecallLLMAnswerRunner()
 
@@ -497,7 +544,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--mem0-speaker-workers",
         type=int,
         default=2,
-        help="Parallel speaker workers for Mem0/MemMachine LoCoMo memory load and recall.",
+        help="Parallel speaker workers for Mem0 LoCoMo memory load and recall. Ignored by MemMachine's shared-conversation adapter.",
     )
     parser.add_argument(
         "--memmachine-stm-record-budget",
@@ -513,12 +560,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory-adapter",
-        choices=("minimal", "mem0", "memmachine"),
+        choices=("minimal", "mem0", "memmachine", "binding"),
         default="minimal",
         help=(
             "Memory system to evaluate. 'minimal' preserves the legacy baseline; "
-            "'mem0' and 'memmachine' run classics reconstructions."
+            "'mem0' and 'memmachine' run classics reconstructions; "
+            "'binding' loads a MemorySystemBinding factory from --memory-binding."
         ),
+    )
+    parser.add_argument(
+        "--memory-binding",
+        default=None,
+        help="Import path for --memory-adapter binding, for example memprimitive.example.classics.mem0_memory:create_memory_binding.",
+    )
+    parser.add_argument(
+        "--memory-binding-kwargs",
+        default="{}",
+        help="JSON object passed to the binding factory when --memory-adapter binding.",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable the tqdm benchmark progress bar.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
@@ -530,6 +588,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     benchmark_name = str(args.benchmark).strip().casefold()
     memory_adapter_name = str(args.memory_adapter).strip().casefold()
+    if memory_adapter_name == "binding" and benchmark_name != "locomo":
+        raise ValueError("--memory-adapter binding currently uses the LoCoMo dual-speaker adapter; use --benchmark locomo.")
     limit = args.limit
     max_history_turns = args.max_history_turns
     if args.smoke_test:
@@ -541,12 +601,17 @@ def main(argv: list[str] | None = None) -> int:
         longmemeval_variant=args.longmemeval_variant,
         locomo_users=args.locomo_users,
     )
+    binding_kwargs = json.loads(args.memory_binding_kwargs)
+    if not isinstance(binding_kwargs, dict):
+        raise ValueError("--memory-binding-kwargs must be a JSON object.")
     memory_adapter = _create_cli_memory_adapter(
         memory_adapter_name,
         top_k=args.top_k,
         similar_top_k=args.similar_top_k,
         mem0_speaker_workers=args.mem0_speaker_workers,
         memmachine_stm_record_budget=args.memmachine_stm_record_budget,
+        memory_binding=args.memory_binding,
+        memory_binding_kwargs=binding_kwargs,
     )
     answer_runner = _create_cli_answer_runner(
         benchmark_name=benchmark_name,

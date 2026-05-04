@@ -42,11 +42,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from pprint import pprint
+from typing import Any
 
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
+from memprimitive.benchmarking._types import MemoryIngestEvent, MemoryRecall, RecallContext
 from memprimitive.baselines import (
     AppendOrganization,
     BasicRepresentation,
@@ -292,6 +294,57 @@ def ingest_message_pair(
 
 def recall_profile(system: dict[str, object], *, user_query: str) -> str:
     return system["reply_memory_pipeline"].recall(Query(text=user_query)).text
+
+
+class Mem0MemoryBinding:
+    """Benchmark binding for the classic Mem0 reconstruction."""
+
+    name = "mem0"
+
+    def __init__(
+        self,
+        *,
+        recent_top_k: int = 6,
+        similar_top_k: int = 5,
+        recall_top_k: int = 30,
+    ) -> None:
+        self.recent_top_k = recent_top_k
+        self.similar_top_k = similar_top_k
+        self.recall_top_k = recall_top_k
+
+    def build_system(self) -> dict[str, object]:
+        return build_mem0_memory_system(
+            recent_top_k=self.recent_top_k,
+            similar_top_k=self.similar_top_k,
+            recall_top_k=self.recall_top_k,
+        )
+
+    def ingest_event(self, system: dict[str, object], event: MemoryIngestEvent) -> Any:
+        return ingest_message_pair(
+            system,
+            user_text=event.text,
+            assistant_text=event.context_text,
+            session_id=event.session_id,
+            turn_id=event.turn_id,
+            timestamp=event.timestamp,
+        )
+
+    def recall(self, system: dict[str, object], query: Query, *, context: RecallContext) -> MemoryRecall:
+        del context
+        return MemoryRecall(text=recall_profile(system, user_query=query.text))
+
+
+def create_memory_binding(
+    *,
+    recent_top_k: int = 6,
+    similar_top_k: int = 5,
+    recall_top_k: int = 30,
+) -> Mem0MemoryBinding:
+    return Mem0MemoryBinding(
+        recent_top_k=recent_top_k,
+        similar_top_k=similar_top_k,
+        recall_top_k=recall_top_k,
+    )
 
 
 def main() -> None:

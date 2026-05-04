@@ -64,12 +64,16 @@ MEMPRIMITIVE_BASE_URL=...
 MEMPRIMITIVE_MODEL=...
 MEMPRIMITIVE_EMBEDDING_PROVIDER=sentence_transformers
 MEMPRIMITIVE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+MEMPRIMITIVE_RERANK_API_KEY=...
+MEMPRIMITIVE_RERANK_BASE_URL=...
+MEMPRIMITIVE_RERANK_MODEL=...
 ```
 
 Notes:
 
 - Embeddings default to local `sentence-transformers`; `MEMPRIMITIVE_EMBEDDING_MODEL` is optional in that mode and defaults to `sentence-transformers/all-MiniLM-L6-v2`.
 - To use an OpenAI-compatible embeddings API instead, set `MEMPRIMITIVE_EMBEDDING_PROVIDER=openai` plus `MEMPRIMITIVE_EMBEDDING_API_KEY`, `MEMPRIMITIVE_EMBEDDING_BASE_URL`, and `MEMPRIMITIVE_EMBEDDING_MODEL`.
+- Runtime rerank calls use a dedicated OpenAI-compatible `/rerank` endpoint configured by `MEMPRIMITIVE_RERANK_API_KEY`, `MEMPRIMITIVE_RERANK_BASE_URL`, and `MEMPRIMITIVE_RERANK_MODEL`.
 - Simple config validation does not need model credentials.
 - End-to-end execution of LLM-backed examples does need them.
 

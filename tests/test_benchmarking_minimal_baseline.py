@@ -5,10 +5,12 @@ from pathlib import Path
 
 from memprimitive.benchmarking.minimal_baseline import (
     BenchmarkSample,
+    MemMachineLoCoMoAnswerRunner,
     Mem0LoCoMoAnswerRunner,
     SingleRecallLLMAnswerRunner,
     _TqdmBenchmarkProgress,
     _create_cli_answer_runner,
+    _create_cli_memory_adapter,
     _iter_json_array_file,
     create_minimal_benchmark_pipeline,
     load_benchmark_samples,
@@ -252,8 +254,28 @@ def test_cli_answer_runner_switches_to_mem0_locomo_for_locomo_mem0() -> None:
     runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="mem0")
     assert isinstance(runner, Mem0LoCoMoAnswerRunner)
 
+    memmachine_runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="memmachine")
+    assert isinstance(memmachine_runner, MemMachineLoCoMoAnswerRunner)
+
+    binding_runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="binding")
+    assert isinstance(binding_runner, Mem0LoCoMoAnswerRunner)
+
     other_runner = _create_cli_answer_runner(benchmark_name="longmemeval", memory_adapter_name="mem0")
     assert isinstance(other_runner, SingleRecallLLMAnswerRunner)
+
+
+def test_cli_memory_adapter_can_load_binding_factory() -> None:
+    adapter = _create_cli_memory_adapter(
+        "binding",
+        top_k=None,
+        memory_binding="memprimitive.example.classics.mem0_memory:create_memory_binding",
+        memory_binding_kwargs={"recall_top_k": 2},
+    )
+
+    assert adapter.name == "create_memory_binding"
+    session = adapter.create_session()
+    assert session.speaker_1_binding.recall_top_k == 2
+    assert session.speaker_2_binding.recall_top_k == 2
 
 
 def test_tqdm_progress_groups_locomo_samples_by_user() -> None:
