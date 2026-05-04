@@ -18,7 +18,7 @@ from ._types import (
     BenchmarkSample,
     MemoryRecall,
 )
-from .prompts import ANSWER_PROMPT
+from .prompts import ANSWER_PROMPT, MEMMACHINE_ANSWER_PROMPT
 
 
 def _call_with_supported_kwargs(func, /, *args: Any, **kwargs: Any) -> Any:
@@ -107,6 +107,34 @@ class Mem0LoCoMoAnswerRunner:
                 "speaker_2_user_id": speaker_b,
                 "speaker_2_memories": speaker_2_memories,
                 "speaker_2_graph_memories": "",
+                "question": sample.query.text,
+            },
+        )
+        return self.runtime.text(system=self.system_prompt, user=rendered_user_prompt, temperature=0.0)
+
+
+class MemMachineLoCoMoAnswerRunner:
+    """Render the MemMachine LoCoMo answer prompt against one conversation memory block."""
+
+    name = "memmachine_locomo_answer"
+
+    def __init__(self, *, runtime: Runtime | None = None, system_prompt: str | None = None) -> None:
+        self.runtime = runtime if runtime is not None else Runtime()
+        self.system_prompt = system_prompt or ""
+
+    def answer(
+        self,
+        *,
+        sample: BenchmarkSample,
+        memory_recall: MemoryRecall | None = None,
+        retrieved_text: str | None = None,
+    ) -> str:
+        if memory_recall is None:
+            memory_recall = MemoryRecall(text=str(retrieved_text or ""))
+        rendered_user_prompt, _ = render_prompt_template(
+            MEMMACHINE_ANSWER_PROMPT,
+            {
+                "conversation_memories": memory_recall.text.strip(),
                 "question": sample.query.text,
             },
         )

@@ -1427,7 +1427,7 @@
 5. 特殊行为
    1. cluster 输入优先读取 `cluster_ids`；如果没有 `cluster_ids`，则按 `backward_ids + nucleus_record_id + forward_ids` 组装。
    2. record 解析先使用 `packet.retrieved.items`，再按 trace 中的 `layer` 到 store 回填；无法解析的 ids 会记录到 cluster trace 的 `unresolved_ids`，完全无法解析的 cluster 会被跳过。
-   3. `rerank=True` 时会把每个 cluster 渲染成 `"[record_id] text"` 行并交给 `runtime.rerank`；runtime 没返回的 cluster 会用 fallback trace 补齐。
+   3. `rerank=True` 时会把每个 cluster 渲染成 `"[record_id] text"` 行并交给 `runtime.rerank`；该 runtime reranker 会调用由 `MEMPRIMITIVE_RERANK_API_KEY` / `MEMPRIMITIVE_RERANK_BASE_URL` / `MEMPRIMITIVE_RERANK_MODEL` 配置的 OpenAI-compatible `/rerank` 接口，不再用 LLM prompt 模拟排序；runtime 没返回的 cluster 会用 fallback trace 补齐。
    4. 合并多个 cluster 时按 `record_id` 去重，并在 score 中保留 `source_nucleus_record_ids` 和 `roles`。
    5. 如果剩余 budget 放不下整个 cluster，会优先保留 nucleus episode，再按 cluster 内距离 nucleus 的近远选择邻居。
    6. trace 记录 `input_cluster_count`、`resolved_cluster_count`、`unresolved_cluster_count`、`reranked_clusters`、`returned_ids`、`deduped_duplicate_count` 和 `budget_truncated_count`。
@@ -1486,7 +1486,7 @@
 5. 特殊行为
    1. 这是一个 wrapper，不是新的底层索引结构。
    2. `query_expand_with_llm=True` 时，embedding 文本不再只是原 query，而是增强后的 note-like 文本。
-   3. `agentic_search=True` 时，最终排序由 runtime.rerank 决定，不再只是 seed+expand 的原始顺序。
+   3. `agentic_search=True` 时，最终排序由 runtime.rerank 决定；它会调用独立配置的 OpenAI-compatible reranker，而不是聊天 LLM JSON prompt，不再只是 seed+expand 的原始顺序。
 
 ### 8.14 `LayerAwareRetrieval`
 
@@ -2061,7 +2061,136 @@ class PromptPlan:
 2. `NeverTrigger` 当前主要作为 evolution 默认值存在，但仍然是实际可用类。
 3. 文档中所有 module 顺序按当前 registry 导出的公开面书写，而不是按历史文档兼容项排列。
 
-## 14. 建议查阅路径
+## 14. 评测接入用 memory binding 接口
+
+这一节不是 pipeline slot，而是 classics / benchmark 之间的稳定边界。目标是让一个 memory 系统只要实现最小接口，就能被评测脚本直接包装，而不用为每篇论文复制一套 LoCoMo loader、双 speaker session、progress、session reuse 和 JSONL 输出逻辑。
+
+### 14.1 memory 系统必须提供的接口
+
+一个可接入评测的 memory 系统应暴露一个 binding 对象，满足 `MemorySystemBinding` 协议：
+
+```python
+class MemorySystemBinding(Protocol):
+    name: str
+
+    def build_system(self) -> Any:
+        ...
+
+    def ingest_event(self, system: Any, event: MemoryIngestEvent) -> Any:
+        ...
+
+    def recall(self, system: Any, query: Query, *, context: RecallContext) -> MemoryRecall | str | Any:
+        ...
+```
+
+含义：
+
+1. `name`
+   系统短名，写入 benchmark prediction 的 `memory_adapter_name` 和 recall metadata。
+2. `build_system()`
+   创建一个干净、隔离的 memory system。不要复用全局 store；评测 adapter 会按 session 需要调用它。
+3. `ingest_event(system, event)`
+   写入一条标准化 memory event。系统内部可以把 event 转成自己的原生 helper 调用，例如 Mem0 的 pairwise 写入或 MemMachine 的 episode 写入。
+4. `recall(system, query, *, context)`
+   根据 `Query` 返回召回结果。推荐返回 `MemoryRecall`；返回 `str` 或带 `text/source_ids/metadata` 字段的对象也会被 benchmark adapter 归一化。
+
+classics 模块推荐再提供一个工厂函数：
+
+```python
+def create_memory_binding(**params) -> MemorySystemBinding:
+    ...
+```
+
+评测 CLI / adapter 只需要调用这个工厂函数，不应该知道系统内部有哪些 pipeline、store layer、tool、summary 或 graph 结构。
+
+### 14.2 `MemoryIngestEvent`
+
+`MemoryIngestEvent` 是 benchmark 到 memory 的标准写入事件：
+
+```python
+@dataclass
+class MemoryIngestEvent:
+    text: str
+    session_id: str
+    turn_id: str
+    user_id: str
+    speaker: str
+    role: str = "user"
+    timestamp: str | None = None
+    context_text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+```
+
+字段约定：
+
+1. `text`
+   当前目标视角下的主文本。LoCoMo 双 speaker adapter 会把目标 speaker 的话放在这里，并保留 speaker label。
+2. `context_text`
+   与主文本同轮相关的上下文文本。对 pairwise 系统，通常是另一位 speaker 的回复；对 episode 系统，可以和 `text` 拼接后作为一条 episode。
+3. `session_id` / `turn_id` / `timestamp`
+   数据集中的会话、轮次和时间信息。需要时间敏感行为的系统应把 `timestamp` 传入底层 `Observation` 或 record metadata。
+4. `user_id` / `speaker` / `role`
+   当前 memory system 视角下的用户标识和说话人。LoCoMo adapter 会为两个 speaker 分别生成独立 `user_id`。
+5. `metadata`
+   benchmark adapter 附带的额外信息。memory 系统可以保留这些字段用于 trace，但不应依赖某个 benchmark 私有字段才能工作。
+
+### 14.3 `RecallContext`
+
+`RecallContext` 是 benchmark 在 recall 阶段给 memory 的上下文：
+
+```python
+@dataclass
+class RecallContext:
+    sample_id: str
+    user_id: str
+    speaker: str
+    speaker_index: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+```
+
+使用边界：
+
+1. memory 系统可以用它做 scope、trace 或输出 metadata。
+2. memory 系统不应把 LoCoMo 的 `qa_category`、`adversarial_answer` 等字段写死进召回逻辑。
+3. 如果系统本身不需要上下文，可以忽略 `context`，但函数签名仍应保留。
+
+### 14.4 LoCoMo 双 speaker adapter 的职责
+
+LoCoMo 的双 speaker 形状属于评测适配层，不属于单个 memory 系统。`DualSpeakerLoCoMoMemoryAdapter` 负责：
+
+1. 为 `speaker_a` 和 `speaker_b` 各调用一次 `binding.build_system()`，得到两个独立系统。
+2. 按目标 speaker 视角把对话 turn pair 转成 `MemoryIngestEvent(text=..., context_text=...)`。
+3. 对同一个 `locomo_sample_id` 复用已加载 memory session，避免每道 QA 重复生成 memory。
+4. 合并两个 speaker 的 recall，并在 metadata 中写入：
+   1. `speaker_1_memories`
+   2. `speaker_2_memories`
+   3. `speaker_1_user_id`
+   4. `speaker_2_user_id`
+   5. `num_speaker_1_memories`
+   6. `num_speaker_2_memories`
+
+因此，新 classics 系统如果实现了 `create_memory_binding()`，评测脚本可以通过 `create_dual_speaker_locomo_memory_adapter(lambda: module.create_memory_binding(...))` 直接接入。
+
+CLI 也支持同一接口：
+
+```bash
+python -m memprimitive.benchmarking.minimal_baseline \
+  --benchmark locomo \
+  --memory-adapter binding \
+  --memory-binding memprimitive.example.classics.mem0_memory:create_memory_binding \
+  --memory-binding-kwargs '{"recall_top_k": 30}'
+```
+
+### 14.5 现有示例
+
+当前已按这个接口接入的 classics 系统：
+
+1. `memprimitive/example/classics/mem0_memory.py`
+   `Mem0MemoryBinding` 将 `MemoryIngestEvent.text/context_text` 映射到 `ingest_message_pair(user_text=..., assistant_text=...)`，并用 `recall_profile(...)` 返回 profile memory。
+2. `memprimitive/example/classics/memmachine_memory.py`
+   `MemMachineMemoryBinding` 将 `MemoryIngestEvent.text/context_text` 合并成 episode，调用 `ingest_episode(...)`，并用 `recall_memmachine_context(...)` 返回 STM summary、working memory、LTM episodes 和 profile memory。
+
+## 15. 建议查阅路径
 
 如果你需要继续往下追实现，推荐按下面顺序查：
 

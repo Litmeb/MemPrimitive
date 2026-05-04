@@ -160,6 +160,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
         token_budget: int | None = None,
         summary_max_sentences: int = 3,
         scope_metadata_keys: tuple[str, ...] = ("session_id",),
+        copy_evicted_to_ltm: bool = True,
     ) -> None:
         self.working_layer = str(working_layer).strip()
         self.ltm_episode_layer = str(ltm_episode_layer).strip()
@@ -189,6 +190,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
         self.token_budget = None if token_budget is None else int(token_budget)
         self.summary_max_sentences = int(summary_max_sentences)
         self.scope_metadata_keys = tuple(dict.fromkeys(normalized_scope_keys))
+        self.copy_evicted_to_ltm = bool(copy_evicted_to_ltm)
 
     def run(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
         self._validate_store_layers(store)
@@ -212,19 +214,22 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
 
             old_summary_records = self._summary_records_for_scope(store, scope)
             old_summary_record = old_summary_records[-1] if old_summary_records else None
-            ltm_records = [
-                self._build_ltm_episode_record(store, source_record=record, session_scope=scope)
-                for record in evicted_records
-            ]
-            sentence_records = [
-                sentence_record
-                for ltm_record in ltm_records
-                for sentence_record in self._build_ltm_sentence_records(
-                    store,
-                    episode_record=ltm_record,
-                    session_scope=scope,
-                )
-            ]
+            ltm_records = []
+            sentence_records = []
+            if self.copy_evicted_to_ltm:
+                ltm_records = [
+                    self._build_ltm_episode_record(store, source_record=record, session_scope=scope)
+                    for record in evicted_records
+                ]
+                sentence_records = [
+                    sentence_record
+                    for ltm_record in ltm_records
+                    for sentence_record in self._build_ltm_sentence_records(
+                        store,
+                        episode_record=ltm_record,
+                        session_scope=scope,
+                    )
+                ]
             new_summary_text = self._rewrite_summary(
                 old_summary_record=old_summary_record,
                 evicted_records=evicted_records,
@@ -288,6 +293,7 @@ class STMConsolidationEvolution(MemoryEvolutionModule):
             "token_budget": self.token_budget,
             "summary_max_sentences": self.summary_max_sentences,
             "scope_metadata_keys": list(self.scope_metadata_keys),
+            "copy_evicted_to_ltm": self.copy_evicted_to_ltm,
             "evicted_record_ids": evicted_record_ids,
             "moved_ltm_record_ids": moved_ltm_record_ids,
             "indexed_sentence_record_ids": indexed_sentence_record_ids,

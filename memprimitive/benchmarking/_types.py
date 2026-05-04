@@ -71,6 +71,32 @@ class MemoryRecall:
 
 
 @dataclass(slots=True)
+class MemoryIngestEvent:
+    """Benchmark-normalized event passed into classic memory systems."""
+
+    text: str
+    session_id: str
+    turn_id: str
+    user_id: str
+    speaker: str
+    role: str = "user"
+    timestamp: str | None = None
+    context_text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class RecallContext:
+    """Benchmark-side context passed alongside a recall query."""
+
+    sample_id: str
+    user_id: str
+    speaker: str
+    speaker_index: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class BenchmarkPrediction:
     sample_id: str
     benchmark_name: str
@@ -127,3 +153,19 @@ class MemoryAdapter(Protocol):
 
     def create_session(self) -> MemorySession:
         """Create a fresh per-sample memory session."""
+
+
+@runtime_checkable
+class MemorySystemBinding(Protocol):
+    """Small boundary a memory system implements to plug into benchmark adapters."""
+
+    name: str
+
+    def build_system(self) -> Any:
+        """Create a fresh, isolated memory system."""
+
+    def ingest_event(self, system: Any, event: MemoryIngestEvent) -> Any:
+        """Ingest one normalized memory event into the system."""
+
+    def recall(self, system: Any, query: Query, *, context: RecallContext) -> MemoryRecall | str | Any:
+        """Recall memory for one query and return text or MemoryRecall."""

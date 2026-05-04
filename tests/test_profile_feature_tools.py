@@ -81,6 +81,14 @@ def test_profile_feature_upsert_adds_structured_record_and_citations() -> None:
     assert result.effects[0]["effect_type"] == "profile_feature_upsert"
 
 
+def test_profile_feature_upsert_schema_declares_array_items() -> None:
+    upsert_tool, _delete_tool = build_profile_feature_tools()
+    properties = upsert_tool.parameters_json_schema["properties"]
+
+    assert properties["source_episode_record_ids"] == {"type": "array", "items": {"type": "string"}}
+    assert properties["citation_record_ids"] == {"type": "array", "items": {"type": "string"}}
+
+
 def test_profile_feature_upsert_updates_same_key_and_merges_citations() -> None:
     store = _profile_feature_store()
     source_1 = _append_source_episode(store, record_id="episode-1", text="Alice likes tea.")
