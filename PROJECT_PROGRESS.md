@@ -1,146 +1,79 @@
 # MemPrimitive Project Progress
 
-Shared long-lived status note for future agents. Keep this file short, current, and decision-oriented. Detailed audit history belongs in commits, tests, docs, or benchmark artifacts, not here.
+Shared long-lived status note for future agents. Keep this file short, current, and decision-oriented. Detailed benchmark history, classics coverage, and broad survey notes now live in [PROJECT_BROAD_STATUS_ARCHIVE.md](PROJECT_BROAD_STATUS_ARCHIVE.md).
 
-## Project Goal
+## Current Focus
 
-`MemPrimitive` expresses agent memory systems as composable primitives instead of paper-specific pipelines. The intended end state is:
+The next project phase is centered on **memory search and memory evolution**.
 
-- a unified primitive ontology / DSL
-- an executable runtime centered on `MemoryPipeline`
-- representative memory papers re-expressed inside one framework
-- explicit composition constraints for later search and evaluation
-- eventual motif discovery over the memory-system design space
+The framework already has enough basic primitives, examples, and benchmark wiring to stop treating paper reconstruction as the main workstream. The useful next step is to make memory systems searchable, evolvable, and comparable as composed mechanisms:
 
-## Current Position
+- search over valid memory-pipeline designs rather than hand-picking paper-shaped examples
+- expose retrieval, provenance, and readout behavior clearly enough for automated comparison
+- make evolution/maintenance modules composable under explicit trigger, store, topology, and metadata contracts
+- use LoCoMo/LongMemEval-style runs as feedback for mechanism search, not just as one-off reproductions
 
-The project is past the concept stage and is now in a framework-expansion phase.
+## Working Baseline
 
-- Core runtime is usable: slot-based composition, store/topology contracts, baseline modules, shared LLM/runtime paths, and real-model smoke coverage exist.
-- Documentation is mostly code-aligned. `README.md` gives the root orientation; `DSL_REFERENCE.zh-CN.md` is the detailed API-style reference; `.cursor/skills/memprimitive-dsl-brief/` is the short agent entrypoint.
-- `memprimitive/example/classics/` now contains executable mechanism-level reconstructions, including Mem0, Mem0g, MemMachine, A-MEM, RET-LLM/MemLLM, Reflexion, RecurrentGPT, TiM, memory sharing, and COMEDY-style maintenance.
-- Benchmarking has moved from a one-off minimal script toward a reusable adapter layer. LoCoMo and LongMemEval are the main normalized targets; DMR remains in the legacy compatibility wrapper; MSC is still not wired into the runner.
-- The local paper/code survey suggests MemPrimitive is most useful for medium-complexity memory mechanisms: profile/summary/maintenance/retrieval orchestration. Very light prompt-buffer systems may be cheaper ad hoc; heavy graph/planning systems still keep important bespoke algorithm work outside generic slots.
-
-## Established Boundaries
-
-Treat these as settled unless the architecture changes materially:
+Treat these as the current foundation:
 
 - `MemoryPipeline` is the strict validated public pipeline surface.
-- `FreeMemoryPipeline` is the permissive experimental ordered runner.
-- Baseline modules should remain the source of truth for framework capability; examples should compose them instead of hiding behavior in paper wrappers.
-- `openai-agents` and the shared `Runtime` paths are the active LLM/tool-call direction.
+- `FreeMemoryPipeline` is the permissive ordered-runner surface for experiments.
+- Baseline modules are the source of truth for framework capability; examples should compose them instead of hiding behavior in paper wrappers.
+- `DSL_SEMANTIC_OPERATION_MAP.zh-CN.md` is the current semantic map for splitting code-level DSL modules into search-ready memory design moves, including hard legality constraints vs soft search variables.
+- `DSL_SEMANTIC_OPERATION_IDEA_LIST.zh-CN.md` is the concise prioritized list of small semantic operations worth trying first in retrieval/evolution/search experiments.
+- `DSL_SEMANTIC_OPERATION_DESIGN_AGENT_IDEAS.zh-CN.md` is the design-agent inspiration list that separates small modification cues from insertable pipeline components.
+- `memprimitive/example/classics/memmachine_memory.py` is the strongest current reference for a search/evolution-heavy memory composition: working memory, STM consolidation, raw episodic LTM, sentence-derived indexing, parent/temporal expansion, cluster rerank, timestamped readout, and profile tools.
+- LoCoMo adapter work established the preferred generic memory-system boundary: `build_system`, `ingest_event`, and `recall`, loadable through `--memory-adapter binding --memory-binding module:create_memory_binding`.
+- Real runtime paths matter. Use `Runtime.embed()` and the dedicated `Runtime.rerank()` / `MEMPRIMITIVE_RERANK_*` path for retrieval work that depends on model behavior.
 - WSL repo Python commands should use `~/bin/winpy312`, not bare `python`, `python3`, or `conda run`.
 
-## Implemented Capability Highlights
+## Main Workstream
 
-- Declarative config bridge under `memprimitive/config/`: single-file YAML with `version/root/objects`, `$call` / `$import` / `$ref`, shared object reuse, slot-level shorthand, root loaders, validation CLI, examples, and tests.
-- Runtime model paths:
-  - OpenAI-compatible embeddings through `MEMPRIMITIVE_EMBEDDING_*`, with local `sentence-transformers` as default.
-  - Dedicated OpenAI-compatible rerank path through `MEMPRIMITIVE_RERANK_*` and `POST {base_url}/rerank`; rerank no longer uses chat-LLM prompt emulation.
-  - JSON coercion tolerates common real-model drift such as fenced JSON and repairable truncated arrays/objects.
-- Important reusable baseline/module additions include `FanoutIngestOrganization`, `MetadataRetrieval`, `ConfigurableEmbeddingRepresentation`, `RerankerRetrieval`, profile feature write tools, prompt-plan visible-record control, and MemMachine-oriented parent/temporal/cluster retrieval plus STM consolidation.
-- Baseline surface has also been intentionally tightened. Removed special cases should generally map to `GraphLinkEvolution`, `ConcatenateReadout`, `TemplateReadout`, `GraphAppendOrganization`, `GraphEntityDeduplicationAppendOrganization`, or existing retrieval families instead of compatibility aliases.
-- Raw benchmark assets are staged locally under `benchmarks/` for LoCoMo, LongMemEval, DMR, and MSC; `paper/DOWNLOAD_MANIFEST.md` tracks downloaded paper assets.
+1. **Retrieval/search surface**
+   - Make retrieved records, parent records, temporal neighbors, reranked candidates, and readout sections preserve stable provenance.
+   - Move from flat `RetrievedSet`-only thinking toward grouped/provenance-aware recall views when a memory system naturally has layers or expansion steps.
+   - Keep MemMachine-style contextualized retrieval as the immediate proving ground: direct episodic hits, sentence-hit parent expansion, temporal expansion, and rerank should be inspectable as separate stages.
 
-## Benchmark Status
+2. **Evolution/maintenance surface**
+   - Clarify which evolution modules mutate content, metadata, topology, or derived indexes.
+   - Make trigger conditions and evolution side effects explicit enough for automated composition checks.
+   - Prefer reusable evolution primitives over paper-specific helper glue when the behavior recurs: STM consolidation, profile feature updates, conflict/invalidation, summarization, link strengthening, and graph/entity maintenance.
 
-- Main CLI entrypoint remains `memprimitive/benchmarking/minimal_baseline.py`, but it is now mostly a compatibility wrapper over the adapter layer.
-- Normalized benchmark-side types and adapters cover LoCoMo and LongMemEval. Memory-side adapters can wrap plain pipelines, YAML-loaded pipelines, helper-style system dicts, pairwise dialogue-ingest systems, and generic memory bindings.
-- New systems can plug into LoCoMo-style evaluation through `--memory-adapter binding --memory-binding module:create_memory_binding` if they expose `build_system`, `ingest_event`, and `recall`.
-- LoCoMo CLI supports user filtering, smoke/cost caps, progress bars, adapter-specific top-k controls, Mem0 speaker parallelism, and max-worker recall/answer parallelism.
-- Mem0-style scoring utilities now live in `memprimitive/benchmarking/evals.py` and `generate_scores.py`, but the broader experiment tracking and comparison workflow is still thin.
+3. **Search-space formalization**
+   - Define machine-readable module compatibility: accepted stores, record metadata requirements, topology assumptions, trigger outputs, and representation dependencies.
+   - Separate hard legality constraints from soft search preferences.
+   - Capture common bundles only when the coupling is real, for example representation plus matching retrieval/index maintenance.
 
-Important fidelity notes:
+4. **Evaluation feedback loop**
+   - Use benchmark artifacts to diagnose mechanism failures first: empty recall, lost source ids, malformed metadata, wrong runtime shape, or missing temporal evidence.
+   - Keep LoCoMo and LongMemEval as the first search-feedback targets.
+   - Treat scoring/experiment tracking as supporting infrastructure for mechanism search, not as the main project goal by itself.
 
-- Mem0 LoCoMo uses two speaker-view memory systems and split speaker recall. It is useful as a mechanism stress test, but not a strict upstream reproduction because local ingest uses pairwise helper paths and per-fact fanout, while upstream batches chronological messages and updates extracted facts more compactly.
-- MemMachine LoCoMo should use one shared conversation memory, not two speaker memories. The repaired path ingests raw messages individually, immediately indexes LTM/sentence records, recalls with `limit=30` and `expand_context=3`, preserves source ids, and renders timestamped memory sections.
-- Do not compare the single-user Mem0 LoCoMo artifact directly with full LoCoMo paper scores; it covers only one conversation/user subset and uses a larger answer context than the paper table setting.
+## Near-Term Checkpoints
 
-## Main Open Gaps
+- Turn the semantic operation map into a small machine-readable compatibility schema when the next search/evolution implementation pass starts.
+- Audit current retrieval and evolution modules for missing metadata/provenance declarations.
+- Add the smallest compatibility schema needed to describe module legality and coupling.
+- Run focused regressions around MemMachine retrieval/evolution behavior before broader benchmark reruns.
+- When benchmark behavior looks wrong, inspect output JSONL/metrics before changing prompts.
 
-1. Declarative DSL bridge is still partial.
-   There is no reverse serialization, no finished config surface for multi-pipeline system dicts or full classics builders, no include/override/composition layer, and no machine-readable search-space schema.
+## Boundaries
 
-2. Search-space formalization is incomplete.
-   The repo has many ingredients, but not a finished representation of legality, coupling, bundles, topology constraints, and module compatibility.
+- Do not add speculative framework layers before the concrete retrieval/evolution contracts are clear.
+- Do not hide retrieval or evolution behavior inside classics wrappers when it can be expressed by baseline modules.
+- Do not replace real retrieval/rerank/model behavior with heuristic simulations unless the test is explicitly scoped to pure logic.
+- Do not treat temporal/session neighbors as graph neighbors; preserve mechanism boundaries literally.
+- Do not compare single-user or smoke-test artifacts directly with full paper scores.
 
-3. Faithful paper coverage remains incomplete.
-   Many systems are now executable at the mechanism level, but full paper/repo fidelity often depends on controller loops, graph algorithms, trainable retrievers, queue managers, or environment-specific orchestration outside the current primitive set.
+## Deferred Work
 
-4. Evaluation infrastructure is incomplete.
-   LoCoMo and LongMemEval can run through the adapter layer, but MSC is outside the runner, aggregate experiment tracking is thin, and scoring coverage is still centered on LoCoMo-style outputs.
+The following remain useful but are no longer the active project center:
 
-5. Motif discovery is later-stage work.
-   It depends on the DSL bridge, search-space formalization, and stronger evaluation workflow.
+- expanding the classics catalog for its own sake
+- strict reproduction of every paper/repo detail
+- broad benchmark harness polish not tied to search/evolution diagnosis
+- motif discovery over the full design space
+- MSC/DMR runner cleanup unless needed for the search/evolution loop
 
-## Classics Coverage Snapshot
-
-### Mem0 / Mem0g
-
-- Mem0 is reasonably close at the mechanism level: fact extraction, profile maintenance, prompt-plan visible candidate control, timestamp-preserving recall, and LoCoMo dual-speaker evaluation wiring exist.
-- Remaining Mem0 fidelity gaps are mainly upstream batching/update semantics, runtime cost, possible cross-speaker leakage from local helper shape, and strict reproduction of paper token/context settings.
-- Mem0g keeps both profile/vector and graph branches, but graph-native storage semantics, relation-level invalidation/update behavior, and full repo-style recall behavior remain only partial.
-
-### MemMachine
-
-- Core memory-layer reconstruction is now covered at the mechanism level: working memory, STM consolidation/overflow, raw episodic LTM, sentence-derived index, parent expansion, temporal neighbor expansion, cluster rerank, timestamped readout, and structured profile tools.
-- `memmachine_memory.py` and the LoCoMo adapter should be treated as the current preferred runtime shape.
-- Optional `RetrievalAgentRetrieval` is still not implemented: direct vs split-query vs chain-of-query routing and multi-query rerank remain a future refinement, not a core memory-layer blocker.
-
-### A-MEM / Agentic Memory
-
-- Executable mechanism-level reconstruction exists in `amem_memory.py`.
-- The preferred implementation is generic composition: LLM note fields, configurable embedding text, `GraphAppendOrganization`, and one bounded `LLMFunctionCallEvolution` with A-MEM-specific tools for current-note link strengthening and neighbor context/tag updates.
-- Remaining gaps are mostly prompt/fidelity tuning. Keyword rewrite should be treated as optional stretch because released repos emphasize context/tag updates more than full keyword mutation.
-
-### RET-LLM / MemLLM
-
-- `ret_llm_memory.py` remains a mechanism-level reconstruction, not a faithful reproduction.
-- The `MEM_READ` path scans the full triple layer and can return all matching triplets, but there is still no paper-style unified fine-tuned controller that emits both `MEM_WRITE` and `MEM_READ`.
-- Temporal conflict handling and exact triplet-table semantics remain approximate.
-
-### Reflexion / RecurrentGPT
-
-- Both are feasible without new primitive families when scoped to memory and prompt-context injection rather than the full agent loop.
-- `reflexion_memory.py` uses generic hierarchical evolution and bounded reflection buffers. It still lacks task-local trial-loop semantics unless callers isolate stores manually.
-- `recurrentgpt_memory.py` follows the released repo shape: bounded short memory rewrite, append-only paragraph memory, vector recall, and prompt assembly.
-
-### TiM
-
-- `tim_memory.py` should be treated as reasonably paper-aligned for the memory mechanism itself, while still excluding the surrounding agent loop.
-- Hash grouping, bucket-local forget/merge, and thought extraction are implemented through example-level helper orchestration plus generic representations/retrieval/evolution.
-- A first-class reusable hash-bucketing representation/retrieval path would still be useful later if TiM-style behavior should become declarative rather than example glue.
-
-### Memory Sharing / INMS
-
-- `memory_sharing_memory.py` intentionally targets a narrow repo-consistent memory slice: accepted prompt-answer examples, LLM-judge write filtering, domain/pool metadata, embedding recall, and a placeholder hook for retriever updates.
-- It should not be described as fully paper-aligned: online retriever training, separate experimental memory pools, bootstrap prompt-less memories, and rubric-specific score semantics are not fully reproduced.
-
-### Other Boundary Systems
-
-- MemGPT is feasible as a memory-only mechanism with example-level glue, but paper/repo fidelity likely needs a dedicated queue-manager/compaction primitive family.
-- HippoRAG and AriGraph still point to graph retrieval, propagation, and graph-maintenance gaps.
-- HiAgent still points to hierarchical working-memory management gaps.
-- LightMem still points to staged/offline maintenance gaps.
-- Mnemis code is public, but the release is not an end-to-end reproduction; it depends on Graphiti, Neo4j, and external LLM credentials.
-
-## Architecture Boundaries To Remember
-
-- Trigger outputs are still easier to align to incoming units than to arbitrary store-side candidate subsets.
-- Retrieval output is still mostly a flat `RetrievedSet`; richer grouped/provenance-aware recall views remain underdeveloped.
-- Durable storage backends are a separate runtime/backend-semantics concern. Current baseline code still assumes easy full scans and synchronous record mutation more often than DB-backed product systems do.
-- Trigger diversity is real, but literature review suggests representation, organization, maintenance/evolution, and retrieval differences usually matter more.
-
-## Recommended Next Focus
-
-1. Close concrete paper-fidelity gaps with the smallest reusable module families.
-2. Make hidden metadata, provenance, and coupling contracts machine-readable.
-3. Extend the DSL/config bridge toward multi-pipeline classics and search-space schemas.
-4. Strengthen benchmark scoring, experiment tracking, and cross-system comparison after the above contracts stabilize.
-
-## Repository Notes
-
-- The repo may contain unrelated in-progress changes; do not overwrite them casually.
-- Prefer targeted tests for the changed area. Full test runs can be slow.
-- When benchmark behavior looks wrong, inspect output JSONL/metrics first: empty recall, missing source ids, or malformed metadata often explain score collapses faster than prompt speculation.
+See [PROJECT_BROAD_STATUS_ARCHIVE.md](PROJECT_BROAD_STATUS_ARCHIVE.md) for the broader status snapshot that used to live here.
