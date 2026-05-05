@@ -29,6 +29,7 @@ from ._bench_adapters import (
 from ._memory_adapters import (
     PipelineMemoryAdapter,
     create_dual_speaker_locomo_memory_adapter,
+    create_amem_memory_adapter,
     create_mem0_memory_adapter,
     create_memmachine_memory_adapter,
 )
@@ -267,6 +268,11 @@ def _create_cli_memory_adapter(
             similar_top_k=similar_top_k,
             speaker_workers=mem0_speaker_workers,
         )
+    if adapter_name == "amem":
+        return create_amem_memory_adapter(
+            top_k=top_k,
+            speaker_workers=mem0_speaker_workers,
+        )
     if adapter_name == "memmachine":
         return create_memmachine_memory_adapter(
             top_k=top_k,
@@ -283,7 +289,7 @@ def _create_cli_memory_adapter(
             name=_binding_adapter_name(memory_binding),
             speaker_workers=mem0_speaker_workers,
         )
-    raise ValueError("Unsupported memory adapter. Choose from ['binding', 'mem0', 'memmachine', 'minimal'].")
+    raise ValueError("Unsupported memory adapter. Choose from ['binding', 'mem0', 'amem', 'memmachine', 'minimal'].")
 
 
 def _load_memory_binding_factory(spec: str | None, *, kwargs: dict[str, Any]):
@@ -308,7 +314,7 @@ def _binding_adapter_name(spec: str | None) -> str:
 
 
 def _create_cli_answer_runner(*, benchmark_name: str, memory_adapter_name: str):
-    if benchmark_name == "locomo" and memory_adapter_name == "memmachine":
+    if benchmark_name == "locomo" and memory_adapter_name in {"amem", "memmachine"}:
         return MemMachineLoCoMoAnswerRunner()
     if benchmark_name == "locomo" and memory_adapter_name in {"binding", "mem0"}:
         return Mem0LoCoMoAnswerRunner()
@@ -544,7 +550,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--mem0-speaker-workers",
         type=int,
         default=2,
-        help="Parallel speaker workers for Mem0 LoCoMo memory load and recall. Ignored by MemMachine's shared-conversation adapter.",
+        help="Parallel speaker workers for Mem0 LoCoMo memory load and recall. Ignored by A-MEM and MemMachine shared-conversation adapters.",
     )
     parser.add_argument(
         "--memmachine-stm-record-budget",
@@ -560,11 +566,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory-adapter",
-        choices=("minimal", "mem0", "memmachine", "binding"),
+        choices=("minimal", "mem0", "amem", "memmachine", "binding"),
         default="minimal",
         help=(
             "Memory system to evaluate. 'minimal' preserves the legacy baseline; "
-            "'mem0' and 'memmachine' run classics reconstructions; "
+            "'mem0', 'amem', and 'memmachine' run classics reconstructions; "
             "'binding' loads a MemorySystemBinding factory from --memory-binding."
         ),
     )

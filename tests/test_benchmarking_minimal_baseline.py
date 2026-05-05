@@ -9,6 +9,7 @@ from memprimitive.benchmarking.minimal_baseline import (
     Mem0LoCoMoAnswerRunner,
     SingleRecallLLMAnswerRunner,
     _TqdmBenchmarkProgress,
+    _build_arg_parser,
     _create_cli_answer_runner,
     _create_cli_memory_adapter,
     _iter_json_array_file,
@@ -254,6 +255,9 @@ def test_cli_answer_runner_switches_to_mem0_locomo_for_locomo_mem0() -> None:
     runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="mem0")
     assert isinstance(runner, Mem0LoCoMoAnswerRunner)
 
+    amem_runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="amem")
+    assert isinstance(amem_runner, MemMachineLoCoMoAnswerRunner)
+
     memmachine_runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="memmachine")
     assert isinstance(memmachine_runner, MemMachineLoCoMoAnswerRunner)
 
@@ -276,6 +280,21 @@ def test_cli_memory_adapter_can_load_binding_factory() -> None:
     session = adapter.create_session()
     assert session.speaker_1_binding.recall_top_k == 2
     assert session.speaker_2_binding.recall_top_k == 2
+
+
+def test_cli_memory_adapter_can_build_amem_adapter() -> None:
+    adapter = _create_cli_memory_adapter("amem", top_k=7)
+
+    assert adapter.name == "amem"
+    session = adapter.create_session()
+    assert session.binding.recall_top_k == 7
+
+
+def test_cli_memory_adapter_choices_include_amem() -> None:
+    parser = _build_arg_parser()
+    action = next(item for item in parser._actions if item.dest == "memory_adapter")
+
+    assert "amem" in action.choices
 
 
 def test_tqdm_progress_groups_locomo_samples_by_user() -> None:

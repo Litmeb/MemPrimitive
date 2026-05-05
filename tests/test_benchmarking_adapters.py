@@ -20,6 +20,7 @@ from memprimitive.benchmarking import (
     PairwiseDialogueMemoryAdapter,
     PipelineMemoryAdapter,
     MemoryRecall,
+    create_amem_memory_adapter,
     create_dual_speaker_locomo_memory_adapter,
     create_mem0_memory_adapter,
     create_memmachine_memory_adapter,
@@ -478,6 +479,111 @@ def test_create_memmachine_memory_adapter_uses_shared_conversation_system(monkey
     assert ingest_calls[1]["text"] == "likes coffee."
     assert ingest_calls[0]["user_id"] == "conversation:locomo-user-1"
     assert ingest_calls[1]["user_id"] == "conversation:locomo-user-1"
+    assert ingest_calls[0]["metadata"]["source_speaker"] == "Alice"
+    assert ingest_calls[1]["metadata"]["source_speaker"] == "Bob"
+    assert [call["timestamp"] for call in ingest_calls] == [
+        "2026-04-17T08:00:00Z",
+        "2026-04-17T08:00:00Z",
+    ]
+
+
+def test_create_amem_memory_adapter_uses_shared_conversation_system(monkeypatch) -> None:
+    from memprimitive.example.classics import amem_memory
+
+    build_calls: list[dict[str, object]] = []
+    ingest_calls: list[dict[str, object]] = []
+
+    def _build_system(
+        *,
+        note_namespace: str,
+        candidate_k: int,
+        recall_top_k: int,
+    ) -> dict[str, object]:
+        build_calls.append(
+            {
+                "note_namespace": note_namespace,
+                "candidate_k": candidate_k,
+                "recall_top_k": recall_top_k,
+            }
+        )
+        return {"label": f"amem-{len(build_calls)}", "notes": []}
+
+    def _ingest_note(
+        system: dict[str, object],
+        *,
+        text: str,
+        source: str = "dialogue",
+        timestamp: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        ingest_calls.append(
+            {
+                "system_label": system["label"],
+                "text": text,
+                "source": source,
+                "timestamp": timestamp,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        system["notes"].append(text)
+
+    def _recall_memory(system: dict[str, object], *, user_query: str):
+        return MemoryRecall(text=f"{system['label']} :: {user_query} :: {len(system['notes'])} notes")
+
+    monkeypatch.setattr(amem_memory, "build_amem_memory_system", _build_system)
+    monkeypatch.setattr(amem_memory, "ingest_note", _ingest_note)
+    monkeypatch.setattr(amem_memory, "recall_amem_memory", _recall_memory)
+
+    adapter = create_amem_memory_adapter(top_k=12)
+    session = adapter.create_session()
+    assert build_calls == [
+        {
+            "note_namespace": "amem",
+            "candidate_k": 5,
+            "recall_top_k": 12,
+        }
+    ]
+
+    sample = BenchmarkSample(
+        sample_id="amem-timestamps",
+        benchmark_name="locomo",
+        history_observations=[],
+        history_turns=[
+            ConversationTurn(
+                turn_id="turn-1",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="user",
+                speaker="Alice",
+                text="likes tea.",
+            ),
+            ConversationTurn(
+                turn_id="turn-2",
+                session_id="session-1",
+                session_timestamp="2026-04-17T08:00:00Z",
+                role="assistant",
+                speaker="Bob",
+                text="likes coffee.",
+            ),
+        ],
+        query=Query(text="What should be remembered?"),
+        reference_answer="unused",
+        metadata={
+            "speaker_a": "Alice",
+            "speaker_b": "Bob",
+            "locomo_user_index": 1,
+        },
+    )
+    session.load_case(sample)
+    recall = session.recall(Query(text="What should be remembered?"), sample=sample)
+
+    assert "amem-1 :: What should be remembered? :: 2 notes" in recall.text
+    assert recall.metadata["loaded_message_count"] == 2
+    assert recall.metadata["recall_helper"] == "amem.recall"
+    assert recall.metadata["conversation_user_id"] == "conversation:locomo-user-1"
+    assert [call["system_label"] for call in ingest_calls] == ["amem-1", "amem-1"]
+    assert ingest_calls[0]["text"] == "likes tea."
+    assert ingest_calls[1]["text"] == "likes coffee."
     assert ingest_calls[0]["metadata"]["source_speaker"] == "Alice"
     assert ingest_calls[1]["metadata"]["source_speaker"] == "Bob"
     assert [call["timestamp"] for call in ingest_calls] == [

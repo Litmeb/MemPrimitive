@@ -9,7 +9,7 @@ from typing import Any, Callable
 from ..config import load_pipeline_from_yaml
 from ..core import Observation, Query, Readout
 from ..pipeline import FreeMemoryPipeline, MemoryPipeline
-from ..example.classics import mem0_memory, memmachine_memory
+from ..example.classics import amem_memory, mem0_memory, memmachine_memory
 from ._types import (
     BenchmarkSample,
     ConversationTurn,
@@ -759,6 +759,26 @@ def create_memmachine_memory_adapter(
             expand_context=3,
             profile_top_k=10 if top_k is None else top_k,
             stm_record_budget=stm_record_budget,
+        ),
+        name=name,
+    )
+
+
+def create_amem_memory_adapter(
+    *,
+    name: str = "amem",
+    top_k: int | None = None,
+    speaker_workers: int = 1,
+) -> SharedConversationLoCoMoMemoryAdapter:
+    """Create a LoCoMo adapter for the classic A-MEM reconstruction."""
+
+    del speaker_workers
+    recall_top_k = 30 if top_k is None else top_k
+    return SharedConversationLoCoMoMemoryAdapter(
+        binding_factory=lambda: amem_memory.create_memory_binding(
+            note_namespace="amem",
+            candidate_k=5,
+            recall_top_k=recall_top_k,
         ),
         name=name,
     )

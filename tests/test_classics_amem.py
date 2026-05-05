@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from memprimitive import Query
+from memprimitive.benchmarking import MemoryIngestEvent, RecallContext
 from memprimitive.example.classics.amem_memory import (
+    create_memory_binding,
     build_amem_memory_system,
     ingest_note,
+    recall_amem_memory,
     recall_notes,
 )
 from memprimitive.utils._template import ensure_prompt_plan
@@ -105,3 +109,53 @@ def test_amem_classics_end_to_end_ingest_and_recall(monkeypatch: pytest.MonkeyPa
     assert "- Alice likes tea." in rendered
     assert "context: Alice's tea habit is now understood as a focus-supporting routine." in rendered
     assert "tags: preference, habit, focus" in rendered
+
+
+def test_amem_memory_binding_ingest_event_and_recall(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import LLMRepresentation
+
+    fake_runtime = _FakeAMEMRuntime()
+    monkeypatch.setattr(_runtime, "_DEFAULT_RUNTIME", fake_runtime)
+    monkeypatch.setattr(LLMRepresentation, "_runtime", lambda self: fake_runtime)
+
+    binding = create_memory_binding(recall_top_k=2)
+    system = binding.build_system()
+    write_pipeline = system["write_pipeline"]
+    monkeypatch.setattr(write_pipeline.memory_evolution, "_run_agent", lambda **_: "NO_ACTION")
+
+    binding.ingest_event(
+        system,
+        MemoryIngestEvent(
+            text="Alice likes tea.",
+            context_text="Bob says this is part of her evening routine.",
+            session_id="session-1",
+            turn_id="turn-1",
+            user_id="conversation:locomo-user-1",
+            speaker="Alice",
+            role="user",
+            timestamp="2026-04-17T08:00:00Z",
+            metadata={
+                "locomo_sample_id": "conv-1",
+                "blip_caption": "Alice holding a teacup.",
+            },
+        ),
+    )
+
+    records = system["store"].iter_records("knowledge_graph")
+    assert len(records) == 1
+    record = records[0]
+    assert "[ATTACHED: Alice holding a teacup.]" in record.text
+    assert record.metadata["session_id"] == "session-1"
+    assert record.metadata["user_id"] == "conversation:locomo-user-1"
+    assert record.metadata["source_timestamp"] == "2026-04-17T08:00:00Z"
+    assert record.metadata["source_speaker"] == "Alice"
+
+    recall = binding.recall(
+        system,
+        Query(text="What should be remembered about Alice?"),
+        context=RecallContext(sample_id="sample-1", user_id="conversation:locomo-user-1", speaker="conversation"),
+    )
+
+    assert recall.text == recall_amem_memory(system, user_query="What should be remembered about Alice?").text
+    assert recall.source_ids == [record.record_id]
+    assert recall.metadata["format"] == "note_render"

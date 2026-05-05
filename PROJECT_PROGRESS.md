@@ -25,6 +25,7 @@ Treat these as the current foundation:
 - `DSL_SEMANTIC_OPERATION_DESIGN_AGENT_IDEAS.zh-CN.md` is the design-agent inspiration list that separates small modification cues from insertable pipeline components.
 - `memprimitive/example/classics/memmachine_memory.py` is the strongest current reference for a search/evolution-heavy memory composition: working memory, STM consolidation, raw episodic LTM, sentence-derived indexing, parent/temporal expansion, cluster rerank, timestamped readout, and profile tools.
 - LoCoMo adapter work established the preferred generic memory-system boundary: `build_system`, `ingest_event`, and `recall`, loadable through `--memory-adapter binding --memory-binding module:create_memory_binding`.
+- Shared-conversation LoCoMo classics baselines now cover both `memmachine` and `amem`; A-MEM is wired through the same benchmark-facing boundary while keeping its graph-note write/evolution mechanism unchanged.
 - Real runtime paths matter. Use `Runtime.embed()` and the dedicated `Runtime.rerank()` / `MEMPRIMITIVE_RERANK_*` path for retrieval work that depends on model behavior.
 - WSL repo Python commands should use `~/bin/winpy312`, not bare `python`, `python3`, or `conda run`.
 

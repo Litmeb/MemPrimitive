@@ -31,11 +31,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from pprint import pprint
+from typing import Any
 
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memprimitive import MemoryPipeline, MemoryStore, Observation, Query, StoreLayerSpec, StoreTopology
+from memprimitive.benchmarking._types import MemoryIngestEvent, MemoryRecall, RecallContext
 from memprimitive.baselines import (
     AlwaysTrigger,
     ConfigurableEmbeddingRepresentation,
@@ -220,28 +222,120 @@ def ingest_note(
     *,
     text: str,
     source: str = "dialogue",
+    timestamp: str | None = None,
     metadata: dict[str, object] | None = None,
 ) -> None:
     write_pipeline = system["write_pipeline"]
     assert isinstance(write_pipeline, MemoryPipeline)
+    observation_kwargs: dict[str, object] = {}
+    if timestamp is not None:
+        observation_kwargs["timestamp"] = timestamp
     write_pipeline.ingest(
         Observation(
             text=text,
             source=source,
             metadata={} if metadata is None else dict(metadata),
+            **observation_kwargs,
         )
     )
 
 
+def recall_amem_memory(system: dict[str, object], *, user_query: str) -> MemoryRecall:
+    return _recall_query(
+        system,
+        Query(text=user_query),
+    )
+
+
 def recall_notes(system: dict[str, object], *, user_query: str) -> str:
+    return recall_amem_memory(system, user_query=user_query).text
+
+
+class AMEMMemoryBinding:
+    """Benchmark binding for the classic A-MEM reconstruction."""
+
+    name = "amem"
+
+    def __init__(
+        self,
+        *,
+        note_namespace: str = "amem",
+        candidate_k: int = 5,
+        recall_top_k: int = 5,
+    ) -> None:
+        self.note_namespace = note_namespace
+        self.candidate_k = candidate_k
+        self.recall_top_k = recall_top_k
+
+    def build_system(self) -> dict[str, object]:
+        return build_amem_memory_system(
+            note_namespace=self.note_namespace,
+            candidate_k=self.candidate_k,
+            recall_top_k=self.recall_top_k,
+        )
+
+    def ingest_event(self, system: dict[str, object], event: MemoryIngestEvent) -> Any:
+        parts = [part.strip() for part in (event.text, event.context_text) if part.strip()]
+        attachment_suffix = ""
+        raw_blip_caption = event.metadata.get("blip_caption")
+        if raw_blip_caption:
+            attachment_suffix = f" [ATTACHED: {str(raw_blip_caption).strip()}]"
+        text = "\n".join(parts) if parts else ""
+        return ingest_note(
+            system,
+            text=f"{text}{attachment_suffix}".strip(),
+            source=event.speaker or event.role,
+            timestamp=event.timestamp,
+            metadata={
+                "turn_id": event.turn_id,
+                "session_id": event.session_id,
+                "user_id": event.user_id,
+                "source_timestamp": event.timestamp or "",
+                "source_speaker": event.speaker or event.role,
+                **dict(event.metadata),
+            },
+        )
+
+    def recall(self, system: dict[str, object], query: Query, *, context: RecallContext) -> MemoryRecall:
+        del context
+        if query.embedding is None:
+            return recall_amem_memory(system, user_query=query.text)
+        return _recall_query(system, query)
+
+
+def create_memory_binding(
+    *,
+    note_namespace: str = "amem",
+    candidate_k: int = 5,
+    recall_top_k: int = 5,
+) -> AMEMMemoryBinding:
+    return AMEMMemoryBinding(
+        note_namespace=note_namespace,
+        candidate_k=candidate_k,
+        recall_top_k=recall_top_k,
+    )
+
+
+def _recall_query(system: dict[str, object], query: Query) -> MemoryRecall:
     recall_pipeline = system["recall_pipeline"]
     assert isinstance(recall_pipeline, MemoryPipeline)
-    return recall_pipeline.recall(
-        Query(
-            text=user_query,
-            embedding=list(get_runtime().embed(user_query)),
-        )
-    ).text
+    normalized_query = _query_with_embedding(query)
+    readout = recall_pipeline.recall(normalized_query)
+    return MemoryRecall(
+        text=readout.text,
+        source_ids=list(readout.source_ids),
+        metadata=dict(readout.metadata),
+    )
+
+
+def _query_with_embedding(query: Query) -> Query:
+    if query.embedding is not None:
+        return Query(text=query.text, metadata=dict(query.metadata), embedding=list(query.embedding))
+    return Query(
+        text=query.text,
+        metadata=dict(query.metadata),
+        embedding=list(get_runtime().embed(query.text)),
+    )
 
 
 def main() -> None:
