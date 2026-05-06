@@ -19,6 +19,7 @@ from memprimitive.baselines import (
     EmbeddingSimilarityRetrieval,
     PassThroughUnitFormation,
 )
+from memprimitive.example.classics import amem_memory, mem0_memory, memmachine_memory
 
 from ._bench_adapters import (
     DEFAULT_BENCHMARK_ROOT,
@@ -29,6 +30,7 @@ from ._bench_adapters import (
 from ._memory_adapters import (
     PipelineMemoryAdapter,
     create_dual_speaker_locomo_memory_adapter,
+    create_generic_memory_binding_adapter,
     create_amem_memory_adapter,
     create_mem0_memory_adapter,
     create_memmachine_memory_adapter,
@@ -252,6 +254,7 @@ def _minimal_memory_adapter(*, top_k: int) -> PipelineMemoryAdapter:
 def _create_cli_memory_adapter(
     name: str,
     *,
+    benchmark_name: str = "locomo",
     top_k: int | None,
     similar_top_k: int = 5,
     mem0_speaker_workers: int = 2,
@@ -260,20 +263,52 @@ def _create_cli_memory_adapter(
     memory_binding_kwargs: dict[str, Any] | None = None,
 ):
     adapter_name = str(name).strip().casefold()
+    normalized_benchmark_name = str(benchmark_name).strip().casefold()
     if adapter_name == "minimal":
         return _minimal_memory_adapter(top_k=5 if top_k is None else top_k)
     if adapter_name == "mem0":
+        if normalized_benchmark_name == "longmemeval":
+            recall_top_k = 30 if top_k is None else top_k
+            return create_generic_memory_binding_adapter(
+                lambda: mem0_memory.create_memory_binding(
+                    recent_top_k=6,
+                    recall_top_k=recall_top_k,
+                    similar_top_k=similar_top_k,
+                ),
+                name="mem0",
+            )
         return create_mem0_memory_adapter(
             top_k=top_k,
             similar_top_k=similar_top_k,
             speaker_workers=mem0_speaker_workers,
         )
     if adapter_name == "amem":
+        if normalized_benchmark_name == "longmemeval":
+            recall_top_k = 30 if top_k is None else top_k
+            return create_generic_memory_binding_adapter(
+                lambda: amem_memory.create_memory_binding(
+                    note_namespace="amem",
+                    candidate_k=5,
+                    recall_top_k=recall_top_k,
+                ),
+                name="amem",
+            )
         return create_amem_memory_adapter(
             top_k=top_k,
             speaker_workers=mem0_speaker_workers,
         )
     if adapter_name == "memmachine":
+        if normalized_benchmark_name == "longmemeval":
+            limit = 30 if top_k is None else top_k
+            return create_generic_memory_binding_adapter(
+                lambda: memmachine_memory.create_memory_binding(
+                    limit=limit,
+                    expand_context=3,
+                    profile_top_k=10 if top_k is None else top_k,
+                    stm_record_budget=memmachine_stm_record_budget,
+                ),
+                name="memmachine",
+            )
         return create_memmachine_memory_adapter(
             top_k=top_k,
             stm_record_budget=memmachine_stm_record_budget,
@@ -284,6 +319,11 @@ def _create_cli_memory_adapter(
             memory_binding,
             kwargs=dict(memory_binding_kwargs or {}),
         )
+        if normalized_benchmark_name == "longmemeval":
+            return create_generic_memory_binding_adapter(
+                binding_factory,
+                name=_binding_adapter_name(memory_binding),
+            )
         return create_dual_speaker_locomo_memory_adapter(
             binding_factory,
             name=_binding_adapter_name(memory_binding),
@@ -594,8 +634,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     benchmark_name = str(args.benchmark).strip().casefold()
     memory_adapter_name = str(args.memory_adapter).strip().casefold()
-    if memory_adapter_name == "binding" and benchmark_name != "locomo":
-        raise ValueError("--memory-adapter binding currently uses the LoCoMo dual-speaker adapter; use --benchmark locomo.")
     limit = args.limit
     max_history_turns = args.max_history_turns
     if args.smoke_test:
@@ -612,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--memory-binding-kwargs must be a JSON object.")
     memory_adapter = _create_cli_memory_adapter(
         memory_adapter_name,
+        benchmark_name=benchmark_name,
         top_k=args.top_k,
         similar_top_k=args.similar_top_k,
         mem0_speaker_workers=args.mem0_speaker_workers,

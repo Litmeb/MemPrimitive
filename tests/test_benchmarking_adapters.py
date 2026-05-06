@@ -17,11 +17,13 @@ from memprimitive.benchmarking import (
     BenchmarkSample,
     ConversationTurn,
     FunctionMemoryAdapter,
+    GenericMemoryBindingAdapter,
     PairwiseDialogueMemoryAdapter,
     PipelineMemoryAdapter,
     MemoryRecall,
     create_amem_memory_adapter,
     create_dual_speaker_locomo_memory_adapter,
+    create_generic_memory_binding_adapter,
     create_mem0_memory_adapter,
     create_memmachine_memory_adapter,
     create_yaml_pipeline_memory_adapter,
@@ -649,6 +651,94 @@ def test_dual_speaker_locomo_adapter_accepts_any_memory_binding() -> None:
     assert "Alice_1 sees 1 events for tea" in recall.text
     assert "Bob_1 sees 1 events for tea" in recall.text
     assert recall.metadata["recall_helper"] == "custom.recall"
+
+
+def test_generic_memory_binding_adapter_ingests_longmemeval_turns() -> None:
+    events: list[object] = []
+    contexts: list[object] = []
+
+    class _Binding:
+        name = "custom-generic"
+
+        def build_system(self) -> dict[str, object]:
+            return {"events": events}
+
+        def ingest_event(self, system: dict[str, object], event) -> None:
+            system_events = system["events"]
+            assert isinstance(system_events, list)
+            system_events.append(event)
+
+        def recall(self, system: dict[str, object], query: Query, *, context):
+            contexts.append(context)
+            system_events = system["events"]
+            assert isinstance(system_events, list)
+            return MemoryRecall(
+                text=f"{context.user_id} sees {len(system_events)} events for {query.text}",
+                source_ids=["source-1"],
+                metadata={"custom_recall": True},
+            )
+
+    adapter = create_generic_memory_binding_adapter(lambda: _Binding(), name="custom-generic")
+    sample = BenchmarkSample(
+        sample_id="q-1",
+        benchmark_name="longmemeval",
+        history_observations=[],
+        history_turns=[
+            ConversationTurn(
+                turn_id="session-a-turn-1",
+                session_id="session-a",
+                session_timestamp="2024-01-01",
+                role="user",
+                speaker="user",
+                text="Alice likes tea.",
+                metadata={"turn_index": 1, "original_field": "kept"},
+            ),
+            ConversationTurn(
+                turn_id="session-a-turn-2",
+                session_id="session-a",
+                session_timestamp="2024-01-01",
+                role="assistant",
+                speaker="assistant",
+                text="Noted.",
+                metadata={"turn_index": 2},
+            ),
+        ],
+        query=Query(text="Who likes tea?", metadata={"question_type": "single-hop"}),
+        reference_answer="Alice",
+        metadata={"variant": "s_cleaned", "question_date": "2024-01-02"},
+    )
+
+    session = adapter.create_session()
+    session.load_case(sample)
+    recall = session.recall(sample.query, sample=sample)
+
+    assert isinstance(adapter, GenericMemoryBindingAdapter)
+    assert len(events) == 2
+    first_event = events[0]
+    assert first_event.text == "Alice likes tea."
+    assert first_event.context_text == ""
+    assert first_event.user_id == "longmemeval:q-1"
+    assert first_event.session_id == "session-a"
+    assert first_event.turn_id == "session-a-turn-1"
+    assert first_event.timestamp == "2024-01-01"
+    assert first_event.role == "user"
+    assert first_event.speaker == "user"
+    assert first_event.metadata["benchmark"] == "longmemeval"
+    assert first_event.metadata["sample_id"] == "q-1"
+    assert first_event.metadata["query_metadata"] == {"question_type": "single-hop"}
+    assert first_event.metadata["turn_index"] == 1
+    assert first_event.metadata["original_field"] == "kept"
+    assert first_event.metadata["turn_metadata"] == {"turn_index": 1, "original_field": "kept"}
+    assert first_event.metadata["sample_metadata"] == {"variant": "s_cleaned", "question_date": "2024-01-02"}
+    assert len(contexts) == 1
+    assert contexts[0].sample_id == "q-1"
+    assert contexts[0].user_id == "longmemeval:q-1"
+    assert contexts[0].metadata == {"variant": "s_cleaned", "question_date": "2024-01-02"}
+    assert recall.text == "longmemeval:q-1 sees 2 events for Who likes tea?"
+    assert recall.source_ids == ["source-1"]
+    assert recall.metadata["conversation_user_id"] == "longmemeval:q-1"
+    assert recall.metadata["custom_recall"] is True
+    assert recall.metadata["recall_helper"] == "custom-generic.recall"
 
 
 def test_create_mem0_memory_adapter_defaults_to_upstream_top_k(monkeypatch) -> None:

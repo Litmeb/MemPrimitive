@@ -698,6 +698,127 @@ class SharedConversationLoCoMoMemoryAdapter:
         return str(sample.sample_id).split("-qa-", 1)[0]
 
 
+def _generic_conversation_user_id(sample: BenchmarkSample) -> str:
+    benchmark_name = str(sample.benchmark_name).strip() or "benchmark"
+    sample_id = str(sample.sample_id).strip() or "sample"
+    return f"{benchmark_name}:{sample_id}"
+
+
+def _generic_message_event(sample: BenchmarkSample, turn: ConversationTurn) -> MemoryIngestEvent:
+    sample_metadata = dict(sample.metadata)
+    turn_metadata = dict(turn.metadata)
+    speaker = str(turn.speaker).strip() or str(turn.role).strip() or "speaker"
+    role = str(turn.role).strip() or speaker
+    timestamp = str(turn.session_timestamp).strip()
+    return MemoryIngestEvent(
+        text=str(turn.text).strip(),
+        context_text="",
+        session_id=str(turn.session_id).strip(),
+        turn_id=str(turn.turn_id).strip(),
+        user_id=_generic_conversation_user_id(sample),
+        speaker=speaker,
+        role=role,
+        timestamp=timestamp or None,
+        metadata={
+            **turn_metadata,
+            "benchmark": str(sample.benchmark_name).strip(),
+            "sample_id": str(sample.sample_id).strip(),
+            "query_metadata": dict(sample.query.metadata),
+            "session_id": str(turn.session_id).strip(),
+            "turn_id": str(turn.turn_id).strip(),
+            "source_timestamp": timestamp,
+            "source_speaker": speaker,
+            "source_role": role,
+            "sample_metadata": sample_metadata,
+            "turn_metadata": turn_metadata,
+        },
+    )
+
+
+class _GenericMemoryBindingSession:
+    def __init__(self, *, binding_factory: Callable[[], MemorySystemBinding]) -> None:
+        self.binding = binding_factory()
+        self.system = self.binding.build_system()
+        self.load_metadata: dict[str, Any] = {}
+
+    def load_case(self, sample: BenchmarkSample, *, progress_callback: Callable[..., None] | None = None) -> None:
+        if not sample.history_turns:
+            raise ValueError("GenericMemoryBindingAdapter requires sample.history_turns.")
+
+        total_turns = len(sample.history_turns)
+        loaded_turns = 0
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="memory_init",
+                sample=sample,
+                total_turns=total_turns,
+            )
+
+        for turn in sample.history_turns:
+            self.binding.ingest_event(self.system, _generic_message_event(sample, turn))
+            loaded_turns += 1
+            if progress_callback is not None:
+                _call_with_supported_kwargs(
+                    progress_callback,
+                    phase="memory_turn_done",
+                    sample=sample,
+                    turn_index=loaded_turns,
+                    total_turns=total_turns,
+                    turn_id=str(turn.turn_id).strip(),
+                    turn_increment=1,
+                )
+
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="memory_finish",
+                sample=sample,
+                total_turns=total_turns,
+                loaded_turns=loaded_turns,
+            )
+
+        self.load_metadata = {
+            "loaded_turn_count": loaded_turns,
+            "loaded_message_count": loaded_turns,
+            "load_source": "history_turn_messages",
+            "conversation_user_id": _generic_conversation_user_id(sample),
+        }
+
+    def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
+        metadata = dict(sample.metadata) if sample is not None else {}
+        context = RecallContext(
+            sample_id=str(sample.sample_id).strip() if sample is not None else "",
+            user_id=_generic_conversation_user_id(sample) if sample is not None else "",
+            speaker="conversation",
+            metadata=metadata,
+        )
+        recall = _coerce_memory_recall(self.binding.recall(self.system, query, context=context))
+        binding_name = str(getattr(self.binding, "name", "")).strip()
+        return MemoryRecall(
+            text=recall.text,
+            source_ids=list(recall.source_ids),
+            metadata={
+                **self.load_metadata,
+                **dict(recall.metadata),
+                "recall_helper": f"{binding_name}.recall" if binding_name else "memory_binding.recall",
+                "conversation_memories": recall.text,
+                "num_conversation_memory_lines": _count_nonempty_lines(recall.text),
+            },
+        )
+
+
+class GenericMemoryBindingAdapter:
+    """Benchmark-neutral adapter for one memory binding per sample."""
+
+    def __init__(self, *, binding_factory: Callable[[], MemorySystemBinding], name: str) -> None:
+        self.binding_factory = binding_factory
+        self.name = str(name).strip() or "memory"
+
+    def create_session(self) -> _GenericMemoryBindingSession:
+        return _GenericMemoryBindingSession(binding_factory=self.binding_factory)
+
+
 def create_dual_speaker_locomo_memory_adapter(
     binding_factory: Callable[[], MemorySystemBinding],
     *,
@@ -714,6 +835,23 @@ def create_dual_speaker_locomo_memory_adapter(
         binding_factory=binding_factory,
         name=name or binding_name or "memory",
         speaker_workers=speaker_workers,
+    )
+
+
+def create_generic_memory_binding_adapter(
+    binding_factory: Callable[[], MemorySystemBinding],
+    *,
+    name: str | None = None,
+) -> GenericMemoryBindingAdapter:
+    binding_name = ""
+    if name is None:
+        try:
+            binding_name = str(getattr(binding_factory(), "name", "")).strip()
+        except Exception:
+            binding_name = ""
+    return GenericMemoryBindingAdapter(
+        binding_factory=binding_factory,
+        name=name or binding_name or "memory",
     )
 
 

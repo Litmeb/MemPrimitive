@@ -18,6 +18,11 @@ from memprimitive.benchmarking.minimal_baseline import (
     run_minimal_baseline_sample,
 )
 from memprimitive.benchmarking._types import MemoryRecall
+from memprimitive.benchmarking._memory_adapters import (
+    DualSpeakerLoCoMoMemoryAdapter,
+    GenericMemoryBindingAdapter,
+    SharedConversationLoCoMoMemoryAdapter,
+)
 from memprimitive.benchmarking.prompts import ANSWER_PROMPT, ANSWER_PROMPT_GRAPH, ANSWER_PROMPT_ZEP
 from memprimitive.benchmarking.evals import evaluate_file
 from memprimitive.benchmarking.generate_scores import summarize_scores
@@ -271,23 +276,63 @@ def test_cli_answer_runner_switches_to_mem0_locomo_for_locomo_mem0() -> None:
 def test_cli_memory_adapter_can_load_binding_factory() -> None:
     adapter = _create_cli_memory_adapter(
         "binding",
+        benchmark_name="locomo",
         top_k=None,
         memory_binding="memprimitive.example.classics.mem0_memory:create_memory_binding",
         memory_binding_kwargs={"recall_top_k": 2},
     )
 
+    assert isinstance(adapter, DualSpeakerLoCoMoMemoryAdapter)
     assert adapter.name == "create_memory_binding"
     session = adapter.create_session()
     assert session.speaker_1_binding.recall_top_k == 2
     assert session.speaker_2_binding.recall_top_k == 2
 
 
+def test_cli_memory_adapter_uses_generic_binding_for_longmemeval() -> None:
+    adapter = _create_cli_memory_adapter(
+        "binding",
+        benchmark_name="longmemeval",
+        top_k=None,
+        memory_binding="memprimitive.example.classics.mem0_memory:create_memory_binding",
+        memory_binding_kwargs={"recall_top_k": 2},
+    )
+
+    assert isinstance(adapter, GenericMemoryBindingAdapter)
+    assert adapter.name == "create_memory_binding"
+    session = adapter.create_session()
+    assert session.binding.recall_top_k == 2
+
+
 def test_cli_memory_adapter_can_build_amem_adapter() -> None:
     adapter = _create_cli_memory_adapter("amem", top_k=7)
 
+    assert isinstance(adapter, SharedConversationLoCoMoMemoryAdapter)
     assert adapter.name == "amem"
     session = adapter.create_session()
     assert session.binding.recall_top_k == 7
+
+
+def test_cli_classic_memory_adapters_use_generic_binding_for_longmemeval() -> None:
+    mem0_adapter = _create_cli_memory_adapter("mem0", benchmark_name="longmemeval", top_k=7)
+    amem_adapter = _create_cli_memory_adapter("amem", benchmark_name="longmemeval", top_k=8)
+    memmachine_adapter = _create_cli_memory_adapter(
+        "memmachine",
+        benchmark_name="longmemeval",
+        top_k=9,
+        memmachine_stm_record_budget=3,
+    )
+
+    assert isinstance(mem0_adapter, GenericMemoryBindingAdapter)
+    assert isinstance(amem_adapter, GenericMemoryBindingAdapter)
+    assert isinstance(memmachine_adapter, GenericMemoryBindingAdapter)
+    mem0_session = mem0_adapter.create_session()
+    amem_session = amem_adapter.create_session()
+    memmachine_session = memmachine_adapter.create_session()
+    assert mem0_session.binding.recall_top_k == 7
+    assert amem_session.binding.recall_top_k == 8
+    assert memmachine_session.binding.limit == 9
+    assert memmachine_session.binding.stm_record_budget == 3
 
 
 def test_cli_memory_adapter_choices_include_amem() -> None:

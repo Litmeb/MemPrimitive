@@ -149,7 +149,7 @@ Beyond config examples, the repository also includes:
 
 ### 5. Run evaluation from the CLI
 
-The early benchmark harness lives in `memprimitive/benchmarking/`, and the current CLI can run the legacy minimal baseline plus classic LoCoMo memory adapters such as Mem0, A-MEM, and MemMachine.
+The early benchmark harness lives in `memprimitive/benchmarking/`, and the current CLI can run the legacy minimal baseline plus classic memory adapters such as Mem0, A-MEM, and MemMachine across LoCoMo and LongMemEval.
 
 Before running it, you need to place the raw benchmark files into the expected folders under `benchmarks/` yourself. The current loaders expect paths such as:
 
@@ -168,6 +168,8 @@ python -m memprimitive.benchmarking.minimal_baseline --benchmark locomo --limit 
 python -m memprimitive.benchmarking.minimal_baseline --benchmark locomo --memory-adapter amem --top-k 30 --limit 5 --output benchmarks/outputs/locomo_amem_smoke.jsonl
 python -m memprimitive.benchmarking.minimal_baseline --benchmark locomo --memory-adapter memmachine --top-k 30 --limit 5 --output benchmarks/outputs/locomo_memmachine_smoke.jsonl
 python -m memprimitive.benchmarking.minimal_baseline --benchmark longmemeval --longmemeval-variant s_cleaned --limit 10 --top-k 5 --output benchmarks/outputs/longmemeval_smoke.jsonl
+python -m memprimitive.benchmarking.minimal_baseline --benchmark longmemeval --longmemeval-variant s_cleaned --memory-adapter amem --top-k 30 --limit 5 --output benchmarks/outputs/longmemeval_amem_smoke.jsonl
+python -m memprimitive.benchmarking.minimal_baseline --benchmark longmemeval --longmemeval-variant s_cleaned --memory-adapter memmachine --top-k 30 --limit 5 --output benchmarks/outputs/longmemeval_memmachine_smoke.jsonl
 python -m memprimitive.benchmarking.minimal_baseline --benchmark dmr --limit 10 --output benchmarks/outputs/dmr_smoke.jsonl
 ```
 
