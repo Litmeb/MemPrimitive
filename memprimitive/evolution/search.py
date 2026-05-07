@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -44,8 +45,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-parallel-candidates", type=int, default=1)
     parser.add_argument("--promote-top-k", type=int, default=0)
     parser.add_argument("--codex-bin", default="codex")
-    parser.add_argument("--codex-model", default=None)
+    parser.add_argument("--codex-model", default=None, help="Deprecated compatibility option: sets one model for both roles.")
     parser.add_argument("--codex-profile", default=None)
+    parser.add_argument("--orchestrator-model", default="gpt-5.4")
+    parser.add_argument("--orchestrator-reasoning-effort", default="medium")
+    parser.add_argument("--worker-model", default="gpt-5.4-mini")
+    parser.add_argument("--worker-reasoning-effort", default=None)
     parser.add_argument("--python-bin", default="~/bin/winpy312")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--context-char-limit", type=int, default=60000)
@@ -74,6 +79,10 @@ def config_from_args(args: argparse.Namespace) -> EvolutionRunConfig:
         codex_bin=args.codex_bin,
         codex_model=args.codex_model,
         codex_profile=args.codex_profile,
+        orchestrator_model=args.orchestrator_model,
+        orchestrator_reasoning_effort=args.orchestrator_reasoning_effort,
+        worker_model=args.worker_model,
+        worker_reasoning_effort=args.worker_reasoning_effort,
         python_bin=args.python_bin,
         run_id=args.run_id,
         context_char_limit=args.context_char_limit,
@@ -105,7 +114,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     if config.dry_run:
         print(json.dumps(dry_run_payload(repo_root, config), ensure_ascii=False, indent=2))
         return 0
-    result = run_evolution_search(repo_root=repo_root, config=config)
+    try:
+        result = run_evolution_search(repo_root=repo_root, config=config)
+    except RuntimeError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

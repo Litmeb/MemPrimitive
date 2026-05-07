@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -10,6 +11,15 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from ._types import CommandRecord
+
+
+def resolve_executable_args(args: Sequence[str] | str, *, shell: bool) -> Sequence[str] | str:
+    if shell or isinstance(args, str) or not args:
+        return args
+    resolved = shutil.which(str(args[0]))
+    if not resolved:
+        return args
+    return [resolved, *[str(part) for part in args[1:]]]
 
 
 @dataclass(slots=True)
@@ -45,18 +55,21 @@ class CommandRunner:
         merged_env = os.environ.copy()
         if env:
             merged_env.update({str(key): str(value) for key, value in env.items()})
+        resolved_args = resolve_executable_args(args, shell=shell)
         completed = subprocess.run(
-            args,
+            resolved_args,
             cwd=str(cwd),
             input=input_text,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             shell=shell,
             timeout=timeout,
             env=merged_env,
         )
         return ProcessResult(
-            args=str(args) if shell else tuple(str(part) for part in args),
+            args=str(resolved_args) if shell else tuple(str(part) for part in resolved_args),
             cwd=cwd,
             returncode=completed.returncode,
             stdout=completed.stdout,

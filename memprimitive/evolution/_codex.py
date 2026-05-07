@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +22,10 @@ DEFAULT_CONTEXT_FILES = (
     "DSL_SEMANTIC_OPERATION_IDEA_LIST.zh-CN.md",
     "DSL_SEMANTIC_OPERATION_MAP.zh-CN.md",
 )
+
+KNOWN_PATH_REWRITES = {
+    "tests/example/classics/test_memmachine_memory.py": "tests/test_classics_memmachine.py",
+}
 
 
 def target_binding_source_path(repo_root: Path, target_binding: str) -> Path | None:
@@ -116,21 +124,54 @@ The outer harness will run the official three-layer checks.
 """
 
 
-def codex_exec_args(
+def _windows_path_to_wsl(path: Path) -> str:
+    value = str(path)
+    normalized = value.replace("\\", "/")
+    match = re.match(r"^([A-Za-z]):/(.*)$", normalized)
+    if not match:
+        return normalized
+    drive = match.group(1).casefold()
+    rest = match.group(2)
+    return f"/mnt/{drive}/{rest}"
+
+
+def _discover_wsl_codex_bin() -> str:
+    env_value = os.environ.get("MEMPRIMITIVE_EVOLUTION_WSL_CODEX_BIN", "").strip()
+    if env_value:
+        return env_value
+    if not shutil.which("wsl.exe"):
+        return "codex"
+    command = (
+        "ls -1d /mnt/c/Users/*/.cursor/extensions/openai.chatgpt-*/bin/linux-x86_64/codex "
+        "2>/dev/null | sort -V | tail -n 1"
+    )
+    result = subprocess.run(
+        ["wsl.exe", "bash", "-lc", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    path = result.stdout.strip()
+    return path or "codex"
+
+
+def _codex_exec_inner_args(
     *,
     config: EvolutionRunConfig,
-    cwd: Path,
+    cwd: Path | str,
     sandbox: str,
-    output_last_message: Path,
-    json_events: bool = True,
+    output_last_message: Path | str,
+    json_events: bool,
+    role: str,
 ) -> list[str]:
     args = [
         config.codex_bin,
+        "--ask-for-approval",
+        "never",
         "exec",
         "-C",
         str(cwd),
-        "--ask-for-approval",
-        "never",
         "--sandbox",
         sandbox,
         "--output-last-message",
@@ -138,12 +179,64 @@ def codex_exec_args(
     ]
     if json_events:
         args.append("--json")
-    if config.codex_model:
-        args.extend(["--model", config.codex_model])
+    model, reasoning_effort = _model_settings_for_role(config, role=role)
+    if model:
+        args.extend(["--model", model])
+    if reasoning_effort:
+        args.extend(["--config", f'model_reasoning_effort="{reasoning_effort}"'])
     if config.codex_profile:
         args.extend(["--profile", config.codex_profile])
     args.append("-")
     return args
+
+
+def _model_settings_for_role(config: EvolutionRunConfig, *, role: str) -> tuple[str | None, str | None]:
+    if config.codex_model:
+        return config.codex_model, None
+    if role == "orchestrator":
+        return config.orchestrator_model, config.orchestrator_reasoning_effort
+    if role == "worker":
+        return config.worker_model, config.worker_reasoning_effort
+    raise ValueError(f"unknown codex role {role!r}.")
+
+
+def codex_exec_args(
+    *,
+    config: EvolutionRunConfig,
+    cwd: Path,
+    sandbox: str,
+    output_last_message: Path,
+    json_events: bool = True,
+    role: str = "worker",
+) -> list[str]:
+    if os.name == "nt" and config.codex_bin == "codex" and shutil.which("wsl.exe"):
+        wsl_codex_bin = _discover_wsl_codex_bin()
+        wsl_cwd = _windows_path_to_wsl(cwd)
+        wsl_output = _windows_path_to_wsl(output_last_message)
+        inner_config = EvolutionRunConfig(
+            **{
+                **config.to_json_dict(),
+                "codex_bin": wsl_codex_bin,
+            }
+        )
+        inner_args = _codex_exec_inner_args(
+            config=inner_config,
+            cwd=wsl_cwd,
+            sandbox=sandbox,
+            output_last_message=wsl_output,
+            json_events=json_events,
+            role=role,
+        )
+        command = " ".join(shlex.quote(part) for part in inner_args)
+        return ["wsl.exe", "bash", "-lc", command]
+    return _codex_exec_inner_args(
+        config=config,
+        cwd=cwd,
+        sandbox=sandbox,
+        output_last_message=output_last_message,
+        json_events=json_events,
+        role=role,
+    )
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -160,6 +253,52 @@ def extract_json_object(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("Codex response JSON must be an object.")
     return value
+
+
+def _codex_failure_message(result: ProcessResult, *, events_path: Path, final_path: Path) -> str:
+    parts = [f"codex exec failed with exit code {result.returncode}"]
+    if result.stderr.strip():
+        parts.append(f"stderr:\n{result.stderr.strip()}")
+    if result.stdout.strip():
+        messages: list[str] = []
+        for raw_line in result.stdout.splitlines():
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                message = event.get("message")
+                if message:
+                    messages.append(str(message))
+                error = event.get("error")
+                if isinstance(error, dict) and error.get("message"):
+                    messages.append(str(error["message"]))
+        if messages:
+            parts.append("codex events:\n" + "\n".join(dict.fromkeys(messages)))
+        else:
+            parts.append(f"stdout:\n{result.stdout.strip()}")
+    parts.append(f"events_path: {events_path}")
+    parts.append(f"final_path: {final_path}")
+    return "\n\n".join(parts)
+
+
+def normalize_candidate_for_repo(repo_root: Path, candidate: CandidateSpec) -> CandidateSpec:
+    allowed_files = tuple(KNOWN_PATH_REWRITES.get(path, path) for path in candidate.allowed_files)
+    focused_tests = []
+    for command in candidate.focused_tests:
+        normalized = command
+        for old, new in KNOWN_PATH_REWRITES.items():
+            normalized = normalized.replace(old, new)
+        focused_tests.append(normalized)
+    return CandidateSpec(
+        id=candidate.id,
+        hypothesis=candidate.hypothesis,
+        allowed_files=allowed_files,
+        implementation_prompt=candidate.implementation_prompt,
+        focused_tests=tuple(focused_tests),
+        benchmark_args=candidate.benchmark_args,
+        expected_diagnostics=candidate.expected_diagnostics,
+    )
 
 
 def run_orchestrator(
@@ -184,19 +323,30 @@ def run_orchestrator(
     events_path = artifact_dir / "orchestrator.jsonl"
     prompt_path.write_text(prompt, encoding="utf-8")
     result = runner.run(
-        codex_exec_args(config=config, cwd=repo_root, sandbox="read-only", output_last_message=final_path),
+        codex_exec_args(
+            config=config,
+            cwd=repo_root,
+            sandbox="read-only",
+            output_last_message=final_path,
+            role="orchestrator",
+        ),
         cwd=repo_root,
         input_text=prompt,
     )
     events_path.write_text(result.stdout, encoding="utf-8")
     write_process_log(result, artifact_dir=artifact_dir, name="orchestrator")
     if result.returncode != 0:
-        raise RuntimeError(f"orchestrator codex exec failed with exit code {result.returncode}: {result.stderr}")
+        raise RuntimeError(
+            "orchestrator " + _codex_failure_message(result, events_path=events_path, final_path=final_path)
+        )
     payload = extract_json_object(final_path.read_text(encoding="utf-8"))
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         raise ValueError("orchestrator JSON must contain a candidates list.")
-    specs = [CandidateSpec.from_json_dict(dict(item)) for item in candidates[: config.candidates_per_round]]
+    specs = [
+        normalize_candidate_for_repo(repo_root, CandidateSpec.from_json_dict(dict(item)))
+        for item in candidates[: config.candidates_per_round]
+    ]
     if not specs:
         raise ValueError("orchestrator returned no candidates.")
     write_json(artifact_dir / "orchestrator_candidates.json", [spec.to_json_dict() for spec in specs])
@@ -222,6 +372,7 @@ def run_worker_codex(
             cwd=worktree_path,
             sandbox="danger-full-access",
             output_last_message=final_path,
+            role="worker",
         ),
         cwd=worktree_path,
         input_text=prompt,
