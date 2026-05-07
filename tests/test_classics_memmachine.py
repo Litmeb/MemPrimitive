@@ -118,6 +118,38 @@ def test_memmachine_profile_evolution_max_turns_is_configurable() -> None:
     assert profile_evolution.max_turns == 12
 
 
+def test_memmachine_profile_prompt_stays_compact_for_long_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memprimitive.baselines import LLMFunctionCallEvolution
+
+    rendered_prompts: list[str] = []
+
+    def _capture_profile_agent(self, *, rendered_prompt: str, tools: list[Any], context: dict[str, Any]) -> str:
+        rendered_prompts.append(rendered_prompt)
+        _ = self, tools, context
+        return "DONE"
+
+    monkeypatch.setattr(LLMFunctionCallEvolution, "_run_agent", _capture_profile_agent)
+
+    system = build_memmachine_memory_system(stm_record_budget=20, limit=4)
+    ingest_episode(
+        system,
+        text="Alice says " + ("very detailed context " * 400),
+        session_id="sess-1",
+        user_id="alice",
+        producer="Alice",
+        timestamp="2026-04-28T00:01:00Z",
+        metadata={"blip_caption": "caption " * 500, "large_unused_field": "unused " * 500},
+    )
+
+    assert rendered_prompts
+    rendered_prompt = rendered_prompts[-1]
+    assert len(rendered_prompt) < 2600
+    assert "large_unused_field" not in rendered_prompt
+    assert "metadata=" not in rendered_prompt
+    assert "text=Alice says" in rendered_prompt
+    assert "..." in rendered_prompt
+
+
 def test_memmachine_indexes_ltm_before_stm_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.baselines import EmbeddingSimilarityRetrieval, LLMFunctionCallEvolution
     from memprimitive.utils import _runtime

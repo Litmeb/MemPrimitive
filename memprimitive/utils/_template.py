@@ -920,6 +920,13 @@ def apply_filter(value: Any, filter_spec: dict[str, Any]) -> Any:
         if isinstance(value, list):
             return value[: max(size, 0)]
         return []
+    if name == "truncate":
+        max_chars = int(args[0]) if args else 0
+        text = stringify_render_value(value)
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        suffix = "..."
+        return text[: max(0, max_chars - len(suffix))].rstrip() + suffix
     if name == "sort_by":
         field_name = str(args[0]) if args else ""
         reverse = bool(args[1]) if len(args) > 1 else False
