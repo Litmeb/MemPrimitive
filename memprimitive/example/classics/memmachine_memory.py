@@ -523,9 +523,9 @@ def _profile_prompt():
                     "repeat_over": "selected_records",
                     "item_template": (
                         "record_id={{ item.record_id }}\n"
-                        "timestamp={{ item.timestamp }}\n"
-                        "text={{ item.text }}\n"
-                        "metadata={{ item.metadata }}"
+                        "timestamp={{ item.metadata.source_timestamp | default(item.timestamp) }}\n"
+                        "speaker={{ item.metadata.source_speaker | default('speaker') }}\n"
+                        "text={{ item.text | truncate(1800) }}"
                     ),
                     "separator": "\n\n",
                 },
