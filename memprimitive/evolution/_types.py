@@ -81,6 +81,10 @@ class EvolutionRunConfig:
     codex_bin: str = "codex"
     codex_model: str | None = None
     codex_profile: str | None = None
+    orchestrator_model: str | None = "gpt-5.4"
+    orchestrator_reasoning_effort: str | None = "medium"
+    worker_model: str | None = "gpt-5.4-mini"
+    worker_reasoning_effort: str | None = None
     python_bin: str = "~/bin/winpy312"
     run_id: str = ""
     context_char_limit: int = 60000

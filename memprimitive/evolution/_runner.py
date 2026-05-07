@@ -245,6 +245,15 @@ def run_focused_tests(
 
 
 def benchmark_command(config: EvolutionRunConfig, candidate: CandidateSpec, predictions_path: Path) -> str:
+    binding_kwargs = dict(candidate.benchmark_args.get("memory_binding_kwargs") or {})
+    known_cli_args = {
+        "top_k",
+        "similar_top_k",
+        "mem0_speaker_workers",
+        "memmachine_stm_record_budget",
+        "memmachine_profile_max_turns",
+        "max_workers",
+    }
     parts = [
         python_command(config),
         "-m memprimitive.benchmarking.minimal_baseline",
@@ -265,12 +274,19 @@ def benchmark_command(config: EvolutionRunConfig, candidate: CandidateSpec, pred
     if config.max_history_turns is not None:
         parts.append(f"--max-history-turns {int(config.max_history_turns)}")
     for key, value in sorted(candidate.benchmark_args.items()):
+        if key == "memory_binding_kwargs":
+            continue
+        if key not in known_cli_args:
+            binding_kwargs[key] = value
+            continue
         cli_key = str(key).replace("_", "-")
         if isinstance(value, bool):
             if value:
                 parts.append(f"--{cli_key}")
         elif value is not None:
             parts.append(f"--{cli_key} {json.dumps(str(value))}")
+    if binding_kwargs:
+        parts.append(f"--memory-binding-kwargs {json.dumps(json.dumps(binding_kwargs, ensure_ascii=False))}")
     return " ".join(parts)
 
 
