@@ -50,6 +50,7 @@ from memprimitive.utils._template import structured_prompt
 def build_memmachine_memory_system(
     *,
     stm_record_budget: int = 20,
+    profile_max_turns: int = 6,
     limit: int = 30,
     expand_context: int = 3,
     sentence_top_k: int | None = None,
@@ -93,6 +94,7 @@ def build_memmachine_memory_system(
                 target_layer="profile",
                 tools=build_profile_feature_tools(module_name="memmachine_profile"),
                 prompt=_profile_prompt(),
+                max_turns=_positive_int(profile_max_turns, "profile_max_turns"),
             ),
             STMConsolidationEvolution(record_budget=stm_record_budget, copy_evicted_to_ltm=False),
         ),
@@ -243,6 +245,7 @@ class MemMachineMemoryBinding:
         self,
         *,
         stm_record_budget: int = 20,
+        profile_max_turns: int = 6,
         limit: int = 30,
         expand_context: int = 3,
         sentence_top_k: int | None = None,
@@ -250,6 +253,7 @@ class MemMachineMemoryBinding:
         profile_top_k: int = 10,
     ) -> None:
         self.stm_record_budget = stm_record_budget
+        self.profile_max_turns = profile_max_turns
         self.limit = limit
         self.expand_context = expand_context
         self.sentence_top_k = sentence_top_k
@@ -259,6 +263,7 @@ class MemMachineMemoryBinding:
     def build_system(self) -> dict[str, object]:
         return build_memmachine_memory_system(
             stm_record_budget=self.stm_record_budget,
+            profile_max_turns=self.profile_max_turns,
             limit=self.limit,
             expand_context=self.expand_context,
             sentence_top_k=self.sentence_top_k,
@@ -296,6 +301,7 @@ class MemMachineMemoryBinding:
 def create_memory_binding(
     *,
     stm_record_budget: int = 20,
+    profile_max_turns: int = 6,
     limit: int = 30,
     expand_context: int = 3,
     sentence_top_k: int | None = None,
@@ -304,6 +310,7 @@ def create_memory_binding(
 ) -> MemMachineMemoryBinding:
     return MemMachineMemoryBinding(
         stm_record_budget=stm_record_budget,
+        profile_max_turns=profile_max_turns,
         limit=limit,
         expand_context=expand_context,
         sentence_top_k=sentence_top_k,

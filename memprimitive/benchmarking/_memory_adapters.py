@@ -885,6 +885,7 @@ def create_memmachine_memory_adapter(
     name: str = "memmachine",
     top_k: int | None = None,
     stm_record_budget: int = 20,
+    profile_max_turns: int = 6,
     speaker_workers: int = 1,
 ) -> SharedConversationLoCoMoMemoryAdapter:
     """Create a LoCoMo adapter for the classic MemMachine reconstruction."""
@@ -897,6 +898,7 @@ def create_memmachine_memory_adapter(
             expand_context=3,
             profile_top_k=10 if top_k is None else top_k,
             stm_record_budget=stm_record_budget,
+            profile_max_turns=profile_max_turns,
         ),
         name=name,
     )

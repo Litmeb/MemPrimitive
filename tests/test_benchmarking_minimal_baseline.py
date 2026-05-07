@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
+from memprimitive.benchmarking import minimal_baseline as minimal_baseline_module
 from memprimitive.benchmarking.minimal_baseline import (
     BenchmarkSample,
     MemMachineLoCoMoAnswerRunner,
@@ -10,6 +12,7 @@ from memprimitive.benchmarking.minimal_baseline import (
     SingleRecallLLMAnswerRunner,
     _TqdmBenchmarkProgress,
     _build_arg_parser,
+    _build_default_output_path,
     _create_cli_answer_runner,
     _create_cli_memory_adapter,
     _iter_json_array_file,
@@ -321,6 +324,7 @@ def test_cli_classic_memory_adapters_use_generic_binding_for_longmemeval() -> No
         benchmark_name="longmemeval",
         top_k=9,
         memmachine_stm_record_budget=3,
+        memmachine_profile_max_turns=11,
     )
 
     assert isinstance(mem0_adapter, GenericMemoryBindingAdapter)
@@ -333,6 +337,7 @@ def test_cli_classic_memory_adapters_use_generic_binding_for_longmemeval() -> No
     assert amem_session.binding.recall_top_k == 8
     assert memmachine_session.binding.limit == 9
     assert memmachine_session.binding.stm_record_budget == 3
+    assert memmachine_session.binding.profile_max_turns == 11
 
 
 def test_cli_memory_adapter_choices_include_amem() -> None:
@@ -340,6 +345,36 @@ def test_cli_memory_adapter_choices_include_amem() -> None:
     action = next(item for item in parser._actions if item.dest == "memory_adapter")
 
     assert "amem" in action.choices
+
+
+def test_cli_output_defaults_to_descriptive_timestamped_path() -> None:
+    path = _build_default_output_path(
+        benchmark_name="locomo",
+        memory_adapter_name="memmachine",
+        smoke_test=True,
+        locomo_users=["1,conv-2", "Alice Smith"],
+        longmemeval_variant="s_cleaned",
+        timestamp=datetime(2026, 5, 6, 7, 8, 9),
+    )
+
+    assert path.as_posix().endswith(
+        "benchmarks/outputs/locomo_memmachine_smoke_1+conv-2+Alice_Smith_20260506_070809.jsonl"
+    )
+
+
+def test_cli_output_default_includes_longmemeval_variant() -> None:
+    path = _build_default_output_path(
+        benchmark_name="longmemeval",
+        memory_adapter_name="mem0",
+        smoke_test=False,
+        locomo_users=None,
+        longmemeval_variant="m_cleaned",
+        timestamp=datetime(2026, 5, 6, 7, 8, 9),
+    )
+
+    assert path.as_posix().endswith(
+        "benchmarks/outputs/longmemeval_m_cleaned_mem0_full_all-users_20260506_070809.jsonl"
+    )
 
 
 def test_tqdm_progress_groups_locomo_samples_by_user() -> None:
@@ -355,6 +390,79 @@ def test_tqdm_progress_groups_locomo_samples_by_user() -> None:
 
     assert progress._user_key(sample) == "locomo-user-1"
     assert progress._user_label(sample) == "user 1 (Alice/Bob)"
+
+    sample.metadata = {"locomo_sample_id": "conv-2"}
+    assert progress._user_key(sample) == "conv-2"
+    assert progress._user_label(sample) == "conv-2"
+
+
+def test_tqdm_progress_creates_memory_and_qa_bar_per_user(monkeypatch) -> None:
+    created_bars: list[FakeTqdm] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.n = 0
+            self.postfix = ""
+            self.closed = False
+            created_bars.append(self)
+
+        def update(self, increment: int) -> None:
+            self.n += increment
+
+        def set_postfix_str(self, value: str, *, refresh: bool = True) -> None:
+            del refresh
+            self.postfix = value
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(minimal_baseline_module, "tqdm", FakeTqdm)
+    samples = [
+        BenchmarkSample(
+            sample_id="conv-1-qa-1",
+            benchmark_name="locomo",
+            history_observations=[],
+            query=__import__("memprimitive").Query(text="Q1?"),
+            reference_answer="A1",
+            metadata={"locomo_user_index": 1, "speaker_a": "Alice", "speaker_b": "Bob", "locomo_sample_id": "conv-1"},
+        ),
+        BenchmarkSample(
+            sample_id="conv-1-qa-2",
+            benchmark_name="locomo",
+            history_observations=[],
+            query=__import__("memprimitive").Query(text="Q2?"),
+            reference_answer="A2",
+            metadata={"locomo_user_index": 1, "speaker_a": "Alice", "speaker_b": "Bob", "locomo_sample_id": "conv-1"},
+        ),
+        BenchmarkSample(
+            sample_id="conv-2-qa-1",
+            benchmark_name="locomo",
+            history_observations=[],
+            query=__import__("memprimitive").Query(text="Q3?"),
+            reference_answer="A3",
+            metadata={"locomo_user_index": 2, "speaker_a": "Carol", "speaker_b": "Dan", "locomo_sample_id": "conv-2"},
+        ),
+    ]
+    samples[0].history_turns = [object(), object()]
+    samples[1].history_turns = [object(), object()]
+    samples[2].history_turns = [object(), object(), object()]
+
+    progress = _TqdmBenchmarkProgress(enabled=True)
+    progress(phase="init", total=3, samples=samples)
+    progress(phase="memory_turn_done", sample=samples[0], turn_increment=2, turn_index=2, total_turns=2)
+    progress(phase="done", sample=samples[1])
+    progress(phase="done", sample=samples[2])
+
+    assert [(bar.kwargs["desc"], bar.kwargs["total"], bar.kwargs["position"]) for bar in created_bars] == [
+        ("memory user 1 (Alice/Bob)", 2, 0),
+        ("qa user 1 (Alice/Bob)", 2, 1),
+        ("memory user 2 (Carol/Dan)", 3, 2),
+        ("qa user 2 (Carol/Dan)", 1, 3),
+    ]
+    assert progress.memory_bars["locomo-user-1"].n == 2
+    assert progress.qa_bars["locomo-user-1"].n == 1
+    assert progress.qa_bars["locomo-user-2"].n == 1
 
 
 def test_mem0_style_eval_reads_benchmark_jsonl(tmp_path: Path) -> None:

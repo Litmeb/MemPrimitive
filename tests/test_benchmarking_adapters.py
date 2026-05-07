@@ -377,6 +377,7 @@ def test_create_memmachine_memory_adapter_uses_shared_conversation_system(monkey
     def _build_system(
         *,
         stm_record_budget: int,
+        profile_max_turns: int,
         limit: int,
         expand_context: int,
         sentence_top_k: int | None = None,
@@ -386,6 +387,7 @@ def test_create_memmachine_memory_adapter_uses_shared_conversation_system(monkey
         build_calls.append(
             {
                 "stm_record_budget": stm_record_budget,
+                "profile_max_turns": profile_max_turns,
                 "limit": limit,
                 "expand_context": expand_context,
                 "sentence_top_k": sentence_top_k,
@@ -426,11 +428,12 @@ def test_create_memmachine_memory_adapter_uses_shared_conversation_system(monkey
     monkeypatch.setattr(memmachine_memory, "ingest_episode", _ingest_episode)
     monkeypatch.setattr(memmachine_memory, "recall_memmachine_memory", _recall_memory)
 
-    adapter = create_memmachine_memory_adapter(top_k=12, stm_record_budget=3)
+    adapter = create_memmachine_memory_adapter(top_k=12, stm_record_budget=3, profile_max_turns=10)
     session = adapter.create_session()
     assert build_calls == [
         {
             "stm_record_budget": 3,
+            "profile_max_turns": 10,
             "limit": 12,
             "expand_context": 3,
             "sentence_top_k": None,
@@ -827,6 +830,7 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
     def _build_memmachine_system(
         *,
         stm_record_budget: int,
+        profile_max_turns: int,
         limit: int,
         expand_context: int,
         sentence_top_k: int | None = None,
@@ -836,6 +840,7 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
         memmachine_build_calls.append(
             {
                 "stm_record_budget": stm_record_budget,
+                "profile_max_turns": profile_max_turns,
                 "limit": limit,
                 "expand_context": expand_context,
                 "sentence_top_k": sentence_top_k,
@@ -871,6 +876,7 @@ def test_cli_memory_adapter_defaults_by_adapter_name(monkeypatch) -> None:
     assert memmachine_build_calls == [
         {
             "stm_record_budget": 20,
+            "profile_max_turns": 6,
             "limit": 30,
             "expand_context": 3,
             "sentence_top_k": None,
@@ -946,6 +952,8 @@ def test_run_benchmark_emits_progress_events() -> None:
 
     assert events == [
         ("init", None, 1),
+        ("memory_load_start", "progress", 1),
+        ("memory_loaded", "progress", 1),
         ("start", "progress", 1),
         ("done", "progress", 1),
         ("finish", None, 1),
@@ -1110,6 +1118,110 @@ def test_run_benchmark_parallel_workers_preserve_prediction_order() -> None:
         "sample-2",
         "sample-3",
     ]
+
+
+def test_run_benchmark_parallel_workers_process_whole_user_groups() -> None:
+    samples = [
+        _sample_with_turns("conv 1 memory", sample_id="conv-1-qa-1"),
+        _sample_with_turns("conv 2 memory", sample_id="conv-2-qa-1"),
+        _sample_with_turns("conv 1 followup", sample_id="conv-1-qa-2"),
+        _sample_with_turns("conv 2 followup", sample_id="conv-2-qa-2"),
+    ]
+    for sample in samples:
+        sample.metadata["locomo_sample_id"] = sample.sample_id.rsplit("-qa-", 1)[0]
+
+    load_barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    created_count = 0
+    loaded_sample_ids: list[str] = []
+    recall_threads_by_user: dict[str, set[int]] = {}
+    progress_events: list[tuple[str, str | None, str | None, int | None]] = []
+
+    class _BenchmarkAdapter:
+        name = "parallel-userbench"
+
+        def iter_samples(self, *, limit: int | None = None):
+            del limit
+            yield from samples
+
+    class _MemorySession:
+        def __init__(self) -> None:
+            self.session_key = ""
+
+        def load_case(self, sample: BenchmarkSample) -> None:
+            self.session_key = str(sample.metadata["locomo_sample_id"])
+            with lock:
+                loaded_sample_ids.append(sample.sample_id)
+            load_barrier.wait(timeout=2)
+
+        def recall(self, query: Query, *, sample: BenchmarkSample | None = None):
+            del query
+            assert sample is not None
+            user_key = str(sample.metadata["locomo_sample_id"])
+            assert user_key == self.session_key
+            with lock:
+                recall_threads_by_user.setdefault(user_key, set()).add(threading.get_ident())
+            return MemoryRecall(text=f"{self.session_key}:{sample.sample_id}")
+
+    class _MemoryAdapter:
+        name = "parallel-user-memory"
+
+        def create_session(self):
+            nonlocal created_count
+            with lock:
+                created_count += 1
+            return _MemorySession()
+
+        def session_key(self, *, sample: BenchmarkSample) -> str:
+            return str(sample.metadata["locomo_sample_id"])
+
+    class _AnswerRunner:
+        name = "fake-answer"
+
+        def answer(self, *, sample: BenchmarkSample, memory_recall):
+            return f"{sample.sample_id}::{memory_recall.text}"
+
+    def _progress(
+        *,
+        phase: str,
+        sample: BenchmarkSample | None = None,
+        session_key: str | None = None,
+        group_sample_index: int | None = None,
+    ) -> None:
+        if phase in {"memory_load_start", "memory_reuse", "start", "done"}:
+            with lock:
+                progress_events.append(
+                    (phase, sample.sample_id if sample is not None else None, session_key, group_sample_index)
+                )
+
+    result = run_benchmark(
+        _BenchmarkAdapter(),
+        _MemoryAdapter(),
+        answer_runner=_AnswerRunner(),
+        max_workers=2,
+        progress_callback=_progress,
+    )
+
+    assert created_count == 2
+    assert sorted(loaded_sample_ids) == ["conv-1-qa-1", "conv-2-qa-1"]
+    assert recall_threads_by_user.keys() == {"conv-1", "conv-2"}
+    assert all(len(thread_ids) == 1 for thread_ids in recall_threads_by_user.values())
+    assert [prediction.sample_id for prediction in result.predictions] == [
+        "conv-1-qa-1",
+        "conv-2-qa-1",
+        "conv-1-qa-2",
+        "conv-2-qa-2",
+    ]
+    assert [prediction.predicted_answer for prediction in result.predictions] == [
+        "conv-1-qa-1::conv-1:conv-1-qa-1",
+        "conv-2-qa-1::conv-2:conv-2-qa-1",
+        "conv-1-qa-2::conv-1:conv-1-qa-2",
+        "conv-2-qa-2::conv-2:conv-2-qa-2",
+    ]
+    assert ("memory_load_start", "conv-1-qa-1", "conv-1", None) in progress_events
+    assert ("memory_load_start", "conv-2-qa-1", "conv-2", None) in progress_events
+    assert ("memory_reuse", "conv-1-qa-2", "conv-1", 2) in progress_events
+    assert ("memory_reuse", "conv-2-qa-2", "conv-2", 2) in progress_events
 
 
 def test_mem0_locomo_load_case_emits_turn_progress(monkeypatch) -> None:

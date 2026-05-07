@@ -25,7 +25,10 @@ Treat these as the current foundation:
 - `DSL_SEMANTIC_OPERATION_DESIGN_AGENT_IDEAS.zh-CN.md` is the design-agent inspiration list that separates small modification cues from insertable pipeline components.
 - `memprimitive/example/classics/memmachine_memory.py` is the strongest current reference for a search/evolution-heavy memory composition: working memory, STM consolidation, raw episodic LTM, sentence-derived indexing, parent/temporal expansion, cluster rerank, timestamped readout, and profile tools.
 - LoCoMo adapter work established the preferred generic memory-system boundary: `build_system`, `ingest_event`, and `recall`, loadable through `--memory-adapter binding --memory-binding module:create_memory_binding`.
+- LoCoMo benchmark scheduling now parallelizes by `memory_adapter.session_key(sample=...)` user group: each worker creates and loads one memory session, answers/scores that user's QA in stable order, and final predictions are re-sorted to the original benchmark sample order.
+- `memprimitive.benchmarking.minimal_baseline` writes timestamped default outputs under `benchmarks/outputs` using dataset, memory adapter, smoke/full mode, user filter, and timestamp fields; explicit `--output` paths still override this.
 - Shared-conversation LoCoMo classics baselines now cover both `memmachine` and `amem`; A-MEM is wired through the same benchmark-facing boundary while keeping its graph-note write/evolution mechanism unchanged.
+- MemMachine benchmark runs can raise the profile write agent turn budget with `--memmachine-profile-max-turns` when real tool-call evolution needs more than the default 6 turns.
 - LongMemEval can now use the same CLI memory adapter names through a generic one-binding-per-sample adapter, while LoCoMo keeps its speaker-specific adapter behavior.
 - Real runtime paths matter. Use `Runtime.embed()` and the dedicated `Runtime.rerank()` / `MEMPRIMITIVE_RERANK_*` path for retrieval work that depends on model behavior.
 - WSL repo Python commands should use `~/bin/winpy312`, not bare `python`, `python3`, or `conda run`.

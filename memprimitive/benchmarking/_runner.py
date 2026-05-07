@@ -213,40 +213,24 @@ def _memory_progress_turn_total(memory_adapter: Any, samples: list[BenchmarkSamp
     return total
 
 
-def _load_memory_session(
+def _group_samples_by_memory_session(
     memory_adapter: Any,
-    *,
-    sample: BenchmarkSample,
-    index: int,
-    total: int,
-    session_cache: dict[str, Any],
-    progress_callback: Callable[..., None] | None,
-) -> Any:
-    session_key = _memory_session_key(memory_adapter, sample)
-    if session_key is not None and session_key in session_cache:
-        session = session_cache[session_key]
-        if progress_callback is not None:
-            _call_with_supported_kwargs(
-                progress_callback,
-                phase="memory_reuse",
-                index=index,
-                total=total,
-                sample=sample,
-                session_key=session_key,
-            )
-        return session
-
-    session = memory_adapter.create_session()
-    _call_with_supported_kwargs(
-        session.load_case,
-        sample,
-        progress_callback=progress_callback,
-        sample_index=index,
-        total_samples=total,
-    )
-    if session_key is not None:
-        session_cache[session_key] = session
-    return session
+    samples: list[BenchmarkSample],
+) -> list[tuple[str | None, list[tuple[int, BenchmarkSample]]]]:
+    groups: list[tuple[str | None, list[tuple[int, BenchmarkSample]]]] = []
+    keyed_groups: dict[str, list[tuple[int, BenchmarkSample]]] = {}
+    for index, sample in enumerate(samples, start=1):
+        session_key = _memory_session_key(memory_adapter, sample)
+        if session_key is None:
+            groups.append((None, [(index, sample)]))
+            continue
+        group = keyed_groups.get(session_key)
+        if group is None:
+            group = []
+            keyed_groups[session_key] = group
+            groups.append((session_key, group))
+        group.append((index, sample))
+    return groups
 
 
 def _build_prediction(
@@ -287,6 +271,109 @@ def _score_prediction(benchmark_adapter: Any, prediction: BenchmarkPrediction) -
         prediction.scores = dict(score_value)
 
 
+def _run_benchmark_sample_group(
+    *,
+    benchmark_adapter: Any,
+    runner: AnswerRunner | Any,
+    memory_adapter: Any,
+    session_key: str | None,
+    indexed_samples: list[tuple[int, BenchmarkSample]],
+    group_index: int,
+    group_total: int,
+    sample_total: int,
+    progress_callback: Callable[..., None] | None,
+) -> list[tuple[int, BenchmarkPrediction]]:
+    first_index, first_sample = indexed_samples[0]
+    if progress_callback is not None:
+        _call_with_supported_kwargs(
+            progress_callback,
+            phase="memory_load_start",
+            index=first_index,
+            total=sample_total,
+            sample=first_sample,
+            session_key=session_key,
+            group_index=group_index,
+            group_total=group_total,
+            group_size=len(indexed_samples),
+        )
+    session = memory_adapter.create_session()
+    _call_with_supported_kwargs(
+        session.load_case,
+        first_sample,
+        progress_callback=progress_callback,
+        sample_index=first_index,
+        total_samples=sample_total,
+        session_key=session_key,
+        group_index=group_index,
+        group_total=group_total,
+        group_size=len(indexed_samples),
+    )
+    if progress_callback is not None:
+        _call_with_supported_kwargs(
+            progress_callback,
+            phase="memory_loaded",
+            index=first_index,
+            total=sample_total,
+            sample=first_sample,
+            session_key=session_key,
+            group_index=group_index,
+            group_total=group_total,
+            group_size=len(indexed_samples),
+        )
+
+    predictions: list[tuple[int, BenchmarkPrediction]] = []
+    for group_sample_index, (index, sample) in enumerate(indexed_samples, start=1):
+        if group_sample_index > 1 and progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="memory_reuse",
+                index=index,
+                total=sample_total,
+                sample=sample,
+                session_key=session_key,
+                group_index=group_index,
+                group_total=group_total,
+                group_size=len(indexed_samples),
+                group_sample_index=group_sample_index,
+            )
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="start",
+                index=index,
+                total=sample_total,
+                sample=sample,
+                session_key=session_key,
+                group_index=group_index,
+                group_total=group_total,
+                group_size=len(indexed_samples),
+                group_sample_index=group_sample_index,
+            )
+        prediction = _build_prediction(
+            runner=runner,
+            memory_adapter=memory_adapter,
+            sample=sample,
+            session=session,
+        )
+        _score_prediction(benchmark_adapter, prediction)
+        predictions.append((index, prediction))
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="done",
+                index=index,
+                total=sample_total,
+                sample=sample,
+                prediction=prediction,
+                session_key=session_key,
+                group_index=group_index,
+                group_total=group_total,
+                group_size=len(indexed_samples),
+                group_sample_index=group_sample_index,
+            )
+    return predictions
+
+
 def run_benchmark(
     benchmark_adapter,
     memory_adapter,
@@ -316,86 +403,45 @@ def run_benchmark(
             samples=samples,
             memory_turn_total=_memory_progress_turn_total(memory_adapter, samples),
         )
-    session_cache: dict[str, Any] = {}
+    sample_groups = _group_samples_by_memory_session(memory_adapter, samples)
     if max_workers == 1:
-        for index, sample in enumerate(samples, start=1):
-            if progress_callback is not None:
-                _call_with_supported_kwargs(
-                    progress_callback,
-                    phase="start",
-                    index=index,
-                    total=total,
-                    sample=sample,
-                )
-            session = _load_memory_session(
-                memory_adapter,
-                sample=sample,
-                index=index,
-                total=total,
-                session_cache=session_cache,
-                progress_callback=progress_callback,
-            )
-            prediction = _build_prediction(
+        predictions_by_index: dict[int, BenchmarkPrediction] = {}
+        for group_index, (session_key, indexed_samples) in enumerate(sample_groups, start=1):
+            for index, prediction in _run_benchmark_sample_group(
+                benchmark_adapter=benchmark_adapter,
                 runner=runner,
                 memory_adapter=memory_adapter,
-                sample=sample,
-                session=session,
-            )
-            _score_prediction(benchmark_adapter, prediction)
-            predictions.append(prediction)
-            if progress_callback is not None:
-                _call_with_supported_kwargs(
-                    progress_callback,
-                    phase="done",
-                    index=index,
-                    total=total,
-                    sample=sample,
-                    prediction=prediction,
-                )
+                session_key=session_key,
+                indexed_samples=indexed_samples,
+                group_index=group_index,
+                group_total=len(sample_groups),
+                sample_total=total,
+                progress_callback=progress_callback,
+            ):
+                predictions_by_index[index] = prediction
+        predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
     else:
         predictions_by_index: dict[int, BenchmarkPrediction] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_item = {}
-            for index, sample in enumerate(samples, start=1):
-                if progress_callback is not None:
-                    _call_with_supported_kwargs(
-                        progress_callback,
-                        phase="start",
-                        index=index,
-                        total=total,
-                        sample=sample,
-                    )
-                session = _load_memory_session(
-                    memory_adapter,
-                    sample=sample,
-                    index=index,
-                    total=total,
-                    session_cache=session_cache,
-                    progress_callback=progress_callback,
-                )
+            futures = []
+            for group_index, (session_key, indexed_samples) in enumerate(sample_groups, start=1):
                 future = executor.submit(
-                    _build_prediction,
+                    _run_benchmark_sample_group,
+                    benchmark_adapter=benchmark_adapter,
                     runner=runner,
                     memory_adapter=memory_adapter,
-                    sample=sample,
-                    session=session,
+                    session_key=session_key,
+                    indexed_samples=indexed_samples,
+                    group_index=group_index,
+                    group_total=len(sample_groups),
+                    sample_total=total,
+                    progress_callback=progress_callback,
                 )
-                future_to_item[future] = (index, sample)
+                futures.append(future)
 
-            for future in as_completed(future_to_item):
-                index, sample = future_to_item[future]
-                prediction = future.result()
-                _score_prediction(benchmark_adapter, prediction)
-                predictions_by_index[index] = prediction
-                if progress_callback is not None:
-                    _call_with_supported_kwargs(
-                        progress_callback,
-                        phase="done",
-                        index=index,
-                        total=total,
-                        sample=sample,
-                        prediction=prediction,
-                    )
+            for future in as_completed(futures):
+                for index, prediction in future.result():
+                    predictions_by_index[index] = prediction
         predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
 
     aggregate_scores: dict[str, Any] = {}

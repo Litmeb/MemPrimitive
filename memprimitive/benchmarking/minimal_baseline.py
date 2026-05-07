@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import threading
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Iterator
@@ -26,6 +29,7 @@ from ._bench_adapters import (
     VALID_LONGMEMEVAL_VARIANTS,
     _iter_json_array_file,
     create_benchmark_adapter,
+    parse_comma_separated_values,
 )
 from ._memory_adapters import (
     PipelineMemoryAdapter,
@@ -44,7 +48,8 @@ from ._runner import (
 )
 from ._types import AnswerRunner, BenchmarkPrediction, BenchmarkSample
 
-DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[2] / "benchmarks" / "outputs" / "minimal_baseline_predictions.jsonl"
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "benchmarks" / "outputs"
+DEFAULT_OUTPUT_PATH = DEFAULT_OUTPUT_DIR / "minimal_baseline_predictions.jsonl"
 VALID_BENCHMARKS = frozenset({"locomo", "longmemeval", "dmr"})
 
 
@@ -53,9 +58,14 @@ class _TqdmBenchmarkProgress:
         self.enabled = bool(enabled)
         self.bar = None
         self.memory_bar = None
+        self.qa_bars: dict[str, Any] = {}
+        self.memory_bars: dict[str, Any] = {}
         self.user_totals: dict[str, int] = {}
         self.user_done: dict[str, int] = {}
         self.user_labels: dict[str, str] = {}
+        self.user_memory_totals: dict[str, int] = {}
+        self.user_positions: dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def __call__(
         self,
@@ -69,10 +79,42 @@ class _TqdmBenchmarkProgress:
         turn_increment: int | None = None,
         samples: list[BenchmarkSample] | None = None,
         sample: BenchmarkSample | None = None,
+        session_key: str | None = None,
+        group_sample_index: int | None = None,
         **_: Any,
     ) -> None:
         if not self.enabled:
             return
+        with self._lock:
+            self._update(
+                phase=phase,
+                total=total,
+                total_turns=total_turns,
+                memory_turn_total=memory_turn_total,
+                turn_index=turn_index,
+                turn_id=turn_id,
+                turn_increment=turn_increment,
+                samples=samples,
+                sample=sample,
+                session_key=session_key,
+                group_sample_index=group_sample_index,
+            )
+
+    def _update(
+        self,
+        *,
+        phase: str,
+        total: int | None = None,
+        total_turns: int | None = None,
+        memory_turn_total: int | None = None,
+        turn_index: int | None = None,
+        turn_id: str | None = None,
+        turn_increment: int | None = None,
+        samples: list[BenchmarkSample] | None = None,
+        sample: BenchmarkSample | None = None,
+        session_key: str | None = None,
+        group_sample_index: int | None = None,
+    ) -> None:
         if phase == "init":
             self._initialize(
                 total=0 if total is None else total,
@@ -80,12 +122,18 @@ class _TqdmBenchmarkProgress:
                 memory_turn_total=memory_turn_total,
             )
             return
-        if self.bar is None:
+        if not self.qa_bars:
             self._initialize(total=0 if total is None else total, samples=[], memory_turn_total=memory_turn_total)
         if sample is not None and phase in {"start", "done"}:
             self._set_sample_status(sample, done=(phase == "done"))
+        if sample is not None and phase == "memory_load_start":
+            self._set_memory_status(sample, status="loading", session_key=session_key)
         if sample is not None and phase == "memory_init":
-            self._set_memory_status(sample, status=f"0/{0 if total_turns is None else total_turns} loading")
+            self._set_memory_status(
+                sample,
+                status=f"0/{0 if total_turns is None else total_turns} loading",
+                session_key=session_key,
+            )
         if sample is not None and phase == "memory_turn_done":
             increment = 1 if turn_increment is None else int(turn_increment)
             self._set_memory_status(
@@ -94,20 +142,32 @@ class _TqdmBenchmarkProgress:
                     f"{0 if turn_index is None else turn_index}"
                     f"/{'' if total_turns is None else total_turns} {turn_id or 'turn'}"
                 ),
+                session_key=session_key,
             )
-            if self.memory_bar is not None:
-                self.memory_bar.update(increment)
+            memory_bar = self._memory_bar_for(sample)
+            if memory_bar is not None:
+                memory_bar.update(increment)
         if sample is not None and phase == "memory_finish":
-            self._set_memory_status(sample, status="loaded")
+            self._set_memory_status(sample, status="loaded", session_key=session_key)
+        if sample is not None and phase == "memory_loaded":
+            self._set_memory_status(sample, status="loaded", session_key=session_key)
         if sample is not None and phase == "memory_reuse":
-            self._set_memory_status(sample, status="reused")
-        if phase == "done" and self.bar is not None:
-            self.bar.update(1)
-        if phase == "finish" and self.bar is not None:
-            if self.memory_bar is not None:
-                self.memory_bar.close()
-                self.memory_bar = None
-            self.bar.close()
+            if group_sample_index is None:
+                self._set_memory_status(sample, status="reused", session_key=session_key)
+            else:
+                self._set_memory_status(sample, status=f"reused qa {group_sample_index}", session_key=session_key)
+        if phase == "done" and sample is not None:
+            qa_bar = self._qa_bar_for(sample)
+            if qa_bar is not None:
+                qa_bar.update(1)
+        if phase == "finish":
+            for bar in list(self.memory_bars.values()):
+                bar.close()
+            for bar in list(self.qa_bars.values()):
+                bar.close()
+            self.memory_bars.clear()
+            self.qa_bars.clear()
+            self.memory_bar = None
             self.bar = None
 
     def _initialize(
@@ -120,48 +180,94 @@ class _TqdmBenchmarkProgress:
         self.user_totals.clear()
         self.user_done.clear()
         self.user_labels.clear()
+        self.user_memory_totals.clear()
+        self.user_positions.clear()
+        seen_grouped_memory_keys: set[str] = set()
         for sample in samples:
             key = self._user_key(sample)
             self.user_totals[key] = self.user_totals.get(key, 0) + 1
             self.user_labels.setdefault(key, self._user_label(sample))
-        total_memory_turns = (
-            sum(len(sample.history_turns) for sample in samples)
-            if memory_turn_total is None
-            else memory_turn_total
-        )
-        self.memory_bar = tqdm(
-            total=total_memory_turns,
-            unit="turn",
-            dynamic_ncols=True,
-            desc="memory turns",
-            position=0,
-        )
-        self.bar = tqdm(total=total, unit="qa", dynamic_ncols=True, desc="qa answers", position=1)
+            if key not in self.user_positions:
+                self.user_positions[key] = len(self.user_positions) * 2
+            if self._uses_user_memory_group(sample):
+                if key in seen_grouped_memory_keys:
+                    continue
+                seen_grouped_memory_keys.add(key)
+            self.user_memory_totals[key] = self.user_memory_totals.get(key, 0) + len(sample.history_turns)
+        if not samples and total:
+            key = "benchmark"
+            self.user_totals[key] = total
+            self.user_labels[key] = "benchmark"
+            self.user_memory_totals[key] = 0 if memory_turn_total is None else memory_turn_total
+            self.user_positions[key] = 0
+        for key in self.user_positions:
+            self._ensure_user_bars(key)
 
     def _set_sample_status(self, sample: BenchmarkSample, *, done: bool) -> None:
-        if self.bar is None:
-            return
         key = self._user_key(sample)
         self.user_totals.setdefault(key, 1)
         self.user_labels.setdefault(key, self._user_label(sample))
+        self._ensure_user_bars(key)
         if done:
             self.user_done[key] = self.user_done.get(key, 0) + 1
         current_done = self.user_done.get(key, 0)
         user_total = self.user_totals.get(key, 1)
         status = "done" if done else "running"
-        self.bar.set_postfix_str(
+        self.qa_bars[key].set_postfix_str(
             f"{self.user_labels[key]} {current_done}/{user_total} {status} {sample.sample_id}",
             refresh=True,
         )
 
-    def _set_memory_status(self, sample: BenchmarkSample, *, status: str) -> None:
-        if self.memory_bar is None:
-            return
+    def _set_memory_status(self, sample: BenchmarkSample, *, status: str, session_key: str | None = None) -> None:
         key = self._user_key(sample)
         self.user_labels.setdefault(key, self._user_label(sample))
-        self.memory_bar.set_postfix_str(
-            f"{self.user_labels[key]} {status} {sample.sample_id}",
+        self._ensure_user_bars(key)
+        suffix = f" {session_key}" if session_key else ""
+        self.memory_bars[key].set_postfix_str(
+            f"{self.user_labels[key]} {status}{suffix}",
             refresh=True,
+        )
+
+    def _ensure_user_bars(self, key: str) -> None:
+        if key not in self.user_positions:
+            self.user_positions[key] = len(self.user_positions) * 2
+        label = self.user_labels.get(key, key)
+        position = self.user_positions[key]
+        if key not in self.memory_bars:
+            self.memory_bars[key] = tqdm(
+                total=self.user_memory_totals.get(key, 0),
+                unit="turn",
+                dynamic_ncols=True,
+                desc=f"memory {label}",
+                position=position,
+            )
+        if key not in self.qa_bars:
+            self.qa_bars[key] = tqdm(
+                total=self.user_totals.get(key, 0),
+                unit="qa",
+                dynamic_ncols=True,
+                desc=f"qa {label}",
+                position=position + 1,
+            )
+        self.memory_bar = self.memory_bars[key]
+        self.bar = self.qa_bars[key]
+
+    def _memory_bar_for(self, sample: BenchmarkSample):
+        key = self._user_key(sample)
+        self._ensure_user_bars(key)
+        return self.memory_bars.get(key)
+
+    def _qa_bar_for(self, sample: BenchmarkSample):
+        key = self._user_key(sample)
+        self._ensure_user_bars(key)
+        return self.qa_bars.get(key)
+
+    @staticmethod
+    def _uses_user_memory_group(sample: BenchmarkSample) -> bool:
+        metadata = sample.metadata
+        return bool(
+            str(metadata.get("locomo_user_index", "")).strip()
+            or str(metadata.get("locomo_sample_id", "")).strip()
         )
 
     @staticmethod
@@ -186,6 +292,9 @@ class _TqdmBenchmarkProgress:
             return f"user {user_index} ({speakers})"
         if user_index:
             return f"user {user_index}"
+        sample_group = str(metadata.get("locomo_sample_id", "")).strip()
+        if sample_group:
+            return sample_group
         return str(sample.benchmark_name).strip() or "benchmark"
 
 
@@ -259,6 +368,7 @@ def _create_cli_memory_adapter(
     similar_top_k: int = 5,
     mem0_speaker_workers: int = 2,
     memmachine_stm_record_budget: int = 20,
+    memmachine_profile_max_turns: int = 6,
     memory_binding: str | None = None,
     memory_binding_kwargs: dict[str, Any] | None = None,
 ):
@@ -306,12 +416,14 @@ def _create_cli_memory_adapter(
                     expand_context=3,
                     profile_top_k=10 if top_k is None else top_k,
                     stm_record_budget=memmachine_stm_record_budget,
+                    profile_max_turns=memmachine_profile_max_turns,
                 ),
                 name="memmachine",
             )
         return create_memmachine_memory_adapter(
             top_k=top_k,
             stm_record_budget=memmachine_stm_record_budget,
+            profile_max_turns=memmachine_profile_max_turns,
             speaker_workers=mem0_speaker_workers,
         )
     if adapter_name == "binding":
@@ -553,6 +665,46 @@ def _write_predictions_jsonl(predictions, output_path: Path) -> int:
     return write_predictions_jsonl(predictions, output_path)
 
 
+def _safe_output_name_component(value: str) -> str:
+    component = re.sub(r"[^A-Za-z0-9._+-]+", "_", value.strip())
+    component = re.sub(r"_+", "_", component).strip("._-")
+    return component or "unknown"
+
+
+def _default_output_dataset_name(*, benchmark_name: str, longmemeval_variant: str) -> str:
+    if benchmark_name == "longmemeval":
+        return f"{benchmark_name}_{longmemeval_variant}"
+    return benchmark_name
+
+
+def _default_output_user_name(locomo_users: str | list[str] | tuple[str, ...] | None) -> str:
+    filters = parse_comma_separated_values(locomo_users)
+    if not filters:
+        return "all-users"
+    return "+".join(_safe_output_name_component(item) for item in filters)
+
+
+def _build_default_output_path(
+    *,
+    benchmark_name: str,
+    memory_adapter_name: str,
+    smoke_test: bool,
+    locomo_users: str | list[str] | tuple[str, ...] | None,
+    longmemeval_variant: str,
+    timestamp: datetime | None = None,
+) -> Path:
+    timestamp = datetime.now() if timestamp is None else timestamp
+    parts = [
+        _default_output_dataset_name(benchmark_name=benchmark_name, longmemeval_variant=longmemeval_variant),
+        memory_adapter_name,
+        "smoke" if smoke_test else "full",
+        _default_output_user_name(locomo_users),
+        timestamp.strftime("%Y%m%d_%H%M%S"),
+    ]
+    filename = "_".join(_safe_output_name_component(part) for part in parts) + ".jsonl"
+    return DEFAULT_OUTPUT_DIR / filename
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", choices=sorted(VALID_BENCHMARKS), required=True)
@@ -599,6 +751,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="MemMachine STM working-record budget before consolidation. Only used with --memory-adapter memmachine.",
     )
     parser.add_argument(
+        "--memmachine-profile-max-turns",
+        type=int,
+        default=6,
+        help="Max tool-call agent turns for MemMachine profile evolution. Only used with --memory-adapter memmachine.",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=1,
@@ -625,7 +783,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="JSON object passed to the binding factory when --memory-adapter binding.",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable the tqdm benchmark progress bar.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Prediction JSONL path. Defaults to "
+            "benchmarks/outputs/<benchmark>_<memory-adapter>_<smoke-or-full>_<users>_<timestamp>.jsonl."
+        ),
+    )
     return parser
 
 
@@ -634,6 +800,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     benchmark_name = str(args.benchmark).strip().casefold()
     memory_adapter_name = str(args.memory_adapter).strip().casefold()
+    output_path = args.output
+    if output_path is None:
+        output_path = _build_default_output_path(
+            benchmark_name=benchmark_name,
+            memory_adapter_name=memory_adapter_name,
+            smoke_test=bool(args.smoke_test),
+            locomo_users=args.locomo_users,
+            longmemeval_variant=args.longmemeval_variant,
+        )
     limit = args.limit
     max_history_turns = args.max_history_turns
     if args.smoke_test:
@@ -655,6 +830,7 @@ def main(argv: list[str] | None = None) -> int:
         similar_top_k=args.similar_top_k,
         mem0_speaker_workers=args.mem0_speaker_workers,
         memmachine_stm_record_budget=args.memmachine_stm_record_budget,
+        memmachine_profile_max_turns=args.memmachine_profile_max_turns,
         memory_binding=args.memory_binding,
         memory_binding_kwargs=binding_kwargs,
     )
@@ -674,8 +850,8 @@ def main(argv: list[str] | None = None) -> int:
     predictions = result.predictions
     for index, prediction in enumerate(predictions, start=1):
         print(f"[{index}] ran {prediction.benchmark_name}:{prediction.sample_id}")
-    written = _write_predictions_jsonl(predictions, args.output)
-    print(f"wrote {written} predictions to {args.output}")
+    written = _write_predictions_jsonl(predictions, output_path)
+    print(f"wrote {written} predictions to {output_path}")
     return 0
 
 

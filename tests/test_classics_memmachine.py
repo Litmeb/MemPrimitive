@@ -110,6 +110,14 @@ def test_memmachine_classic_wires_contextual_ltm_and_profile_tools(monkeypatch: 
     assert "Alice prefers jasmine tea." in context
 
 
+def test_memmachine_profile_evolution_max_turns_is_configurable() -> None:
+    system = build_memmachine_memory_system(profile_max_turns=12)
+    write_pipeline = system["write_pipeline"]
+    profile_evolution = write_pipeline.memory_evolution[0]
+
+    assert profile_evolution.max_turns == 12
+
+
 def test_memmachine_indexes_ltm_before_stm_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
     from memprimitive.baselines import EmbeddingSimilarityRetrieval, LLMFunctionCallEvolution
     from memprimitive.utils import _runtime
