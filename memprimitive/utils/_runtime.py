@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from agents import Agent, AsyncOpenAI, ModelSettings, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
+from agents.exceptions import MaxTurnsExceeded
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
@@ -116,6 +118,7 @@ class Runtime:
         rerank_api_key: str | None = None,
         rerank_base_url: str | None = None,
         rerank_model: str | None = None,
+        rerank_timeout_seconds: int | None = None,
     ) -> None:
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
@@ -163,8 +166,22 @@ class Runtime:
             if rerank_model is not None
             else env.get("MEMPRIMITIVE_RERANK_MODEL", "")
         )
+        raw_rerank_timeout = (
+            rerank_timeout_seconds
+            if rerank_timeout_seconds is not None
+            else env.get("MEMPRIMITIVE_RERANK_TIMEOUT_SECONDS", "180")
+        )
+        self.rerank_timeout_seconds = max(1, int(raw_rerank_timeout))
         # Non-OpenAI-compatible providers often do not support the default tracing path.
         set_tracing_disabled(disabled=True)
+
+    def _tiktoken_encoding(self):  # type: ignore[no-untyped-def]
+        if tiktoken is None:
+            return None
+        try:
+            return tiktoken.encoding_for_model(self.model) if self.model else tiktoken.get_encoding("cl100k_base")
+        except KeyError:
+            return tiktoken.get_encoding("cl100k_base")
 
     @staticmethod
     def _normalize_embedding_provider(provider: str | None) -> str:
@@ -212,7 +229,15 @@ class Runtime:
             tools=[] if tools is None else list(tools),
             output_type=output_type,
         )
-        result = Runner.run_sync(agent, input=input_text, max_turns=max_turns)
+        try:
+            result = Runner.run_sync(agent, input=input_text, max_turns=max_turns)
+        except MaxTurnsExceeded:
+            # Completed tool rounds are already applied; skip only the unfinished final step.
+            if output_type is None:
+                return ""
+            if isinstance(output_type, type) and issubclass(output_type, BaseModel):
+                return output_type()
+            raise
         return result.final_output
 
     def embed(self, text: str) -> list[float]:
@@ -251,7 +276,25 @@ class Runtime:
             "MEMPRIMITIVE_RERANK_BASE_URL, and MEMPRIMITIVE_RERANK_MODEL."
         )
 
-    def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
+    def text(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.0,
+        max_input_tokens: int | None = None,
+    ) -> str:
+        if max_input_tokens is not None:
+            if max_input_tokens <= 0:
+                raise ValueError("max_input_tokens must be positive.")
+            sys_tokens = self.count_tokens(system)
+            user_tokens = self.count_tokens(user)
+            if sys_tokens + user_tokens > max_input_tokens:
+                if sys_tokens >= max_input_tokens:
+                    system = self.truncate_text_to_token_limit(system, max_input_tokens)
+                    user = ""
+                else:
+                    user = self.truncate_text_to_token_limit(user, max_input_tokens - self.count_tokens(system))
         output = self.run_agent(
             name="MemPrimitiveTextAgent",
             instructions=system,
@@ -273,13 +316,37 @@ class Runtime:
         cleaned = str(text)
         if not cleaned:
             return 0
-        if tiktoken is not None:
-            try:
-                encoding = tiktoken.encoding_for_model(self.model) if self.model else tiktoken.get_encoding("cl100k_base")
-            except KeyError:
-                encoding = tiktoken.get_encoding("cl100k_base")
+        encoding = self._tiktoken_encoding()
+        if encoding is not None:
             return len(encoding.encode(cleaned))
         return max(1, math.ceil(len(cleaned) / 4))
+
+    def truncate_text_to_token_limit(self, text: str, max_tokens: int) -> str:
+        """Truncate text so ``count_tokens`` is at most ``max_tokens`` (uses tiktoken when installed)."""
+
+        if max_tokens <= 0:
+            return ""
+        cleaned = str(text)
+        if not cleaned:
+            return ""
+        encoding = self._tiktoken_encoding()
+        if encoding is not None:
+            token_ids = encoding.encode(cleaned)
+            if len(token_ids) <= max_tokens:
+                return cleaned
+            return encoding.decode(token_ids[:max_tokens])
+        if self.count_tokens(cleaned) <= max_tokens:
+            return cleaned
+        lo, hi = 0, len(cleaned)
+        best = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if self.count_tokens(cleaned[:mid]) <= max_tokens:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return cleaned[:best]
 
     def summarize_records(
         self,
@@ -373,7 +440,7 @@ class Runtime:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=self.rerank_timeout_seconds) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

@@ -4,8 +4,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from agents.exceptions import MaxTurnsExceeded
+from pydantic import BaseModel
 
 from memprimitive.utils import _runtime
+
+
+class _TinyStructured(BaseModel):
+    field: int = 0
 
 
 def test_runtime_embed_defaults_to_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +145,7 @@ def test_runtime_rerank_calls_openai_compatible_rerank_api(
             "url": "https://rerank.example/v1/rerank",
             "authorization": "Bearer rerank-key",
             "content_type": "application/json",
-            "timeout": 60,
+            "timeout": 180,
             "body": {
                 "model": "rerank-test",
                 "query": "tea preference",
@@ -149,6 +155,41 @@ def test_runtime_rerank_calls_openai_compatible_rerank_api(
             },
         }
     ]
+
+
+def test_runtime_rerank_uses_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _FakeResponse:
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"results":[{"index":0,"relevance_score":0.5}]}'
+
+    def _fake_urlopen(request: object, *, timeout: int) -> _FakeResponse:
+        seen["timeout"] = timeout
+        return _FakeResponse()
+
+    monkeypatch.setattr(_runtime.urllib.request, "urlopen", _fake_urlopen)
+
+    reranked = _runtime.Runtime(
+        rerank_api_key="rerank-key",
+        rerank_base_url="https://rerank.example/v1",
+        rerank_model="rerank-test",
+        rerank_timeout_seconds=321,
+    ).rerank(
+        query="tea",
+        candidates=[{"id": "a", "content": "Alice likes tea."}],
+        task="rank",
+        top_k=1,
+    )
+
+    assert reranked == [{"id": "a", "score": 0.5, "rationale": ""}]
+    assert seen["timeout"] == 321
 
 
 def test_runtime_rerank_requires_rerank_api_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,6 +291,34 @@ def test_runtime_rejects_unsupported_embedding_provider() -> None:
         _runtime.Runtime(embedding_provider="unsupported")
 
 
+def test_runtime_truncate_text_to_token_limit_uses_heuristic_without_tiktoken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_runtime, "tiktoken", None)
+    runtime = _runtime.Runtime(model="test-model")
+    body = "a" * 200
+    assert runtime.count_tokens(body) == 50
+    truncated = runtime.truncate_text_to_token_limit(body, 12)
+    assert runtime.count_tokens(truncated) <= 12
+    assert len(truncated) < len(body)
+
+
+def test_runtime_text_truncates_user_for_max_input_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_runtime, "tiktoken", None)
+    captured: dict[str, str] = {}
+
+    def _recording_run_agent(self: _runtime.Runtime, **kwargs: object) -> str:
+        captured["instructions"] = str(kwargs.get("instructions", ""))
+        captured["input_text"] = str(kwargs.get("input_text", ""))
+        return "ok"
+
+    monkeypatch.setattr(_runtime.Runtime, "run_agent", _recording_run_agent)
+    runtime = _runtime.Runtime(model="stub")
+    runtime.text(system="s" * 40, user="u" * 400, max_input_tokens=20)
+    assert captured["instructions"] == "s" * 40
+    assert captured["input_text"] == "u" * 40
+
+
 def test_coerce_json_accepts_markdown_fenced_json() -> None:
     assert _runtime._coerce_json('```json\n["art", "pottery"]\n```') == ["art", "pottery"]
 
@@ -258,3 +327,37 @@ def test_coerce_json_repairs_single_truncated_fenced_array() -> None:
     content = '```json\n[\n  "Melanie likes painting and pottery."\n```'
 
     assert _runtime._coerce_json(content) == ["Melanie likes painting and pottery."]
+
+
+def test_run_agent_max_turns_exceeded_returns_empty_plain(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_max_turns(*_args: object, **_kwargs: object) -> None:
+        raise MaxTurnsExceeded("Max turns (3) exceeded")
+
+    monkeypatch.setattr(_runtime.Runner, "run_sync", _raise_max_turns)
+    runtime = _runtime.Runtime(api_key="k", base_url="http://example/v1", model="m")
+    assert (
+        runtime.run_agent(
+            name="t",
+            instructions="i",
+            input_text="{}",
+            max_turns=3,
+        )
+        == ""
+    )
+
+
+def test_run_agent_max_turns_exceeded_returns_default_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_max_turns(*_args: object, **_kwargs: object) -> None:
+        raise MaxTurnsExceeded("Max turns (3) exceeded")
+
+    monkeypatch.setattr(_runtime.Runner, "run_sync", _raise_max_turns)
+    runtime = _runtime.Runtime(api_key="k", base_url="http://example/v1", model="m")
+    out = runtime.run_agent(
+        name="t",
+        instructions="i",
+        input_text="{}",
+        max_turns=3,
+        output_type=_TinyStructured,
+    )
+    assert isinstance(out, _TinyStructured)
+    assert out.field == 0

@@ -28,14 +28,38 @@ from ._types import (
 
 
 ENV_FILES_TO_COPY = ("memprimitive/.env", "memprimitive/2.env")
+WORKTREE_EXCLUDES = (
+    "__pycache__/",
+    "*.py[cod]",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    "memprimitive/.env",
+    "memprimitive/2.env",
+    "*.env",
+    "benchmarks/outputs/",
+)
+
+MEMMACHINE_CLASSICS_TEST_COMMAND = "~/bin/winpy312 -m pytest tests/test_classics_memmachine.py -v"
 
 
 def python_command(config: EvolutionRunConfig) -> str:
     """Return a shell-safe Python command for the current host interpreter shape."""
 
-    if os.name == "nt" and str(config.python_bin).startswith("~/"):
+    raw = str(config.python_bin).strip()
+    if os.name != "nt":
+        return raw
+    expanded = os.path.expanduser(raw.replace("/", os.sep))
+    path = Path(expanded)
+    if path.is_file():
+        ext = path.suffix.casefold()
+        if ext in {".exe", ".bat", ".cmd"}:
+            return json.dumps(str(path.resolve()))
+        # Bash-only shims (e.g. ~/bin/winpy312) are often pre-expanded by the shell; cmd.exe cannot run them.
         return json.dumps(sys.executable)
-    return str(config.python_bin)
+    if raw.startswith("~/") or raw.startswith("~\\"):
+        return json.dumps(sys.executable)
+    return raw
 
 
 def git_root(start: Path, runner: CommandRunner | None = None) -> Path:
@@ -63,6 +87,13 @@ def _run_git(repo_root: Path, args: list[str], runner: CommandRunner):
     return runner.run(["git", *args], cwd=repo_root)
 
 
+def short_worktree_slug(value: str, *, prefix_chars: int = 32) -> str:
+    normalized = normalize_repo_path(value).replace("/", "-") or "item"
+    digest = hashlib.sha1(str(value).encode("utf-8")).hexdigest()[:10]
+    prefix = normalized[:prefix_chars].strip("-") or "item"
+    return f"{prefix}-{digest}"
+
+
 def create_candidate_worktree(
     *,
     repo_root: Path,
@@ -72,9 +103,11 @@ def create_candidate_worktree(
     runner: CommandRunner,
 ) -> Path:
     worktree_root = (repo_root / config.worktree_root).resolve()
-    worktree_path = worktree_root / config.run_id / f"round-{round_index}" / candidate.id
+    worktree_run_id = short_worktree_slug(config.run_id, prefix_chars=18)
+    worktree_candidate_id = short_worktree_slug(candidate.id, prefix_chars=32)
+    worktree_path = worktree_root / worktree_run_id / f"r{round_index}" / worktree_candidate_id
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    branch_name = f"evolve/{config.run_id}/r{round_index}/{candidate.id}"
+    branch_name = f"evolve/{worktree_run_id}/r{round_index}/{worktree_candidate_id}"
     result = _run_git(
         repo_root,
         ["worktree", "add", "-b", branch_name, str(worktree_path), config.base_ref],
@@ -82,7 +115,25 @@ def create_candidate_worktree(
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"failed to create worktree {worktree_path}")
+    write_worktree_excludes(worktree_path, runner)
     return worktree_path
+
+
+def write_worktree_excludes(worktree_path: Path, runner: CommandRunner) -> None:
+    result = runner.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=worktree_path)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "failed to locate worktree exclude file.")
+    exclude_path = Path(result.stdout.strip())
+    if not exclude_path.is_absolute():
+        exclude_path = worktree_path / exclude_path
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude_path.read_text(encoding="utf-8", errors="replace") if exclude_path.exists() else ""
+    additions = [pattern for pattern in WORKTREE_EXCLUDES if pattern not in existing.splitlines()]
+    if additions:
+        with exclude_path.open("a", encoding="utf-8") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write("\n".join(additions) + "\n")
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -148,11 +199,23 @@ def parse_changed_files(status_output: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(changed))
 
 
+def is_generated_status_path(path: str | Path) -> bool:
+    normalized = normalize_repo_path(path)
+    return (
+        "__pycache__/" in normalized
+        or normalized.endswith(".pyc")
+        or normalized.endswith(".pyo")
+        or normalized.startswith(".pytest_cache/")
+        or normalized.startswith(".ruff_cache/")
+        or normalized.startswith(".mypy_cache/")
+    )
+
+
 def collect_changed_files(worktree_path: Path, runner: CommandRunner) -> tuple[str, ...]:
     result = runner.run(["git", "status", "--porcelain"], cwd=worktree_path)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git status failed in candidate worktree.")
-    return parse_changed_files(result.stdout)
+    return tuple(path for path in parse_changed_files(result.stdout) if not is_generated_status_path(path))
 
 
 def materialize_diff(worktree_path: Path, artifact_dir: Path, runner: CommandRunner) -> CommandRecord:
@@ -176,6 +239,30 @@ def validate_changed_files(candidate: CandidateSpec, changed_files: tuple[str, .
 def run_shell_command(command: str, *, cwd: Path, artifact_dir: Path, name: str, runner: CommandRunner) -> CommandRecord:
     result = runner.run(command, cwd=cwd, shell=True)
     return write_process_log(result, artifact_dir=artifact_dir, name=name)
+
+
+def command_for_host(command: str, config: EvolutionRunConfig) -> str:
+    command = str(command)
+    if os.name == "nt":
+        return command.replace("~/bin/winpy312", python_command(config), 1)
+    return command
+
+
+def _focused_test_needs_memmachine_fallback(command: str, record: CommandRecord) -> bool:
+    normalized = str(command).replace("\\", "/")
+    if "tests/test_classics_memmachine.py" not in normalized:
+        return False
+    output_parts: list[str] = []
+    if record.stdout_path:
+        output_parts.append(Path(record.stdout_path).read_text(encoding="utf-8", errors="replace"))
+    if record.stderr_path:
+        output_parts.append(Path(record.stderr_path).read_text(encoding="utf-8", errors="replace"))
+    output = "\n".join(output_parts).casefold()
+    return record.returncode in {4, 5} and (
+        "file or directory not found" in output
+        or "no tests ran" in output
+        or "0 selected" in output
+    )
 
 
 def run_static_checks(
@@ -217,13 +304,15 @@ def run_focused_tests(
     worktree_path: Path,
     artifact_dir: Path,
     candidate: CandidateSpec,
+    config: EvolutionRunConfig,
     runner: CommandRunner,
 ) -> tuple[bool, list[CommandRecord]]:
     commands: list[CommandRecord] = []
     ok = True
     for index, command in enumerate(candidate.focused_tests, start=1):
+        host_command = command_for_host(command, config)
         record = run_shell_command(
-            command,
+            host_command,
             cwd=worktree_path,
             artifact_dir=artifact_dir,
             name=f"focused-test-{index}",
@@ -231,6 +320,18 @@ def run_focused_tests(
         )
         commands.append(record)
         if record.returncode != 0:
+            fallback_command = command_for_host(MEMMACHINE_CLASSICS_TEST_COMMAND, config)
+            if host_command != fallback_command and _focused_test_needs_memmachine_fallback(command, record):
+                fallback_record = run_shell_command(
+                    fallback_command,
+                    cwd=worktree_path,
+                    artifact_dir=artifact_dir,
+                    name=f"focused-test-{index}-fallback",
+                    runner=runner,
+                )
+                commands.append(fallback_record)
+                if fallback_record.returncode == 0:
+                    continue
             ok = False
             break
     pytest_log = artifact_dir / "pytest.log"
@@ -244,8 +345,31 @@ def run_focused_tests(
     return ok, commands
 
 
-def benchmark_command(config: EvolutionRunConfig, candidate: CandidateSpec, predictions_path: Path) -> str:
+def _normalize_benchmark_arg_key(key: str) -> str:
+    return str(key).strip().lstrip("-").replace("-", "_")
+
+
+def _coerce_benchmark_arg_value(value: Any) -> Any:
+    if isinstance(value, str):
+        lowered = value.strip().casefold()
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        if lowered in {"none", "null"}:
+            return None
+    return value
+
+
+def benchmark_command(
+    config: EvolutionRunConfig,
+    candidate: CandidateSpec,
+    predictions_path: Path,
+    *,
+    repo_root: Path | None = None,
+) -> str:
     binding_kwargs = dict(candidate.benchmark_args.get("memory_binding_kwargs") or {})
+    benchmark_root = Path(config.benchmark_root)
+    if repo_root is not None and not benchmark_root.is_absolute():
+        benchmark_root = (repo_root / benchmark_root).resolve()
     known_cli_args = {
         "top_k",
         "similar_top_k",
@@ -253,15 +377,16 @@ def benchmark_command(config: EvolutionRunConfig, candidate: CandidateSpec, pred
         "memmachine_stm_record_budget",
         "memmachine_profile_max_turns",
         "max_workers",
+        "llm_max_input_tokens",
     }
+    reserved_args = {"memory_adapter", "memory_binding"}
     parts = [
         python_command(config),
         "-m memprimitive.benchmarking.minimal_baseline",
         f"--benchmark {config.benchmark}",
-        f"--benchmark-root {json.dumps(config.benchmark_root)}",
+        f"--benchmark-root {json.dumps(str(benchmark_root))}",
         "--memory-adapter binding",
         f"--memory-binding {json.dumps(config.target_binding)}",
-        "--smoke-test",
         "--no-progress",
         f"--output {json.dumps(str(predictions_path))}",
     ]
@@ -273,10 +398,25 @@ def benchmark_command(config: EvolutionRunConfig, candidate: CandidateSpec, pred
         parts.append(f"--limit {int(config.benchmark_limit)}")
     if config.max_history_turns is not None:
         parts.append(f"--max-history-turns {int(config.max_history_turns)}")
-    for key, value in sorted(candidate.benchmark_args.items()):
+    if config.llm_max_input_tokens is not None:
+        parts.append(f"--llm-max-input-tokens {int(config.llm_max_input_tokens)}")
+    for raw_key, raw_value in sorted(candidate.benchmark_args.items()):
+        key = _normalize_benchmark_arg_key(raw_key)
+        value = _coerce_benchmark_arg_value(raw_value)
         if key == "memory_binding_kwargs":
+            if isinstance(raw_value, dict):
+                binding_kwargs.update(
+                    {
+                        str(item_key): _coerce_benchmark_arg_value(item_value)
+                        for item_key, item_value in raw_value.items()
+                    }
+                )
+            continue
+        if key in reserved_args:
             continue
         if key not in known_cli_args:
+            if key.startswith("memmachine_"):
+                key = key.removeprefix("memmachine_")
             binding_kwargs[key] = value
             continue
         cli_key = str(key).replace("_", "-")
@@ -292,6 +432,7 @@ def benchmark_command(config: EvolutionRunConfig, candidate: CandidateSpec, pred
 
 def run_benchmark_and_local_scoring(
     *,
+    repo_root: Path,
     worktree_path: Path,
     artifact_dir: Path,
     config: EvolutionRunConfig,
@@ -304,7 +445,7 @@ def run_benchmark_and_local_scoring(
     summary_path = artifact_dir / "score_summary.json"
 
     benchmark_record = run_shell_command(
-        benchmark_command(config, candidate, predictions_path),
+        benchmark_command(config, candidate, predictions_path, repo_root=repo_root),
         cwd=worktree_path,
         artifact_dir=artifact_dir,
         name="benchmark",
@@ -520,6 +661,7 @@ def run_candidate(
         worktree_path=worktree_path,
         artifact_dir=artifact_dir,
         candidate=candidate,
+        config=config,
         runner=runner,
     )
     commands.extend(focused_commands)
@@ -535,6 +677,7 @@ def run_candidate(
         )
 
     benchmark_ok, benchmark_diagnostics, benchmark_commands = run_benchmark_and_local_scoring(
+        repo_root=repo_root,
         worktree_path=worktree_path,
         artifact_dir=artifact_dir,
         config=config,
@@ -609,6 +752,49 @@ def build_orchestrator_feedback(
     }
 
 
+def _load_candidate_specs(path: Path) -> list[CandidateSpec]:
+    rows = _load_jsonl_dicts(path)
+    return [CandidateSpec.from_json_dict(row) for row in rows]
+
+
+def _load_round_results(path: Path) -> list[CandidateResult]:
+    if not path.exists():
+        return []
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(rows, list):
+        return []
+    results: list[CandidateResult] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        commands = tuple(
+            CommandRecord(
+                command=str(command.get("command", "")),
+                cwd=str(command.get("cwd", "")),
+                returncode=int(command.get("returncode", 0)),
+                stdout_path=command.get("stdout_path"),
+                stderr_path=command.get("stderr_path"),
+                duration_seconds=float(command.get("duration_seconds", 0.0) or 0.0),
+            )
+            for command in row.get("commands", [])
+            if isinstance(command, dict)
+        )
+        results.append(
+            CandidateResult(
+                candidate_id=str(row.get("candidate_id", "")),
+                status=str(row.get("status", "")),
+                changed_files=tuple(row.get("changed_files", []) or ()),
+                rejected_reasons=tuple(row.get("rejected_reasons", []) or ()),
+                failed_stage=row.get("failed_stage"),
+                diagnostics=dict(row.get("diagnostics", {}) or {}),
+                artifact_paths=dict(row.get("artifact_paths", {}) or {}),
+                commands=commands,
+                worker_final_message=str(row.get("worker_final_message", "")),
+            )
+        )
+    return results
+
+
 def promote_top_candidates(
     *,
     results: list[CandidateResult],
@@ -659,14 +845,121 @@ def promote_top_candidates(
     return updated
 
 
+def resume_evolution_benchmark_only(
+    *,
+    repo_root: Path,
+    config: EvolutionRunConfig,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    output_root = (repo_root / config.output_root / config.run_id).resolve()
+    manifest_path = output_root / "manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(f"resume target not found: {manifest_path}")
+
+    all_results: list[CandidateResult] = []
+    for round_index in range(1, config.rounds + 1):
+        round_dir = output_root / f"round-{round_index}"
+        proposals_path = round_dir / "proposals.jsonl"
+        leaderboard_path = round_dir / "leaderboard.json"
+        if not proposals_path.exists():
+            raise RuntimeError(f"missing candidate proposals for round {round_index}: {proposals_path}")
+        if not leaderboard_path.exists():
+            raise RuntimeError(f"missing round leaderboard for round {round_index}: {leaderboard_path}")
+
+        candidates = {candidate.id: candidate for candidate in _load_candidate_specs(proposals_path)}
+        existing_results = _load_round_results(leaderboard_path)
+        resumed_results: list[CandidateResult] = []
+        benchmark_retry_targets: list[tuple[int, CandidateResult, CandidateSpec, Path, Path]] = []
+        for index, existing in enumerate(existing_results):
+            candidate = candidates.get(existing.candidate_id)
+            if candidate is None or existing.failed_stage != "benchmark":
+                resumed_results.append(existing)
+                continue
+            worktree_value = existing.artifact_paths.get("worktree")
+            if not worktree_value:
+                raise RuntimeError(f"missing worktree path for candidate {existing.candidate_id}")
+            benchmark_retry_targets.append(
+                (
+                    index,
+                    existing,
+                    candidate,
+                    Path(worktree_value),
+                    Path(existing.artifact_paths["candidate"]).parent,
+                )
+            )
+
+        retried_results: dict[int, CandidateResult] = {}
+        if benchmark_retry_targets:
+            with ThreadPoolExecutor(max_workers=config.max_parallel_candidates) as executor:
+                future_map = {
+                    executor.submit(
+                        run_benchmark_and_local_scoring,
+                        repo_root=repo_root,
+                        worktree_path=worktree_path,
+                        artifact_dir=artifact_dir,
+                        config=config,
+                        candidate=candidate,
+                        runner=runner,
+                    ): (index, existing)
+                    for index, existing, candidate, worktree_path, artifact_dir in benchmark_retry_targets
+                }
+                for future in as_completed(future_map):
+                    index, existing = future_map[future]
+                    benchmark_ok, benchmark_diagnostics, benchmark_commands = future.result()
+                    merged_diagnostics = {**dict(existing.diagnostics), **benchmark_diagnostics}
+                    retried_results[index] = CandidateResult(
+                        candidate_id=existing.candidate_id,
+                        status="passed" if benchmark_ok else "failed",
+                        changed_files=existing.changed_files,
+                        rejected_reasons=existing.rejected_reasons,
+                        failed_stage=None if benchmark_ok else "benchmark",
+                        diagnostics=merged_diagnostics,
+                        artifact_paths=existing.artifact_paths,
+                        commands=tuple(list(existing.commands) + benchmark_commands),
+                        worker_final_message=existing.worker_final_message,
+                    )
+
+        ordered_results: list[CandidateResult] = []
+        for index, existing in enumerate(existing_results):
+            ordered_results.append(retried_results.get(index, existing))
+        resumed_results = ordered_results
+
+        resumed_results = promote_top_candidates(results=resumed_results, config=config, runner=runner)
+        leaderboard = build_leaderboard(resumed_results)
+        write_json(round_dir / "leaderboard.json", leaderboard)
+        feedback = build_orchestrator_feedback(
+            round_index=round_index,
+            results=resumed_results,
+            leaderboard=leaderboard,
+        )
+        write_json(round_dir / "orchestrator_feedback.json", feedback)
+        all_results.extend(resumed_results)
+
+    final_leaderboard = build_leaderboard(all_results)
+    write_json(output_root / "leaderboard.json", final_leaderboard)
+    return {
+        "run_id": config.run_id,
+        "artifact_dir": str(output_root),
+        "leaderboard": final_leaderboard,
+        "resume_benchmark_only": True,
+    }
+
+
 def run_evolution_search(
     *,
     repo_root: Path,
     config: EvolutionRunConfig,
     runner: CommandRunner | None = None,
+    resume_benchmark_only: bool = False,
 ) -> dict[str, Any]:
     command_runner = runner or CommandRunner()
     ensure_control_worktree_is_usable(repo_root, config, command_runner)
+    if resume_benchmark_only:
+        return resume_evolution_benchmark_only(
+            repo_root=repo_root,
+            config=config,
+            runner=command_runner,
+        )
     output_root = (repo_root / config.output_root / config.run_id).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     manifest = {

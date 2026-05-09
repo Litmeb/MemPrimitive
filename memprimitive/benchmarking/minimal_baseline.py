@@ -33,6 +33,7 @@ from ._bench_adapters import (
 )
 from ._memory_adapters import (
     PipelineMemoryAdapter,
+    SharedConversationLoCoMoMemoryAdapter,
     create_dual_speaker_locomo_memory_adapter,
     create_generic_memory_binding_adapter,
     create_amem_memory_adapter,
@@ -436,6 +437,11 @@ def _create_cli_memory_adapter(
                 binding_factory,
                 name=_binding_adapter_name(memory_binding),
             )
+        if normalized_benchmark_name == "locomo" and _locomo_binding_is_memmachine_shared_conversation(memory_binding):
+            return SharedConversationLoCoMoMemoryAdapter(
+                binding_factory=binding_factory,
+                name=_binding_adapter_name(memory_binding),
+            )
         return create_dual_speaker_locomo_memory_adapter(
             binding_factory,
             name=_binding_adapter_name(memory_binding),
@@ -458,6 +464,19 @@ def _load_memory_binding_factory(spec: str | None, *, kwargs: dict[str, Any]):
     return lambda: target(**kwargs)
 
 
+def _locomo_binding_is_memmachine_shared_conversation(memory_binding: str | None) -> bool:
+    """True when ``binding`` targets the classic MemMachine factory (LoCoMo shared-session path)."""
+
+    spec = str(memory_binding or "").strip()
+    if not spec:
+        return False
+    module_name, separator, attr_name = spec.partition(":")
+    if not separator:
+        module_name, _, attr_name = spec.rpartition(".")
+    module_tail = module_name.strip().rsplit(".", 1)[-1].strip().casefold()
+    return module_tail == "memmachine_memory" and attr_name.strip() == "create_memory_binding"
+
+
 def _binding_adapter_name(spec: str | None) -> str:
     if not spec:
         return "binding"
@@ -465,12 +484,24 @@ def _binding_adapter_name(spec: str | None) -> str:
     return tail or "binding"
 
 
-def _create_cli_answer_runner(*, benchmark_name: str, memory_adapter_name: str):
+def _create_cli_answer_runner(
+    *,
+    benchmark_name: str,
+    memory_adapter_name: str,
+    memory_binding: str | None = None,
+    llm_max_input_tokens: int | None = None,
+):
     if benchmark_name == "locomo" and memory_adapter_name in {"amem", "memmachine"}:
-        return MemMachineLoCoMoAnswerRunner()
+        return MemMachineLoCoMoAnswerRunner(max_input_tokens=llm_max_input_tokens)
+    if (
+        benchmark_name == "locomo"
+        and memory_adapter_name == "binding"
+        and _locomo_binding_is_memmachine_shared_conversation(memory_binding)
+    ):
+        return MemMachineLoCoMoAnswerRunner(max_input_tokens=llm_max_input_tokens)
     if benchmark_name == "locomo" and memory_adapter_name in {"binding", "mem0"}:
-        return Mem0LoCoMoAnswerRunner()
-    return SingleRecallLLMAnswerRunner()
+        return Mem0LoCoMoAnswerRunner(max_input_tokens=llm_max_input_tokens)
+    return SingleRecallLLMAnswerRunner(max_input_tokens=llm_max_input_tokens)
 
 
 def _compat_benchmark_adapter(
@@ -782,6 +813,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="{}",
         help="JSON object passed to the binding factory when --memory-adapter binding.",
     )
+    parser.add_argument(
+        "--llm-max-input-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Only with --benchmark locomo: cap the answer LLM request size (system + user) to N tokens "
+            "before the API call, using tiktoken for MEMPRIMITIVE_MODEL when installed (~chars/4 fallback)."
+        ),
+    )
     parser.add_argument("--no-progress", action="store_true", help="Disable the tqdm benchmark progress bar.")
     parser.add_argument(
         "--output",
@@ -799,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
     benchmark_name = str(args.benchmark).strip().casefold()
+    if args.llm_max_input_tokens is not None and benchmark_name != "locomo":
+        parser.error("--llm-max-input-tokens is only supported when --benchmark locomo")
     memory_adapter_name = str(args.memory_adapter).strip().casefold()
     output_path = args.output
     if output_path is None:
@@ -837,6 +880,8 @@ def main(argv: list[str] | None = None) -> int:
     answer_runner = _create_cli_answer_runner(
         benchmark_name=benchmark_name,
         memory_adapter_name=memory_adapter_name,
+        memory_binding=args.memory_binding,
+        llm_max_input_tokens=args.llm_max_input_tokens,
     )
     result = run_benchmark(
         benchmark_adapter,
