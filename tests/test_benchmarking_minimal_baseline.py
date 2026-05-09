@@ -4,6 +4,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
+from memprimitive.benchmarking import _runner as benchmarking_runner
 from memprimitive.benchmarking import minimal_baseline as minimal_baseline_module
 from memprimitive.benchmarking.minimal_baseline import (
     BenchmarkSample,
@@ -27,29 +30,46 @@ from memprimitive.benchmarking._memory_adapters import (
     SharedConversationLoCoMoMemoryAdapter,
 )
 from memprimitive.benchmarking.prompts import ANSWER_PROMPT, ANSWER_PROMPT_GRAPH, ANSWER_PROMPT_ZEP
-from memprimitive.benchmarking.evals import evaluate_file
+from memprimitive.benchmarking.evals import _mp_eval_shard, evaluate_file, process_item
 from memprimitive.benchmarking.generate_scores import summarize_scores
 from memprimitive.core import MemoryStore, Packet, StoreLayerSpec, StoreTopology
 from memprimitive.utils._llm_function_tools import WriteToolCallContext
 from memprimitive.utils._mem0_family import build_fixed_profile_tools
+from memprimitive.utils import _runtime as _runtime_mod
 from memprimitive.utils._runtime import Runtime
 
 
 class FakeRuntime(Runtime):
     def __init__(self) -> None:
+        super().__init__(
+            api_key="test-key",
+            base_url="http://localhost/v1",
+            model="gpt-4o-mini",
+            embedding_provider="sentence_transformers",
+        )
         self.calls: list[dict[str, object]] = []
 
-    def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
-        self.calls.append({"system": system, "user": user, "temperature": temperature})
+    def text(self, *, system: str, user: str, temperature: float = 0.0, max_input_tokens: int | None = None) -> str:
+        self.calls.append(
+            {"system": system, "user": user, "temperature": temperature, "max_input_tokens": max_input_tokens}
+        )
         return f"ANSWER::{user.split('Retrieved memory:\\n', 1)[-1].strip()}"
 
 
 class CapturingRuntime(Runtime):
     def __init__(self) -> None:
+        super().__init__(
+            api_key="test-key",
+            base_url="http://localhost/v1",
+            model="gpt-4o-mini",
+            embedding_provider="sentence_transformers",
+        )
         self.calls: list[dict[str, object]] = []
 
-    def text(self, *, system: str, user: str, temperature: float = 0.0) -> str:
-        self.calls.append({"system": system, "user": user, "temperature": temperature})
+    def text(self, *, system: str, user: str, temperature: float = 0.0, max_input_tokens: int | None = None) -> str:
+        self.calls.append(
+            {"system": system, "user": user, "temperature": temperature, "max_input_tokens": max_input_tokens}
+        )
         return "captured-answer"
 
 
@@ -259,6 +279,43 @@ def test_mem0_locomo_answer_runner_renders_prompt_and_uses_timestamped_memory() 
     assert "You answer only from the provided retrieved memory" not in user_prompt
 
 
+def test_mem0_locomo_answer_runner_forwards_max_input_tokens_to_runtime() -> None:
+    runtime = CapturingRuntime()
+    runner = Mem0LoCoMoAnswerRunner(runtime=runtime, max_input_tokens=777)
+    sample = BenchmarkSample(
+        sample_id="locomo-cap",
+        benchmark_name="locomo",
+        history_observations=[],
+        query=__import__("memprimitive").Query(text="Q?"),
+        reference_answer="unused",
+        metadata={"speaker_a": "Alice", "speaker_b": "Bob"},
+    )
+    runner.answer(
+        sample=sample,
+        memory_recall=MemoryRecall(text="mem", metadata={"speaker_1_memories": "a", "speaker_2_memories": "b"}),
+    )
+    assert runtime.calls[0]["max_input_tokens"] is None
+
+
+def test_locomo_user_cap_preserves_final_question_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_runtime_mod, "tiktoken", None)
+    runtime = Runtime(model="x")
+    q = "What is the capital of France?"
+    suffix = f"\n\n    Question: {q}\n\n    Answer:\n"
+    long_mem = "memory line\n" * 200
+    user = long_mem + suffix
+    capped = benchmarking_runner._locomo_cap_user_preserving_question(runtime, user, 120)
+    assert q in capped
+    assert runtime.count_tokens(capped) <= 120
+
+
+def test_cli_llm_max_input_tokens_rejected_without_locomo_benchmark() -> None:
+    with pytest.raises(SystemExit):
+        minimal_baseline_module.main(
+            ["--benchmark", "dmr", "--memory-adapter", "minimal", "--llm-max-input-tokens", "1024"]
+        )
+
+
 def test_cli_answer_runner_switches_to_mem0_locomo_for_locomo_mem0() -> None:
     runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="mem0")
     assert isinstance(runner, Mem0LoCoMoAnswerRunner)
@@ -271,6 +328,13 @@ def test_cli_answer_runner_switches_to_mem0_locomo_for_locomo_mem0() -> None:
 
     binding_runner = _create_cli_answer_runner(benchmark_name="locomo", memory_adapter_name="binding")
     assert isinstance(binding_runner, Mem0LoCoMoAnswerRunner)
+
+    binding_memmachine = _create_cli_answer_runner(
+        benchmark_name="locomo",
+        memory_adapter_name="binding",
+        memory_binding="memprimitive.example.classics.memmachine_memory:create_memory_binding",
+    )
+    assert isinstance(binding_memmachine, MemMachineLoCoMoAnswerRunner)
 
     other_runner = _create_cli_answer_runner(benchmark_name="longmemeval", memory_adapter_name="mem0")
     assert isinstance(other_runner, SingleRecallLLMAnswerRunner)
@@ -290,6 +354,21 @@ def test_cli_memory_adapter_can_load_binding_factory() -> None:
     session = adapter.create_session()
     assert session.speaker_1_binding.recall_top_k == 2
     assert session.speaker_2_binding.recall_top_k == 2
+
+
+def test_cli_memory_adapter_binding_memmachine_locomo_uses_shared_conversation_path() -> None:
+    adapter = _create_cli_memory_adapter(
+        "binding",
+        benchmark_name="locomo",
+        top_k=None,
+        memory_binding="memprimitive.example.classics.memmachine_memory:create_memory_binding",
+        memory_binding_kwargs={"limit": 22, "expand_context": 4},
+    )
+
+    assert isinstance(adapter, SharedConversationLoCoMoMemoryAdapter)
+    session = adapter.create_session()
+    assert session.binding.limit == 22
+    assert session.binding.expand_context == 4
 
 
 def test_cli_memory_adapter_uses_generic_binding_for_longmemeval() -> None:
@@ -493,6 +572,14 @@ def test_mem0_style_eval_reads_benchmark_jsonl(tmp_path: Path) -> None:
     assert results["conv-1"][0]["f1_score"] > 0
     assert summary["overall"]["count"] == 1
     assert summary["by_category"]["1"]["count"] == 1
+
+
+def test_mp_eval_shard_matches_process_item() -> None:
+    item_data = (
+        "conv-1",
+        [{"question": "q", "answer": "x", "response": "x", "category": "1"}],
+    )
+    assert _mp_eval_shard((item_data, False)) == process_item(item_data, use_llm_judge=False)
 
 
 def test_mem0_style_eval_reads_legacy_and_prediction_jsonl(tmp_path: Path) -> None:
