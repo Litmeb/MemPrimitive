@@ -10,6 +10,7 @@ from ..config import load_pipeline_from_yaml
 from ..core import Observation, Query, Readout
 from ..pipeline import FreeMemoryPipeline, MemoryPipeline
 from ..example.classics import amem_memory, mem0_memory, memmachine_memory
+from ._benchmark_tool_errors import ModelBehaviorError, append_benchmark_tool_error
 from ._types import (
     BenchmarkSample,
     ConversationTurn,
@@ -19,6 +20,57 @@ from ._types import (
     RecallContext,
     default_turn_to_observation,
 )
+
+
+def _log_benchmark_ingest_model_behavior_error(
+    sample: BenchmarkSample,
+    *,
+    phase: str,
+    exc: ModelBehaviorError,
+    turn_id: str | None = None,
+    speaker_binding: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Append to the benchmark tool ledger and return a copy for embedding in session metadata."""
+
+    row = {
+        "phase": phase,
+        "sample_id": str(sample.sample_id),
+        "benchmark": str(sample.benchmark_name),
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+        **({} if turn_id is None or not str(turn_id).strip() else {"turn_id": str(turn_id).strip()}),
+        **(
+            {}
+            if speaker_binding is None or not str(speaker_binding).strip()
+            else {"speaker_binding": str(speaker_binding).strip()}
+        ),
+        **extra,
+    }
+    append_benchmark_tool_error(dict(row))
+    return row
+
+
+def _safe_binding_ingest_event(
+    binding: Any,
+    system: Any,
+    event: MemoryIngestEvent,
+    sample: BenchmarkSample,
+    *,
+    phase: str,
+    speaker_binding: str | None = None,
+) -> dict[str, Any] | None:
+    try:
+        binding.ingest_event(system, event)
+        return None
+    except ModelBehaviorError as exc:
+        return _log_benchmark_ingest_model_behavior_error(
+            sample,
+            phase=phase,
+            exc=exc,
+            turn_id=str(event.turn_id).strip() if str(event.turn_id).strip() else None,
+            speaker_binding=speaker_binding,
+        )
 
 
 def _call_with_supported_kwargs(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -91,9 +143,24 @@ class _PipelineMemorySession:
 
     def load_case(self, sample: BenchmarkSample) -> None:
         observations, metadata = _sample_observations(sample, turn_to_observation=self.turn_to_observation)
+        skipped: list[dict[str, Any]] = []
         for observation in observations:
-            self.pipeline.ingest(observation)
-        self.load_metadata = metadata
+            try:
+                self.pipeline.ingest(observation)
+            except ModelBehaviorError as exc:
+                turn_id = str(observation.metadata.get("turn_id", "")).strip() or None
+                skipped.append(
+                    _log_benchmark_ingest_model_behavior_error(
+                        sample,
+                        phase="ingest_pipeline",
+                        exc=exc,
+                        turn_id=turn_id,
+                    )
+                )
+        merged_meta = dict(metadata)
+        if skipped:
+            merged_meta["benchmark_skipped_ingests"] = skipped
+        self.load_metadata = merged_meta
 
     def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
         del sample
@@ -241,21 +308,35 @@ class PairwiseDialogueMemoryAdapter(FunctionMemoryAdapter):
         if not sample.history_turns:
             raise ValueError("PairwiseDialogueMemoryAdapter requires sample.history_turns.")
         pair_count = 0
+        skipped_pairs: list[dict[str, Any]] = []
         for first_turn, second_turn in _iter_pairwise_turns(sample.history_turns):
             pair_count += 1
-            _call_with_supported_kwargs(
-                self.ingest_pair,
-                system,
-                user_text=str(first_turn.text).strip(),
-                assistant_text=str(second_turn.text).strip() if second_turn is not None else "",
-                session_id=str(first_turn.session_id).strip(),
-                turn_id=str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip(),
-                timestamp=str(first_turn.session_timestamp).strip(),
-            )
-        return {
+            try:
+                _call_with_supported_kwargs(
+                    self.ingest_pair,
+                    system,
+                    user_text=str(first_turn.text).strip(),
+                    assistant_text=str(second_turn.text).strip() if second_turn is not None else "",
+                    session_id=str(first_turn.session_id).strip(),
+                    turn_id=str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip(),
+                    timestamp=str(first_turn.session_timestamp).strip(),
+                )
+            except ModelBehaviorError as exc:
+                skipped_pairs.append(
+                    _log_benchmark_ingest_model_behavior_error(
+                        sample,
+                        phase="ingest_pairwise",
+                        exc=exc,
+                        turn_id=str(second_turn.turn_id).strip() if second_turn is not None else str(first_turn.turn_id).strip(),
+                    )
+                )
+        meta = {
             "loaded_pair_count": pair_count,
             "load_source": "history_turn_pairs",
         }
+        if skipped_pairs:
+            meta["benchmark_skipped_ingests"] = skipped_pairs
+        return meta
 
 
 def _locomo_turn_text(turn: ConversationTurn | None) -> str:
@@ -395,6 +476,7 @@ class _DualSpeakerLoCoMoMemorySession:
             )
 
         executor = ThreadPoolExecutor(max_workers=min(2, self.speaker_workers)) if self.speaker_workers > 1 else None
+        skipped_ingests: list[dict[str, Any]] = []
         try:
             for first_turn, second_turn in _iter_pairwise_turns(sample.history_turns):
                 pair_count += 1
@@ -429,15 +511,35 @@ class _DualSpeakerLoCoMoMemorySession:
                 if executor is None or len(ingest_calls) <= 1:
                     for binding, system, event in ingest_calls:
                         assert event is not None
-                        binding.ingest_event(system, event)
+                        label = "speaker_1" if binding is self.speaker_1_binding else "speaker_2"
+                        row = _safe_binding_ingest_event(
+                            binding,
+                            system,
+                            event,
+                            sample,
+                            phase="ingest_dual_speaker",
+                            speaker_binding=label,
+                        )
+                        if row is not None:
+                            skipped_ingests.append(row)
                 else:
                     futures = [
-                        executor.submit(binding.ingest_event, system, event)
+                        executor.submit(
+                            _safe_binding_ingest_event,
+                            binding,
+                            system,
+                            event,
+                            sample,
+                            phase="ingest_dual_speaker",
+                            speaker_binding=("speaker_1" if binding is self.speaker_1_binding else "speaker_2"),
+                        )
                         for binding, system, event in ingest_calls
                         if event is not None
                     ]
                     for future in futures:
-                        future.result()
+                        row = future.result()
+                        if row is not None:
+                            skipped_ingests.append(row)
 
                 loaded_turns += turns_in_pair
                 if progress_callback is not None:
@@ -463,12 +565,15 @@ class _DualSpeakerLoCoMoMemorySession:
                 loaded_turns=loaded_turns,
             )
 
-        self.load_metadata = {
+        meta = {
             "loaded_pair_count": pair_count,
             "loaded_turn_count": loaded_turns,
             "load_source": "history_turn_pairs",
             "speaker_workers": self.speaker_workers,
         }
+        if skipped_ingests:
+            meta["benchmark_skipped_ingests"] = skipped_ingests
+        self.load_metadata = meta
 
     def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
         context_1 = _locomo_recall_context(sample, speaker_key="speaker_a", fallback_name="speaker_1", speaker_index=1)
@@ -622,8 +727,18 @@ class _SharedConversationLoCoMoMemorySession:
                 total_turns=total_turns,
             )
 
+        skipped_ingests: list[dict[str, Any]] = []
         for turn in sample.history_turns:
-            self.binding.ingest_event(self.system, _locomo_message_event(sample, turn))
+            event = _locomo_message_event(sample, turn)
+            row = _safe_binding_ingest_event(
+                self.binding,
+                self.system,
+                event,
+                sample,
+                phase="ingest_shared_conversation",
+            )
+            if row is not None:
+                skipped_ingests.append(row)
             loaded_turns += 1
             if progress_callback is not None:
                 _call_with_supported_kwargs(
@@ -650,6 +765,7 @@ class _SharedConversationLoCoMoMemorySession:
             "loaded_message_count": loaded_turns,
             "load_source": "history_turn_messages",
             "conversation_user_id": _locomo_conversation_user_id(sample),
+            **({"benchmark_skipped_ingests": skipped_ingests} if skipped_ingests else {}),
         }
 
     def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:
@@ -755,8 +871,18 @@ class _GenericMemoryBindingSession:
                 total_turns=total_turns,
             )
 
+        skipped_ingests: list[dict[str, Any]] = []
         for turn in sample.history_turns:
-            self.binding.ingest_event(self.system, _generic_message_event(sample, turn))
+            event = _generic_message_event(sample, turn)
+            row = _safe_binding_ingest_event(
+                self.binding,
+                self.system,
+                event,
+                sample,
+                phase="ingest_generic_binding",
+            )
+            if row is not None:
+                skipped_ingests.append(row)
             loaded_turns += 1
             if progress_callback is not None:
                 _call_with_supported_kwargs(
@@ -783,6 +909,7 @@ class _GenericMemoryBindingSession:
             "loaded_message_count": loaded_turns,
             "load_source": "history_turn_messages",
             "conversation_user_id": _generic_conversation_user_id(sample),
+            **({"benchmark_skipped_ingests": skipped_ingests} if skipped_ingests else {}),
         }
 
     def recall(self, query: Query, *, sample: BenchmarkSample | None = None) -> MemoryRecall:

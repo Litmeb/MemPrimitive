@@ -11,6 +11,12 @@ from typing import Any, Callable, Iterable
 from memprimitive.utils._runtime import Runtime
 from memprimitive.utils._template import render_prompt_template
 
+from ._benchmark_tool_errors import (
+    BenchmarkToolErrorLog,
+    ModelBehaviorError,
+    append_benchmark_tool_error,
+    push_benchmark_tool_error_log,
+)
 from ._types import (
     AnswerRunner,
     BenchmarkPrediction,
@@ -273,6 +279,21 @@ def write_predictions_jsonl(predictions: Iterable[BenchmarkPrediction], output_p
     return count
 
 
+def write_benchmark_tool_errors_jsonl(events: list[dict[str, Any]], output_path: Path) -> tuple[Path | None, int]:
+    """Write per-row tool mishandling ledger next to predictions. Returns (path or None, rows written)."""
+
+    if not events:
+        return None, 0
+    log_path = output_path.with_name(output_path.stem + "_tool_errors.jsonl")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with log_path.open("w", encoding="utf-8") as handle:
+        for row in events:
+            handle.write(json.dumps(dict(row), ensure_ascii=False) + "\n")
+            written += 1
+    return log_path, written
+
+
 def _truncate_sample_history(sample: BenchmarkSample, *, max_history_turns: int | None) -> BenchmarkSample:
     if max_history_turns is None:
         return sample
@@ -351,8 +372,42 @@ def _build_prediction(
     sample: BenchmarkSample,
     session: Any,
 ) -> BenchmarkPrediction:
-    memory_recall = session.recall(sample.query, sample=sample)
-    predicted_answer = _answer_with_runner(runner, sample=sample, memory_recall=memory_recall)
+    adapter_name = str(getattr(memory_adapter, "name", "")).strip() or "memory"
+    try:
+        memory_recall = session.recall(sample.query, sample=sample)
+    except ModelBehaviorError as exc:
+        append_benchmark_tool_error(
+            {
+                "phase": "recall",
+                "memory_adapter": adapter_name,
+                "sample_id": sample.sample_id,
+                "benchmark": sample.benchmark_name,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        )
+        memory_recall = MemoryRecall(
+            text="",
+            source_ids=[],
+            metadata={
+                "benchmark_skipped_tool_error": True,
+                "benchmark_skip_reason": str(exc),
+            },
+        )
+    try:
+        predicted_answer = _answer_with_runner(runner, sample=sample, memory_recall=memory_recall)
+    except ModelBehaviorError as exc:
+        append_benchmark_tool_error(
+            {
+                "phase": "answer",
+                "memory_adapter": adapter_name,
+                "sample_id": sample.sample_id,
+                "benchmark": sample.benchmark_name,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        )
+        predicted_answer = ""
     return BenchmarkPrediction(
         sample_id=sample.sample_id,
         benchmark_name=sample.benchmark_name,
@@ -499,45 +554,29 @@ def run_benchmark(
 
     if max_workers <= 0:
         raise ValueError("max_workers must be positive.")
-    runner = answer_runner if answer_runner is not None else SingleRecallLLMAnswerRunner()
-    predictions: list[BenchmarkPrediction] = []
-    samples = [
-        _truncate_sample_history(sample, max_history_turns=max_history_turns)
-        for sample in benchmark_adapter.iter_samples(limit=limit)
-    ]
-    total = len(samples)
-    if progress_callback is not None:
-        _call_with_supported_kwargs(
-            progress_callback,
-            phase="init",
-            total=total,
-            samples=samples,
-            memory_turn_total=_memory_progress_turn_total(memory_adapter, samples),
-        )
-    sample_groups = _group_samples_by_memory_session(memory_adapter, samples)
-    if max_workers == 1:
-        predictions_by_index: dict[int, BenchmarkPrediction] = {}
-        for group_index, (session_key, indexed_samples) in enumerate(sample_groups, start=1):
-            for index, prediction in _run_benchmark_sample_group(
-                benchmark_adapter=benchmark_adapter,
-                runner=runner,
-                memory_adapter=memory_adapter,
-                session_key=session_key,
-                indexed_samples=indexed_samples,
-                group_index=group_index,
-                group_total=len(sample_groups),
-                sample_total=total,
-                progress_callback=progress_callback,
-            ):
-                predictions_by_index[index] = prediction
-        predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
-    else:
-        predictions_by_index: dict[int, BenchmarkPrediction] = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
+    tool_error_log = BenchmarkToolErrorLog()
+    prior_tool_error_log = push_benchmark_tool_error_log(tool_error_log)
+    try:
+        runner = answer_runner if answer_runner is not None else SingleRecallLLMAnswerRunner()
+        predictions: list[BenchmarkPrediction] = []
+        samples = [
+            _truncate_sample_history(sample, max_history_turns=max_history_turns)
+            for sample in benchmark_adapter.iter_samples(limit=limit)
+        ]
+        total = len(samples)
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="init",
+                total=total,
+                samples=samples,
+                memory_turn_total=_memory_progress_turn_total(memory_adapter, samples),
+            )
+        sample_groups = _group_samples_by_memory_session(memory_adapter, samples)
+        if max_workers == 1:
+            predictions_by_index: dict[int, BenchmarkPrediction] = {}
             for group_index, (session_key, indexed_samples) in enumerate(sample_groups, start=1):
-                future = executor.submit(
-                    _run_benchmark_sample_group,
+                for index, prediction in _run_benchmark_sample_group(
                     benchmark_adapter=benchmark_adapter,
                     runner=runner,
                     memory_adapter=memory_adapter,
@@ -547,32 +586,54 @@ def run_benchmark(
                     group_total=len(sample_groups),
                     sample_total=total,
                     progress_callback=progress_callback,
-                )
-                futures.append(future)
-
-            for future in as_completed(futures):
-                for index, prediction in future.result():
+                ):
                     predictions_by_index[index] = prediction
-        predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
+            predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
+        else:
+            predictions_by_index: dict[int, BenchmarkPrediction] = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for group_index, (session_key, indexed_samples) in enumerate(sample_groups, start=1):
+                    future = executor.submit(
+                        _run_benchmark_sample_group,
+                        benchmark_adapter=benchmark_adapter,
+                        runner=runner,
+                        memory_adapter=memory_adapter,
+                        session_key=session_key,
+                        indexed_samples=indexed_samples,
+                        group_index=group_index,
+                        group_total=len(sample_groups),
+                        sample_total=total,
+                        progress_callback=progress_callback,
+                    )
+                    futures.append(future)
 
-    aggregate_scores: dict[str, Any] = {}
-    aggregate_fn = getattr(benchmark_adapter, "aggregate_scores", None)
-    if callable(aggregate_fn):
-        aggregate_value = _call_with_supported_kwargs(aggregate_fn, predictions=predictions)
-        if isinstance(aggregate_value, dict):
-            aggregate_scores = dict(aggregate_value)
+                for future in as_completed(futures):
+                    for index, prediction in future.result():
+                        predictions_by_index[index] = prediction
+            predictions = [predictions_by_index[index] for index in sorted(predictions_by_index)]
 
-    if progress_callback is not None:
-        _call_with_supported_kwargs(
-            progress_callback,
-            phase="finish",
-            total=total,
+        aggregate_scores: dict[str, Any] = {}
+        aggregate_fn = getattr(benchmark_adapter, "aggregate_scores", None)
+        if callable(aggregate_fn):
+            aggregate_value = _call_with_supported_kwargs(aggregate_fn, predictions=predictions)
+            if isinstance(aggregate_value, dict):
+                aggregate_scores = dict(aggregate_value)
+
+        if progress_callback is not None:
+            _call_with_supported_kwargs(
+                progress_callback,
+                phase="finish",
+                total=total,
+                predictions=predictions,
+            )
+
+        return BenchmarkRunResult(
+            benchmark_name=str(getattr(benchmark_adapter, "name", "")),
+            memory_adapter_name=str(getattr(memory_adapter, "name", "")),
             predictions=predictions,
+            aggregate_scores=aggregate_scores,
+            tool_error_events=tool_error_log.snapshot(),
         )
-
-    return BenchmarkRunResult(
-        benchmark_name=str(getattr(benchmark_adapter, "name", "")),
-        memory_adapter_name=str(getattr(memory_adapter, "name", "")),
-        predictions=predictions,
-        aggregate_scores=aggregate_scores,
-    )
+    finally:
+        push_benchmark_tool_error_log(prior_tool_error_log)

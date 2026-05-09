@@ -45,6 +45,7 @@ from ._runner import (
     Mem0LoCoMoAnswerRunner,
     SingleRecallLLMAnswerRunner,
     run_benchmark,
+    write_benchmark_tool_errors_jsonl,
     write_predictions_jsonl,
 )
 from ._types import AnswerRunner, BenchmarkPrediction, BenchmarkSample
@@ -897,6 +898,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{index}] ran {prediction.benchmark_name}:{prediction.sample_id}")
     written = _write_predictions_jsonl(predictions, output_path)
     print(f"wrote {written} predictions to {output_path}")
+    log_path, logged_tool_rows = write_benchmark_tool_errors_jsonl(result.tool_error_events, output_path)
+    if log_path is not None:
+        print(f"wrote {logged_tool_rows} tool error rows to {log_path}")
     return 0
 
 

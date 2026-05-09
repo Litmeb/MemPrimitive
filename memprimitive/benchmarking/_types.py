@@ -120,6 +120,7 @@ class BenchmarkRunResult:
     memory_adapter_name: str
     predictions: list[BenchmarkPrediction]
     aggregate_scores: dict[str, Any] = field(default_factory=dict)
+    tool_error_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 @runtime_checkable
