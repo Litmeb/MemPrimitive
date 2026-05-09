@@ -272,6 +272,17 @@ def test_deepseek_shim_builds_chat_payload_from_responses_shape() -> None:
     assert chat["tools"][0]["function"]["name"] == "exec_command"
 
 
+def test_deepseek_shim_accepts_string_input() -> None:
+    chat = _deepseek_shim._build_chat_payload(
+        {
+            "model": "deepseek-v4-pro",
+            "input": "hello from string input",
+        }
+    )
+
+    assert chat["messages"] == [{"role": "user", "content": "hello from string input"}]
+
+
 def test_deepseek_shim_maps_chat_tool_call_to_responses_output() -> None:
     response = _deepseek_shim._chat_to_response(
         {
@@ -297,6 +308,26 @@ def test_deepseek_shim_maps_chat_tool_call_to_responses_output() -> None:
     assert response["output"][0]["call_id"] == "call_1"
     assert response["output"][0]["name"] == "exec_command"
     assert response["usage"]["total_tokens"] == 7
+
+
+def test_deepseek_shim_lists_models() -> None:
+    handler = _deepseek_shim.ShimHandler.__new__(_deepseek_shim.ShimHandler)
+    sent: dict[str, object] = {}
+
+    def _capture(status: int, payload: dict[str, object]) -> None:
+        sent["status"] = status
+        sent["payload"] = payload
+
+    handler.path = "/v1/models?client_version=0.130.0"
+    handler._send_json = _capture  # type: ignore[method-assign]
+
+    _deepseek_shim.ShimHandler.do_GET(handler)
+
+    assert sent["status"] == 200
+    payload = sent["payload"]
+    assert isinstance(payload, dict)
+    assert payload["object"] == "list"
+    assert [item["id"] for item in payload["data"]] == ["deepseek-v4-pro", "deepseek-v4-flash"]
 
 
 def test_deepseek_shim_groups_parallel_responses_tool_calls_for_chat() -> None:

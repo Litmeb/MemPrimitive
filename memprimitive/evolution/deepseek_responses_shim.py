@@ -16,6 +16,21 @@ from typing import Any
 TEXT_PART_TYPES = {"input_text", "output_text", "text"}
 
 
+def _normalize_responses_input_items(payload: dict[str, Any]) -> list[Any]:
+    raw_input = payload.get("input")
+    if isinstance(raw_input, str):
+        return [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": raw_input}],
+            }
+        ]
+    if isinstance(raw_input, list):
+        return raw_input
+    return list(raw_input or [])
+
+
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -48,7 +63,7 @@ def _responses_input_to_chat_messages(payload: dict[str, Any]) -> list[dict[str,
     if instructions:
         messages.append({"role": "system", "content": instructions})
 
-    input_items = list(payload.get("input") or [])
+    input_items = _normalize_responses_input_items(payload)
     index = 0
     while index < len(input_items):
         item = input_items[index]
@@ -285,7 +300,28 @@ class ShimHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path.rstrip("/") in {"", "/v1", "/health"}:
+        request_path = self.path.split("?", 1)[0].rstrip("/")
+        if request_path.endswith("/models"):
+            self._send_json(
+                200,
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "deepseek-v4-pro",
+                            "object": "model",
+                            "owned_by": "deepseek",
+                        },
+                        {
+                            "id": "deepseek-v4-flash",
+                            "object": "model",
+                            "owned_by": "deepseek",
+                        },
+                    ],
+                },
+            )
+            return
+        if request_path in {"", "/v1", "/health"}:
             self._send_json(200, {"status": "ok"})
             return
         self._send_json(404, {"error": {"message": "not found"}})
