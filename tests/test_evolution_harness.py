@@ -653,6 +653,24 @@ def test_benchmark_command_uses_control_repo_benchmark_root(tmp_path: Path) -> N
     assert f"--benchmark-root {json.dumps(str((repo_root / 'benchmarks').resolve()))}" in command
 
 
+def test_benchmark_command_includes_search_default_memmachine_benchmark_settings(tmp_path: Path) -> None:
+    config = EvolutionRunConfig(goal="test", rounds=1, candidates_per_round=1, target_binding="a:b")
+    candidate = CandidateSpec(
+        id="candidate",
+        hypothesis="test",
+        allowed_files=["memprimitive/target.py"],
+        implementation_prompt="test",
+    )
+
+    command = benchmark_command(config, candidate, tmp_path / "predictions.jsonl")
+
+    assert "--top-k 10" in command
+    assert "--memmachine-stm-record-budget 20" in command
+    assert "--memmachine-profile-max-turns 24" in command
+    assert "--max-workers 10" in command
+    assert "--llm-max-input-tokens 7000" in command
+
+
 def test_control_worktree_dirty_guard_requires_explicit_opt_in(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     (repo / "memprimitive" / "target.py").write_text("VALUE = 99\n", encoding="utf-8")

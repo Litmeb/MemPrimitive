@@ -77,8 +77,12 @@ class EvolutionRunConfig:
     max_parallel_candidates: int = 1
     promote_top_k: int = 0
     benchmark_limit: int | None = None
+    benchmark_top_k: int | None = 10
+    memmachine_stm_record_budget: int | None = 20
+    memmachine_profile_max_turns: int | None = 24
+    benchmark_max_workers: int | None = 10
     max_history_turns: int | None = None
-    llm_max_input_tokens: int | None = None
+    llm_max_input_tokens: int | None = 7000
     codex_bin: str = "codex"
     codex_model: str | None = None
     codex_profile: str | None = "deepseek"
