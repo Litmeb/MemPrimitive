@@ -119,6 +119,66 @@ def create_candidate_worktree(
     return worktree_path
 
 
+def merge_resume_base_ref_into_worktree(
+    *,
+    repo_root: Path,
+    worktree_path: Path,
+    artifact_dir: Path,
+    base_ref: str,
+    runner: CommandRunner,
+) -> tuple[bool, list[CommandRecord]]:
+    """Merge ``base_ref`` (resolved from the control repo) into a candidate worktree.
+
+    Used when resuming benchmarks so updated harness code on ``base_ref`` is combined with
+    the candidate branch; fails if Git reports merge conflicts.
+    """
+
+    resolve = runner.run(["git", "rev-parse", "--verify", base_ref], cwd=repo_root)
+    records: list[CommandRecord] = [
+        write_process_log(resolve, artifact_dir=artifact_dir, name="resume-merge-rev-parse")
+    ]
+    if resolve.returncode != 0:
+        return False, records
+    sha = resolve.stdout.strip()
+    merge = runner.run(["git", "merge", "--no-edit", sha], cwd=worktree_path)
+    records.append(write_process_log(merge, artifact_dir=artifact_dir, name="resume-merge-base-ref"))
+    if merge.returncode != 0:
+        return False, records
+    return True, records
+
+
+def rerun_benchmark_after_optional_resume_merge(
+    *,
+    repo_root: Path,
+    worktree_path: Path,
+    artifact_dir: Path,
+    config: EvolutionRunConfig,
+    candidate: CandidateSpec,
+    runner: CommandRunner,
+) -> tuple[bool, dict[str, Any], list[CommandRecord]]:
+    prepend: list[CommandRecord] = []
+    if config.resume_merge_base_ref:
+        merge_ok, merge_records = merge_resume_base_ref_into_worktree(
+            repo_root=repo_root,
+            worktree_path=worktree_path,
+            artifact_dir=artifact_dir,
+            base_ref=config.base_ref,
+            runner=runner,
+        )
+        prepend.extend(merge_records)
+        if not merge_ok:
+            return False, {"resume_merge_failed": True}, prepend
+    bench_ok, diagnostics, bench_commands = run_benchmark_and_local_scoring(
+        repo_root=repo_root,
+        worktree_path=worktree_path,
+        artifact_dir=artifact_dir,
+        config=config,
+        candidate=candidate,
+        runner=runner,
+    )
+    return bench_ok, diagnostics, prepend + bench_commands
+
+
 def write_worktree_excludes(worktree_path: Path, runner: CommandRunner) -> None:
     result = runner.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=worktree_path)
     if result.returncode != 0:
@@ -901,7 +961,7 @@ def resume_evolution_benchmark_only(
             with ThreadPoolExecutor(max_workers=config.max_parallel_candidates) as executor:
                 future_map = {
                     executor.submit(
-                        run_benchmark_and_local_scoring,
+                        rerun_benchmark_after_optional_resume_merge,
                         repo_root=repo_root,
                         worktree_path=worktree_path,
                         artifact_dir=artifact_dir,

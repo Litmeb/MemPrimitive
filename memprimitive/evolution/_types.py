@@ -96,6 +96,7 @@ class EvolutionRunConfig:
     run_id: str = ""
     context_char_limit: int = 60000
     dry_run: bool = False
+    resume_merge_base_ref: bool = False
 
     def __post_init__(self) -> None:
         self.goal = str(self.goal).strip()

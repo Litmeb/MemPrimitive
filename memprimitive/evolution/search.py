@@ -70,6 +70,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reuse an existing run_id's candidate worktrees and rerun benchmark/scoring for candidates that previously failed at the benchmark stage.",
     )
+    parser.add_argument(
+        "--resume-merge-base-ref",
+        action="store_true",
+        help="With --resume-benchmark-only: before each benchmark retry, merge --base-ref (resolved in the control repo) into the candidate worktree so harness updates apply.",
+    )
     parser.add_argument("--context-char-limit", type=int, default=60000)
     parser.add_argument("--dry-run", action="store_true", help="Print config and command/context preview without writing files.")
     return parser
@@ -111,6 +116,7 @@ def config_from_args(args: argparse.Namespace) -> EvolutionRunConfig:
         run_id=args.run_id,
         context_char_limit=args.context_char_limit,
         dry_run=args.dry_run,
+        resume_merge_base_ref=args.resume_merge_base_ref,
     )
 
 
@@ -134,6 +140,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     config = config_from_args(args)
+    if config.resume_merge_base_ref and not args.resume_benchmark_only:
+        parser.error("--resume-merge-base-ref requires --resume-benchmark-only")
     repo_root = git_root(Path.cwd())
     if config.dry_run:
         print(json.dumps(dry_run_payload(repo_root, config), ensure_ascii=False, indent=2))

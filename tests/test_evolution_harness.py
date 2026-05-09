@@ -6,8 +6,10 @@ import subprocess
 import sys
 import threading
 import time
-from unittest.mock import Mock
+
+import pytest
 from pathlib import Path
+from unittest.mock import Mock
 
 from memprimitive.evolution import deepseek_responses_shim as _deepseek_shim
 from memprimitive.evolution import _codex
@@ -29,6 +31,7 @@ from memprimitive.evolution._runner import (
     detect_env_file_changes,
     detect_ignored_protected_changes,
     ensure_control_worktree_is_usable,
+    merge_resume_base_ref_into_worktree,
     parse_changed_files,
     python_command,
     resume_evolution_benchmark_only,
@@ -82,13 +85,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, text=True, capture_output=True)
 
 
-def _init_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init")
-    (repo / "memprimitive").mkdir()
-    (repo / "memprimitive" / "target.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _git(repo, "add", ".")
+def _git_commit(repo: Path, message: str) -> None:
     subprocess.run(
         [
             "git",
@@ -98,13 +95,23 @@ def _init_repo(tmp_path: Path) -> Path:
             "user.name=Test User",
             "commit",
             "-m",
-            "init",
+            message,
         ],
         cwd=repo,
         check=True,
         text=True,
         capture_output=True,
     )
+
+
+def _init_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "memprimitive").mkdir()
+    (repo / "memprimitive" / "target.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git_commit(repo, "init")
     return repo
 
 
@@ -857,6 +864,45 @@ def test_search_cli_forwards_resume_benchmark_only(monkeypatch, capsys) -> None:
     assert seen["config"].run_id == "resume-me"
     payload = json.loads(capsys.readouterr().out)
     assert payload["run_id"] == "resume-me"
+
+
+def test_resume_merge_base_ref_requires_resume_benchmark_only() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        search_main(["--goal", "test", "--rounds", "1", "--resume-merge-base-ref"])
+    assert exc_info.value.code != 0
+
+
+def test_merge_resume_base_ref_into_worktree(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    (repo / "memprimitive" / "harness.py").write_text("H = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git_commit(repo, "add harness")
+    root_sha = subprocess.check_output(["git", "rev-list", "--max-parents=0", "HEAD"], cwd=repo, text=True).strip()
+    wt = tmp_path / "cand_wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "evolve/test-cand", str(wt), root_sha],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    (wt / "memprimitive" / "target.py").write_text("VALUE = 99\n", encoding="utf-8")
+    _git(wt, "add", ".")
+    _git_commit(wt, "candidate")
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    runner = CommandRunner()
+    ok, records = merge_resume_base_ref_into_worktree(
+        repo_root=repo,
+        worktree_path=wt,
+        artifact_dir=artifact_dir,
+        base_ref="HEAD",
+        runner=runner,
+    )
+    assert ok
+    assert len(records) == 2
+    assert (wt / "memprimitive" / "harness.py").read_text(encoding="utf-8") == "H = 1\n"
+    assert "99" in (wt / "memprimitive" / "target.py").read_text(encoding="utf-8")
 
 
 def test_resume_evolution_benchmark_only_reruns_only_benchmark_failures(tmp_path: Path) -> None:
