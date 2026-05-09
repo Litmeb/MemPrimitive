@@ -396,6 +396,14 @@ def benchmark_command(
         parts.append("--locomo-users " + " ".join(json.dumps(user) for user in config.locomo_users))
     if config.benchmark_limit is not None:
         parts.append(f"--limit {int(config.benchmark_limit)}")
+    if config.benchmark_top_k is not None:
+        parts.append(f"--top-k {int(config.benchmark_top_k)}")
+    if config.memmachine_stm_record_budget is not None:
+        parts.append(f"--memmachine-stm-record-budget {int(config.memmachine_stm_record_budget)}")
+    if config.memmachine_profile_max_turns is not None:
+        parts.append(f"--memmachine-profile-max-turns {int(config.memmachine_profile_max_turns)}")
+    if config.benchmark_max_workers is not None:
+        parts.append(f"--max-workers {int(config.benchmark_max_workers)}")
     if config.max_history_turns is not None:
         parts.append(f"--max-history-turns {int(config.max_history_turns)}")
     if config.llm_max_input_tokens is not None:

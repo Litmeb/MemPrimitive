@@ -37,11 +37,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--longmemeval-variant", default="s_cleaned")
     parser.add_argument("--benchmark-root", default="benchmarks")
     parser.add_argument("--benchmark-limit", type=int, default=None)
+    parser.add_argument("--benchmark-top-k", type=int, default=10)
+    parser.add_argument("--memmachine-stm-record-budget", type=int, default=20)
+    parser.add_argument("--memmachine-profile-max-turns", type=int, default=24)
+    parser.add_argument("--benchmark-max-workers", type=int, default=10)
     parser.add_argument("--max-history-turns", type=int, default=None)
     parser.add_argument(
         "--llm-max-input-tokens",
         type=int,
-        default=None,
+        default=7000,
         help="Forwarded to memprimitive.benchmarking.minimal_baseline for LoCoMo LLM answer caps.",
     )
     parser.add_argument("--worktree-root", default="../MemPrimitive-evolve-worktrees")
@@ -88,6 +92,10 @@ def config_from_args(args: argparse.Namespace) -> EvolutionRunConfig:
         max_parallel_candidates=args.max_parallel_candidates,
         promote_top_k=args.promote_top_k,
         benchmark_limit=args.benchmark_limit,
+        benchmark_top_k=args.benchmark_top_k,
+        memmachine_stm_record_budget=args.memmachine_stm_record_budget,
+        memmachine_profile_max_turns=args.memmachine_profile_max_turns,
+        benchmark_max_workers=args.benchmark_max_workers,
         max_history_turns=args.max_history_turns,
         llm_max_input_tokens=args.llm_max_input_tokens,
         codex_bin=args.codex_bin,
