@@ -30,7 +30,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-binding",
         default="memprimitive.example.classics.memmachine_memory:create_memory_binding",
-        help="MemorySystemBinding factory used by benchmark smoke runs.",
+        help="MemorySystemBinding factory used by benchmark runs.",
     )
     parser.add_argument("--benchmark", choices=("locomo", "longmemeval", "dmr"), default="locomo")
     parser.add_argument("--locomo-users", nargs="+", default=None)
@@ -38,6 +38,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-root", default="benchmarks")
     parser.add_argument("--benchmark-limit", type=int, default=None)
     parser.add_argument("--max-history-turns", type=int, default=None)
+    parser.add_argument(
+        "--llm-max-input-tokens",
+        type=int,
+        default=None,
+        help="Forwarded to memprimitive.benchmarking.minimal_baseline for LoCoMo LLM answer caps.",
+    )
     parser.add_argument("--worktree-root", default="../MemPrimitive-evolve-worktrees")
     parser.add_argument("--output-root", default="benchmarks/outputs/evolve")
     parser.add_argument("--base-ref", default="HEAD")
@@ -46,13 +52,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--promote-top-k", type=int, default=0)
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--codex-model", default=None, help="Deprecated compatibility option: sets one model for both roles.")
-    parser.add_argument("--codex-profile", default=None)
-    parser.add_argument("--orchestrator-model", default="gpt-5.4")
+    parser.add_argument("--codex-profile", default="deepseek")
+    parser.add_argument("--orchestrator-model", default="deepseek-v4-pro")
     parser.add_argument("--orchestrator-reasoning-effort", default="medium")
-    parser.add_argument("--worker-model", default="gpt-5.4-mini")
+    parser.add_argument("--worker-model", default="deepseek-v4-flash")
     parser.add_argument("--worker-reasoning-effort", default=None)
+    parser.add_argument("--orchestrator-timeout-seconds", type=int, default=600)
+    parser.add_argument("--worker-timeout-seconds", type=int, default=900)
     parser.add_argument("--python-bin", default="~/bin/winpy312")
     parser.add_argument("--run-id", default="")
+    parser.add_argument(
+        "--resume-benchmark-only",
+        action="store_true",
+        help="Reuse an existing run_id's candidate worktrees and rerun benchmark/scoring for candidates that previously failed at the benchmark stage.",
+    )
     parser.add_argument("--context-char-limit", type=int, default=60000)
     parser.add_argument("--dry-run", action="store_true", help="Print config and command/context preview without writing files.")
     return parser
@@ -76,6 +89,7 @@ def config_from_args(args: argparse.Namespace) -> EvolutionRunConfig:
         promote_top_k=args.promote_top_k,
         benchmark_limit=args.benchmark_limit,
         max_history_turns=args.max_history_turns,
+        llm_max_input_tokens=args.llm_max_input_tokens,
         codex_bin=args.codex_bin,
         codex_model=args.codex_model,
         codex_profile=args.codex_profile,
@@ -83,6 +97,8 @@ def config_from_args(args: argparse.Namespace) -> EvolutionRunConfig:
         orchestrator_reasoning_effort=args.orchestrator_reasoning_effort,
         worker_model=args.worker_model,
         worker_reasoning_effort=args.worker_reasoning_effort,
+        orchestrator_timeout_seconds=args.orchestrator_timeout_seconds,
+        worker_timeout_seconds=args.worker_timeout_seconds,
         python_bin=args.python_bin,
         run_id=args.run_id,
         context_char_limit=args.context_char_limit,
@@ -115,7 +131,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(json.dumps(dry_run_payload(repo_root, config), ensure_ascii=False, indent=2))
         return 0
     try:
-        result = run_evolution_search(repo_root=repo_root, config=config)
+        result = run_evolution_search(repo_root=repo_root, config=config, resume_benchmark_only=args.resume_benchmark_only)
     except RuntimeError as exc:
         print(
             json.dumps(

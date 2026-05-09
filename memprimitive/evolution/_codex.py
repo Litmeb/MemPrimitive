@@ -24,6 +24,9 @@ DEFAULT_CONTEXT_FILES = (
 )
 
 KNOWN_PATH_REWRITES = {
+    "tests/test_classics_memmachine_binding.py": "tests/test_classics_memmachine.py",
+    "tests/test_classics_memmachine_memory.py": "tests/test_classics_memmachine.py",
+    "tests/classics/test_classics_memmachine_memory.py": "tests/test_classics_memmachine.py",
     "tests/example/classics/test_memmachine_memory.py": "tests/test_classics_memmachine.py",
 }
 
@@ -70,6 +73,8 @@ def build_orchestrator_prompt(
     return f"""You are the MemPrimitive memory-search orchestrator.
 
 Your only job is to propose candidate code modifications. Do not edit files.
+Do not call tools or inspect the repository. The repository context below is already the input.
+Your first response must be the strict JSON object; no analysis, no preamble, no markdown.
 Return strict JSON only, with no markdown, no prose, and this exact top-level shape:
 {{"candidates": [{{"id": "...", "hypothesis": "...", "allowed_files": ["..."], "implementation_prompt": "...", "focused_tests": ["..."], "benchmark_args": {{}}, "expected_diagnostics": ["..."]}}]}}
 
@@ -84,7 +89,7 @@ Candidate rules:
 - Each candidate must include allowed_files; worker edits will be mechanically rejected outside this whitelist.
 - Prefer focused changes around retrieval, provenance, readout, evolution triggers, profile maintenance, or binding-facing behavior.
 - Do not include protected files such as .env, *.env, .git, or benchmarks/outputs.
-- Include focused pytest commands when a better focused test exists; otherwise use the default MemMachine regression commands.
+- Do not invent test files or `-k` selectors. Use exactly `~/bin/winpy312 -m pytest tests/test_classics_memmachine.py -v` unless you know an exact existing test is better.
 - Include diagnostics that should change if the hypothesis is correct.
 {repair_instruction}
 
@@ -200,6 +205,33 @@ def _model_settings_for_role(config: EvolutionRunConfig, *, role: str) -> tuple[
     raise ValueError(f"unknown codex role {role!r}.")
 
 
+def _truthy_env(value: str) -> bool:
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _falsey_env(value: str) -> bool:
+    return value.strip().casefold() in {"0", "false", "no", "off"}
+
+
+def _uses_deepseek_codex_config(config: EvolutionRunConfig) -> bool:
+    values = (
+        config.codex_profile,
+        config.codex_model,
+        config.orchestrator_model,
+        config.worker_model,
+    )
+    return any(str(value).strip().casefold().startswith("deepseek") for value in values if value)
+
+
+def _should_use_wsl_codex(config: EvolutionRunConfig) -> bool:
+    env_value = os.environ.get("MEMPRIMITIVE_EVOLUTION_USE_WSL_CODEX", "")
+    if _truthy_env(env_value):
+        return True
+    if _falsey_env(env_value):
+        return False
+    return _uses_deepseek_codex_config(config)
+
+
 def codex_exec_args(
     *,
     config: EvolutionRunConfig,
@@ -209,7 +241,8 @@ def codex_exec_args(
     json_events: bool = True,
     role: str = "worker",
 ) -> list[str]:
-    if os.name == "nt" and config.codex_bin == "codex" and shutil.which("wsl.exe"):
+    use_wsl_codex = _should_use_wsl_codex(config)
+    if use_wsl_codex and os.name == "nt" and config.codex_bin == "codex" and shutil.which("wsl.exe"):
         wsl_codex_bin = _discover_wsl_codex_bin()
         wsl_cwd = _windows_path_to_wsl(cwd)
         wsl_output = _windows_path_to_wsl(output_last_message)
@@ -332,6 +365,7 @@ def run_orchestrator(
         ),
         cwd=repo_root,
         input_text=prompt,
+        timeout=config.orchestrator_timeout_seconds,
     )
     events_path.write_text(result.stdout, encoding="utf-8")
     write_process_log(result, artifact_dir=artifact_dir, name="orchestrator")
@@ -376,6 +410,7 @@ def run_worker_codex(
         ),
         cwd=worktree_path,
         input_text=prompt,
+        timeout=config.worker_timeout_seconds,
     )
     events_path.write_text(result.stdout, encoding="utf-8")
     write_process_log(result, artifact_dir=artifact_dir, name="worker")
