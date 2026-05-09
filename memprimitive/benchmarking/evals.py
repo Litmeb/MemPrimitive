@@ -7,7 +7,6 @@ import concurrent.futures
 import json
 import math
 import re
-import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -221,6 +220,12 @@ def process_item(item_data: tuple[str, list[dict[str, Any]]], *, use_llm_judge: 
     return dict(local_results)
 
 
+def _mp_eval_shard(args: tuple[tuple[str, list[dict[str, Any]]], bool]) -> dict[str, list[dict[str, Any]]]:
+    """Picklable entrypoint for ProcessPoolExecutor (Windows spawn-safe)."""
+    item_data, use_llm_flag = args
+    return process_item(item_data, use_llm_judge=use_llm_flag)
+
+
 def evaluate_file(
     *,
     input_file: Path,
@@ -230,18 +235,30 @@ def evaluate_file(
 ) -> dict[str, list[dict[str, Any]]]:
     data = _normalize_items(_read_input(input_file))
     results: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    results_lock = threading.Lock()
+    item_tasks = list(data.items())
+    pool_cap = max(1, len(item_tasks))
+    effective_workers = min(max(1, max_workers), pool_cap)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_item, item_data, use_llm_judge=use_llm_judge) for item_data in data.items()]
-        for future in concurrent.futures.as_completed(futures):
-            local_results = future.result()
-            with results_lock:
+    if item_tasks:
+        executor_cls = concurrent.futures.ProcessPoolExecutor if use_llm_judge else concurrent.futures.ThreadPoolExecutor
+        with executor_cls(max_workers=effective_workers) as executor:
+            if use_llm_judge:
+                futures = [
+                    executor.submit(_mp_eval_shard, (item_data, use_llm_judge))
+                    for item_data in item_tasks
+                ]
+            else:
+                futures = [
+                    executor.submit(process_item, item_data, use_llm_judge=use_llm_judge)
+                    for item_data in item_tasks
+                ]
+            for future in concurrent.futures.as_completed(futures):
+                local_results = future.result()
                 for key, items in local_results.items():
                     results[key].extend(items)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_file.write_text(json.dumps(dict(results), ensure_ascii=False, indent=2), encoding="utf-8")
     return dict(results)
 
 
@@ -249,7 +266,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate MemPrimitive benchmark predictions with Mem0-style metrics.")
     parser.add_argument("--input_file", type=Path, required=True, help="JSON or JSONL prediction file.")
     parser.add_argument("--output_file", type=Path, default=Path("benchmarks/outputs/evaluation_metrics.json"))
-    parser.add_argument("--max_workers", type=int, default=10)
+    parser.add_argument(
+        "--max_workers",
+        type=int,
+        default=10,
+        help="Parallelism across LoCoMo groups: process pool when LLM judge is enabled, thread pool when --skip_llm_judge.",
+    )
     parser.add_argument("--skip_llm_judge", action="store_true", help="Only calculate local BLEU/F1 metrics.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 

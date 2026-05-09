@@ -21,6 +21,75 @@ from ._types import (
 from .prompts import ANSWER_PROMPT, MEMMACHINE_ANSWER_PROMPT
 
 
+_LOCOMO_ANSWER_QUESTION_SPLIT = "\n\n    Question:"
+_SINGLE_RECALL_MEMORY_SPLIT = "\n\nRetrieved memory:\n"
+
+
+def _locomo_cap_user_preserving_question(runtime: Runtime, user: str, user_token_budget: int) -> str:
+    """Shrink a rendered LoCoMo answer user prompt without dropping the final Question/Answer tail."""
+
+    if user_token_budget <= 0:
+        return ""
+    if runtime.count_tokens(user) <= user_token_budget:
+        return user
+    if _LOCOMO_ANSWER_QUESTION_SPLIT not in user:
+        return runtime.truncate_text_to_token_limit(user, user_token_budget)
+    prefix, suffix = user.rsplit(_LOCOMO_ANSWER_QUESTION_SPLIT, 1)
+    suffix = _LOCOMO_ANSWER_QUESTION_SPLIT + suffix
+    suffix_tokens = runtime.count_tokens(suffix)
+    prefix_budget = user_token_budget - suffix_tokens
+    if prefix_budget <= 0:
+        return runtime.truncate_text_to_token_limit(suffix, user_token_budget)
+    prefix_capped = runtime.truncate_text_to_token_limit(prefix, prefix_budget)
+    return prefix_capped + suffix
+
+
+def _locomo_cap_single_recall_user(runtime: Runtime, user: str, user_token_budget: int) -> str:
+    """For minimal LoCoMo recall: keep metadata + user request, trim retrieved memory from the tail."""
+
+    if user_token_budget <= 0:
+        return ""
+    if runtime.count_tokens(user) <= user_token_budget:
+        return user
+    if _SINGLE_RECALL_MEMORY_SPLIT not in user:
+        return runtime.truncate_text_to_token_limit(user, user_token_budget)
+    meta, _, mem_rest = user.partition(_SINGLE_RECALL_MEMORY_SPLIT)
+    mem_block = _SINGLE_RECALL_MEMORY_SPLIT + mem_rest
+    meta_tokens = runtime.count_tokens(meta)
+    if meta_tokens >= user_token_budget:
+        return runtime.truncate_text_to_token_limit(user, user_token_budget)
+    mem_cap = runtime.truncate_text_to_token_limit(mem_block, user_token_budget - meta_tokens)
+    return meta + mem_cap
+
+
+def _answer_chat_with_input_cap(
+    runtime: Runtime,
+    *,
+    system: str,
+    user: str,
+    temperature: float,
+    max_input_tokens: int | None,
+    locomo_user_cap: Callable[[Runtime, str, int], str] | None = None,
+) -> str:
+    if max_input_tokens is None:
+        return runtime.text(system=system, user=user, temperature=temperature, max_input_tokens=None)
+    if max_input_tokens <= 0:
+        raise ValueError("max_input_tokens must be positive.")
+    sys_tokens = runtime.count_tokens(system)
+    user_tokens = runtime.count_tokens(user)
+    if sys_tokens + user_tokens <= max_input_tokens:
+        return runtime.text(system=system, user=user, temperature=temperature, max_input_tokens=None)
+    if sys_tokens >= max_input_tokens:
+        system = runtime.truncate_text_to_token_limit(system, max_input_tokens)
+        return runtime.text(system=system, user="", temperature=temperature, max_input_tokens=None)
+    user_budget = max_input_tokens - sys_tokens
+    if locomo_user_cap is not None:
+        user = locomo_user_cap(runtime, user, user_budget)
+    else:
+        user = runtime.truncate_text_to_token_limit(user, user_budget)
+    return runtime.text(system=system, user=user, temperature=temperature, max_input_tokens=None)
+
+
 def _call_with_supported_kwargs(func, /, *args: Any, **kwargs: Any) -> Any:
     try:
         signature = inspect.signature(func)
@@ -40,8 +109,10 @@ class SingleRecallLLMAnswerRunner:
         *,
         runtime: Runtime | None = None,
         system_prompt: str | None = None,
+        max_input_tokens: int | None = None,
     ) -> None:
         self.runtime = runtime if runtime is not None else Runtime()
+        self.max_input_tokens = max_input_tokens
         self.system_prompt = system_prompt or (
             "You answer only from the provided retrieved memory and the user request. "
             "If the retrieved memory is empty or insufficient, say that the memory does not contain enough information. "
@@ -64,7 +135,19 @@ class SingleRecallLLMAnswerRunner:
             f"User request:\n{sample.query.text}\n\n"
             f"Retrieved memory:\n{retrieved_block}\n"
         )
-        return self.runtime.text(system=self.system_prompt, user=user_prompt, temperature=0.0)
+        locomo_cap = (
+            _locomo_cap_single_recall_user
+            if str(sample.benchmark_name).strip().casefold() == "locomo"
+            else None
+        )
+        return _answer_chat_with_input_cap(
+            self.runtime,
+            system=self.system_prompt,
+            user=user_prompt,
+            temperature=0.0,
+            max_input_tokens=self.max_input_tokens,
+            locomo_user_cap=locomo_cap,
+        )
 
 
 class Mem0LoCoMoAnswerRunner:
@@ -72,9 +155,16 @@ class Mem0LoCoMoAnswerRunner:
 
     name = "mem0_locomo_answer"
 
-    def __init__(self, *, runtime: Runtime | None = None, system_prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: Runtime | None = None,
+        system_prompt: str | None = None,
+        max_input_tokens: int | None = None,
+    ) -> None:
         self.runtime = runtime if runtime is not None else Runtime()
         self.system_prompt = system_prompt or ""
+        self.max_input_tokens = max_input_tokens
 
     def _locomo_memory_sections(self, memory_recall: MemoryRecall) -> tuple[str, str]:
         metadata = dict(memory_recall.metadata)
@@ -110,7 +200,14 @@ class Mem0LoCoMoAnswerRunner:
                 "question": sample.query.text,
             },
         )
-        return self.runtime.text(system=self.system_prompt, user=rendered_user_prompt, temperature=0.0)
+        return _answer_chat_with_input_cap(
+            self.runtime,
+            system=self.system_prompt,
+            user=rendered_user_prompt,
+            temperature=0.0,
+            max_input_tokens=self.max_input_tokens,
+            locomo_user_cap=_locomo_cap_user_preserving_question,
+        )
 
 
 class MemMachineLoCoMoAnswerRunner:
@@ -118,9 +215,16 @@ class MemMachineLoCoMoAnswerRunner:
 
     name = "memmachine_locomo_answer"
 
-    def __init__(self, *, runtime: Runtime | None = None, system_prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: Runtime | None = None,
+        system_prompt: str | None = None,
+        max_input_tokens: int | None = None,
+    ) -> None:
         self.runtime = runtime if runtime is not None else Runtime()
         self.system_prompt = system_prompt or ""
+        self.max_input_tokens = max_input_tokens
 
     def answer(
         self,
@@ -138,7 +242,14 @@ class MemMachineLoCoMoAnswerRunner:
                 "question": sample.query.text,
             },
         )
-        return self.runtime.text(system=self.system_prompt, user=rendered_user_prompt, temperature=0.0)
+        return _answer_chat_with_input_cap(
+            self.runtime,
+            system=self.system_prompt,
+            user=rendered_user_prompt,
+            temperature=0.0,
+            max_input_tokens=self.max_input_tokens,
+            locomo_user_cap=_locomo_cap_user_preserving_question,
+        )
 
 
 def _answer_with_runner(runner: AnswerRunner | Any, *, sample: BenchmarkSample, memory_recall: MemoryRecall) -> str:

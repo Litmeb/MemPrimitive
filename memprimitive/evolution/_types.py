@@ -78,13 +78,16 @@ class EvolutionRunConfig:
     promote_top_k: int = 0
     benchmark_limit: int | None = None
     max_history_turns: int | None = None
+    llm_max_input_tokens: int | None = None
     codex_bin: str = "codex"
     codex_model: str | None = None
-    codex_profile: str | None = None
-    orchestrator_model: str | None = "gpt-5.4"
+    codex_profile: str | None = "deepseek"
+    orchestrator_model: str | None = "deepseek-v4-pro"
     orchestrator_reasoning_effort: str | None = "medium"
-    worker_model: str | None = "gpt-5.4-mini"
+    worker_model: str | None = "deepseek-v4-flash"
     worker_reasoning_effort: str | None = None
+    orchestrator_timeout_seconds: int = 600
+    worker_timeout_seconds: int = 900
     python_bin: str = "~/bin/winpy312"
     run_id: str = ""
     context_char_limit: int = 60000
@@ -100,11 +103,17 @@ class EvolutionRunConfig:
             raise ValueError("candidates_per_round must be positive.")
         if self.max_parallel_candidates <= 0:
             raise ValueError("max_parallel_candidates must be positive.")
+        if self.orchestrator_timeout_seconds <= 0:
+            raise ValueError("orchestrator_timeout_seconds must be positive.")
+        if self.worker_timeout_seconds <= 0:
+            raise ValueError("worker_timeout_seconds must be positive.")
         self.target_binding = str(self.target_binding).strip()
         if not self.target_binding:
             raise ValueError("target_binding is required.")
         self.benchmark = str(self.benchmark).strip().casefold() or "locomo"
         self.locomo_users = tuple(str(item).strip() for item in self.locomo_users if str(item).strip())
+        if self.llm_max_input_tokens is not None and self.benchmark != "locomo":
+            raise ValueError("llm_max_input_tokens is only supported when benchmark is locomo.")
         if not self.run_id:
             self.run_id = f"{utc_timestamp()}_{slugify(self.goal, default='evolution')[:48]}"
 
