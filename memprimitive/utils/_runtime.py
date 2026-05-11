@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
 import re
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -26,6 +28,18 @@ _MEMPRIMITIVE_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 _DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _LOCAL_EMBEDDING_PROVIDERS = frozenset({"sentence_transformers", "sentence-transformers", "local"})
 _OPENAI_EMBEDDING_PROVIDER = "openai"
+
+
+def _ensure_windows_selector_event_loop_policy() -> None:
+    if not sys.platform.startswith("win"):
+        return
+    selector_policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if selector_policy_cls is None:
+        return
+    policy = asyncio.get_event_loop_policy()
+    if isinstance(policy, selector_policy_cls):
+        return
+    asyncio.set_event_loop_policy(selector_policy_cls())
 
 
 def _coerce_json(content: str) -> Any:
@@ -120,6 +134,7 @@ class Runtime:
         rerank_model: str | None = None,
         rerank_timeout_seconds: int | None = None,
     ) -> None:
+        _ensure_windows_selector_event_loop_policy()
         load_dotenv(_MEMPRIMITIVE_ENV_PATH, override=False)
         env = os.environ
         self.api_key = api_key if api_key is not None else env.get("MEMPRIMITIVE_API_KEY", "")
