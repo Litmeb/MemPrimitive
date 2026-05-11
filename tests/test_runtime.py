@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -289,6 +290,43 @@ def test_runtime_rerank_rejects_invalid_api_response(
 def test_runtime_rejects_unsupported_embedding_provider() -> None:
     with pytest.raises(ValueError, match="MEMPRIMITIVE_EMBEDDING_PROVIDER"):
         _runtime.Runtime(embedding_provider="unsupported")
+
+
+def test_runtime_sets_windows_selector_event_loop_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    selector_policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if selector_policy_cls is None:
+        pytest.skip("Windows selector event loop policy not available on this platform.")
+
+    class _FakeNonSelectorPolicy(asyncio.DefaultEventLoopPolicy):
+        pass
+
+    original_platform = _runtime.sys.platform
+    original_get = _runtime.asyncio.get_event_loop_policy
+    original_set = _runtime.asyncio.set_event_loop_policy
+    policy_box: dict[str, asyncio.AbstractEventLoopPolicy] = {"policy": _FakeNonSelectorPolicy()}
+    set_calls: list[asyncio.AbstractEventLoopPolicy] = []
+
+    monkeypatch.setattr(_runtime.sys, "platform", "win32")
+
+    def _fake_get_event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
+        return policy_box["policy"]
+
+    def _fake_set_event_loop_policy(policy: asyncio.AbstractEventLoopPolicy) -> None:
+        policy_box["policy"] = policy
+        set_calls.append(policy)
+
+    monkeypatch.setattr(_runtime.asyncio, "get_event_loop_policy", _fake_get_event_loop_policy)
+    monkeypatch.setattr(_runtime.asyncio, "set_event_loop_policy", _fake_set_event_loop_policy)
+
+    try:
+        _runtime._ensure_windows_selector_event_loop_policy()
+    finally:
+        monkeypatch.setattr(_runtime.sys, "platform", original_platform)
+        monkeypatch.setattr(_runtime.asyncio, "get_event_loop_policy", original_get)
+        monkeypatch.setattr(_runtime.asyncio, "set_event_loop_policy", original_set)
+
+    assert len(set_calls) == 1
+    assert isinstance(policy_box["policy"], selector_policy_cls)
 
 
 def test_runtime_truncate_text_to_token_limit_uses_heuristic_without_tiktoken(
