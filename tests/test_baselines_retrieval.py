@@ -2039,3 +2039,232 @@ def test_write_false_skips_normal_write_and_leaves_evolution_noop() -> None:
     assert packet.trace["organization"]["written_record_ids"] == []
     assert packet.trace["memory_evolution"]["effects"] == []
 
+
+def _hmem_layer_store() -> MemoryStore:
+    return MemoryStore(
+        topology=StoreTopology.from_layers(
+            [
+                StoreLayerSpec(name="domain"),
+                StoreLayerSpec(name="category"),
+                StoreLayerSpec(name="trace"),
+                StoreLayerSpec(name="episode"),
+            ]
+        )
+    )
+
+
+def test_child_scoped_embedding_retrieval_limits_search_to_candidate_ids() -> None:
+    from memprimitive.baselines import ChildScopedEmbeddingRetrieval
+
+    store = _hmem_layer_store()
+    for record in (
+        MemoryRecord(
+            record_id="cat-a",
+            unit_id="unit-a",
+            layer="category",
+            text="category a",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={},
+        ),
+        MemoryRecord(
+            record_id="cat-b",
+            unit_id="unit-b",
+            layer="category",
+            text="category b",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[0.0, 1.0],
+            metadata={},
+        ),
+    ):
+        store.append(record)
+
+    packet_out, _ = ChildScopedEmbeddingRetrieval(top_k=1, layer="category").run(
+        Packet(
+            query=Query(
+                text="query",
+                embedding=[1.0, 0.0],
+                metadata={"candidate_record_ids": ["cat-a"]},
+            )
+        ),
+        store,
+    )
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["cat-a"]
+
+
+def test_child_scoped_embedding_retrieval_reads_child_ids_from_parent_retrieved() -> None:
+    from memprimitive.baselines import ChildScopedEmbeddingRetrieval, EmbeddingSimilarityRetrieval
+
+    store = _hmem_layer_store()
+    store.append(
+        MemoryRecord(
+            record_id="dom-1",
+            unit_id="unit-dom",
+            layer="domain",
+            text="domain",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"child_record_ids": ["cat-a", "cat-b"]},
+        )
+    )
+    for record in (
+        MemoryRecord(
+            record_id="cat-a",
+            unit_id="unit-a",
+            layer="category",
+            text="category a",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[1.0, 0.0],
+            metadata={},
+        ),
+        MemoryRecord(
+            record_id="cat-b",
+            unit_id="unit-b",
+            layer="category",
+            text="category b",
+            timestamp="2026-01-01T00:00:02+00:00",
+            embedding=[0.0, 1.0],
+            metadata={},
+        ),
+    ):
+        store.append(record)
+
+    parent_packet, store = EmbeddingSimilarityRetrieval(top_k=1, layer="domain").run(
+        Packet(query=Query(text="query", embedding=[1.0, 0.0])),
+        store,
+    )
+    packet_out, _ = ChildScopedEmbeddingRetrieval(
+        top_k=1,
+        layer="category",
+        candidate_source="parent_retrieved",
+    ).run(parent_packet, store)
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["cat-a"]
+
+
+def test_hierarchical_top_down_routing_retrieval_routes_through_child_links() -> None:
+    from memprimitive.baselines import HierarchicalTopDownRoutingRetrieval
+
+    store = _hmem_layer_store()
+    records = [
+        MemoryRecord(
+            record_id="dom-1",
+            unit_id="unit-dom",
+            layer="domain",
+            text="domain 1",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"child_record_ids": ["cat-1"]},
+        ),
+        MemoryRecord(
+            record_id="dom-2",
+            unit_id="unit-dom-2",
+            layer="domain",
+            text="domain 2",
+            timestamp="2026-01-01T00:00:01+00:00",
+            embedding=[0.0, 1.0],
+            metadata={"child_record_ids": ["cat-2"]},
+        ),
+        MemoryRecord(
+            record_id="cat-1",
+            unit_id="unit-cat-1",
+            layer="category",
+            text="category 1",
+            timestamp="2026-01-01T00:00:02+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"child_record_ids": ["trace-1"]},
+        ),
+        MemoryRecord(
+            record_id="cat-2",
+            unit_id="unit-cat-2",
+            layer="category",
+            text="category 2",
+            timestamp="2026-01-01T00:00:03+00:00",
+            embedding=[0.0, 1.0],
+            metadata={"child_record_ids": ["trace-2"]},
+        ),
+        MemoryRecord(
+            record_id="trace-1",
+            unit_id="unit-trace-1",
+            layer="trace",
+            text="trace 1",
+            timestamp="2026-01-01T00:00:04+00:00",
+            embedding=[1.0, 0.0],
+            metadata={"child_record_ids": ["epi-1"]},
+        ),
+        MemoryRecord(
+            record_id="trace-2",
+            unit_id="unit-trace-2",
+            layer="trace",
+            text="trace 2",
+            timestamp="2026-01-01T00:00:05+00:00",
+            embedding=[0.0, 1.0],
+            metadata={"child_record_ids": ["epi-2"]},
+        ),
+        MemoryRecord(
+            record_id="epi-1",
+            unit_id="unit-epi-1",
+            layer="episode",
+            text="target episode",
+            timestamp="2026-01-01T00:00:06+00:00",
+            embedding=[1.0, 0.0],
+            metadata={},
+        ),
+        MemoryRecord(
+            record_id="epi-2",
+            unit_id="unit-epi-2",
+            layer="episode",
+            text="other episode",
+            timestamp="2026-01-01T00:00:07+00:00",
+            embedding=[0.0, 1.0],
+            metadata={},
+        ),
+    ]
+    for record in records:
+        store.append(record)
+
+    packet_out, _ = HierarchicalTopDownRoutingRetrieval(
+        layer_order=("domain", "category", "trace", "episode"),
+        top_k=1,
+        return_layer="episode",
+    ).run(Packet(query=Query(text="query", embedding=[1.0, 0.0])), store)
+
+    assert packet_out.retrieved is not None
+    assert [record.record_id for record in packet_out.retrieved.items] == ["epi-1"]
+    per_layer = packet_out.trace["retrieval"]["per_layer"]
+    assert [entry["selected_record_ids"] for entry in per_layer] == [
+        ["dom-1"],
+        ["cat-1"],
+        ["trace-1"],
+        ["epi-1"],
+    ]
+
+
+def test_hierarchical_top_down_routing_retrieval_stops_when_child_candidates_missing() -> None:
+    from memprimitive.baselines import HierarchicalTopDownRoutingRetrieval
+
+    store = _hmem_layer_store()
+    store.append(
+        MemoryRecord(
+            record_id="dom-1",
+            unit_id="unit-dom",
+            layer="domain",
+            text="domain",
+            timestamp="2026-01-01T00:00:00+00:00",
+            embedding=[1.0, 0.0],
+            metadata={},
+        )
+    )
+
+    packet_out, _ = HierarchicalTopDownRoutingRetrieval(
+        layer_order=("domain", "category"),
+        top_k=1,
+    ).run(Packet(query=Query(text="query", embedding=[1.0, 0.0])), store)
+
+    assert packet_out.retrieved is not None
+    assert packet_out.retrieved.items == []
+    assert packet_out.trace["retrieval"]["stopped_reason"] == "empty_child_candidate_set"
+

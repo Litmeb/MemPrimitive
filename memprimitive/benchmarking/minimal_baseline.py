@@ -37,6 +37,7 @@ from ._memory_adapters import (
     create_dual_speaker_locomo_memory_adapter,
     create_generic_memory_binding_adapter,
     create_amem_memory_adapter,
+    create_hmem_memory_adapter,
     create_mem0_memory_adapter,
     create_memmachine_memory_adapter,
 )
@@ -428,6 +429,11 @@ def _create_cli_memory_adapter(
             profile_max_turns=memmachine_profile_max_turns,
             speaker_workers=mem0_speaker_workers,
         )
+    if adapter_name == "hmem":
+        return create_hmem_memory_adapter(
+            top_k=top_k,
+            speaker_workers=mem0_speaker_workers,
+        )
     if adapter_name == "binding":
         binding_factory = _load_memory_binding_factory(
             memory_binding,
@@ -438,7 +444,7 @@ def _create_cli_memory_adapter(
                 binding_factory,
                 name=_binding_adapter_name(memory_binding),
             )
-        if normalized_benchmark_name == "locomo" and _locomo_binding_is_memmachine_shared_conversation(memory_binding):
+        if normalized_benchmark_name == "locomo" and _locomo_binding_uses_shared_conversation(memory_binding):
             return SharedConversationLoCoMoMemoryAdapter(
                 binding_factory=binding_factory,
                 name=_binding_adapter_name(memory_binding),
@@ -448,7 +454,9 @@ def _create_cli_memory_adapter(
             name=_binding_adapter_name(memory_binding),
             speaker_workers=mem0_speaker_workers,
         )
-    raise ValueError("Unsupported memory adapter. Choose from ['binding', 'mem0', 'amem', 'memmachine', 'minimal'].")
+    raise ValueError(
+        "Unsupported memory adapter. Choose from ['binding', 'mem0', 'amem', 'memmachine', 'hmem', 'minimal']."
+    )
 
 
 def _load_memory_binding_factory(spec: str | None, *, kwargs: dict[str, Any]):
@@ -465,8 +473,8 @@ def _load_memory_binding_factory(spec: str | None, *, kwargs: dict[str, Any]):
     return lambda: target(**kwargs)
 
 
-def _locomo_binding_is_memmachine_shared_conversation(memory_binding: str | None) -> bool:
-    """True when ``binding`` targets the classic MemMachine factory (LoCoMo shared-session path)."""
+def _locomo_binding_uses_shared_conversation(memory_binding: str | None) -> bool:
+    """True when ``binding`` targets a shared-conversation classics factory."""
 
     spec = str(memory_binding or "").strip()
     if not spec:
@@ -475,7 +483,9 @@ def _locomo_binding_is_memmachine_shared_conversation(memory_binding: str | None
     if not separator:
         module_name, _, attr_name = spec.rpartition(".")
     module_tail = module_name.strip().rsplit(".", 1)[-1].strip().casefold()
-    return module_tail == "memmachine_memory" and attr_name.strip() == "create_memory_binding"
+    if attr_name.strip() != "create_memory_binding":
+        return False
+    return module_tail in {"memmachine_memory", "hmem_memory", "amem_memory"}
 
 
 def _binding_adapter_name(spec: str | None) -> str:
@@ -492,12 +502,12 @@ def _create_cli_answer_runner(
     memory_binding: str | None = None,
     llm_max_input_tokens: int | None = None,
 ):
-    if benchmark_name == "locomo" and memory_adapter_name in {"amem", "memmachine"}:
+    if benchmark_name == "locomo" and memory_adapter_name in {"amem", "memmachine", "hmem"}:
         return MemMachineLoCoMoAnswerRunner(max_input_tokens=llm_max_input_tokens)
     if (
         benchmark_name == "locomo"
         and memory_adapter_name == "binding"
-        and _locomo_binding_is_memmachine_shared_conversation(memory_binding)
+        and _locomo_binding_uses_shared_conversation(memory_binding)
     ):
         return MemMachineLoCoMoAnswerRunner(max_input_tokens=llm_max_input_tokens)
     if benchmark_name == "locomo" and memory_adapter_name in {"binding", "mem0"}:
@@ -796,11 +806,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory-adapter",
-        choices=("minimal", "mem0", "amem", "memmachine", "binding"),
+        choices=("minimal", "mem0", "amem", "memmachine", "hmem", "binding"),
         default="minimal",
         help=(
             "Memory system to evaluate. 'minimal' preserves the legacy baseline; "
-            "'mem0', 'amem', and 'memmachine' run classics reconstructions; "
+            "'mem0', 'amem', 'memmachine', and 'hmem' run classics reconstructions; "
             "'binding' loads a MemorySystemBinding factory from --memory-binding."
         ),
     )

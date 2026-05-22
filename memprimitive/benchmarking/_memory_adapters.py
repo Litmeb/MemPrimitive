@@ -1055,3 +1055,21 @@ def create_amem_memory_adapter(
         ),
         name=name,
     )
+
+
+def create_hmem_memory_adapter(
+    *,
+    name: str = "hmem",
+    top_k: int | None = None,
+    speaker_workers: int = 1,
+) -> SharedConversationLoCoMoMemoryAdapter:
+    """Create a LoCoMo adapter for the classic H-MEM reconstruction."""
+
+    del speaker_workers
+    recall_top_k = 10 if top_k is None else top_k
+    from memprimitive.example.classics import hmem_memory
+
+    return SharedConversationLoCoMoMemoryAdapter(
+        binding_factory=lambda: hmem_memory.create_memory_binding(top_k=recall_top_k),
+        name=name,
+    )

@@ -3008,6 +3008,496 @@ class LayerAwareRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
         return (1, normalized_rank, candidate["layer_index"], candidate["item_index"])
 
 
+_CHILD_SCOPED_CANDIDATE_SOURCES: Final[frozenset[str]] = frozenset(
+    {"query_metadata", "parent_retrieved", "union"}
+)
+
+
+def _normalize_child_id_fields(child_id_fields: str | Iterable[str]) -> tuple[str, ...]:
+    raw_fields = (child_id_fields,) if isinstance(child_id_fields, str) else child_id_fields
+    normalized = tuple(str(field).strip() for field in raw_fields if str(field).strip())
+    if not normalized:
+        raise ValueError("child_id_fields must contain at least one non-empty field name.")
+    return normalized
+
+
+def _normalize_record_id_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        normalized = value.strip()
+        return [normalized] if normalized else []
+    if isinstance(value, Mapping):
+        return []
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            candidate = str(item).strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            ordered.append(candidate)
+        return ordered
+    normalized = str(value).strip()
+    return [normalized] if normalized else []
+
+
+def _metadata_lookup(metadata: Mapping[str, Any], field: str) -> Any:
+    if "." not in field:
+        return metadata.get(field)
+    current: Any = metadata
+    for part in field.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _child_record_ids_from_record(record: Any, child_id_fields: tuple[str, ...]) -> list[str]:
+    metadata = record.metadata if isinstance(getattr(record, "metadata", None), dict) else {}
+    collected: list[str] = []
+    seen: set[str] = set()
+    for field in child_id_fields:
+        for record_id in _normalize_record_id_list(_metadata_lookup(metadata, field)):
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            collected.append(record_id)
+    return collected
+
+
+def _child_record_ids_from_parents(
+    parents: list[Any],
+    *,
+    child_id_fields: tuple[str, ...],
+) -> list[str]:
+    collected: list[str] = []
+    seen: set[str] = set()
+    for parent in parents:
+        for record_id in _child_record_ids_from_record(parent, child_id_fields):
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            collected.append(record_id)
+    return collected
+
+
+def _routing_candidate_ids_from_query(query: Query) -> list[str]:
+    metadata = query.metadata if isinstance(query.metadata, dict) else {}
+    direct = _normalize_record_id_list(metadata.get("candidate_record_ids"))
+    if direct:
+        return direct
+    routing = metadata.get("routing")
+    if isinstance(routing, dict):
+        nested = _normalize_record_id_list(routing.get("candidate_record_ids"))
+        if nested:
+            return nested
+    return []
+
+
+def _normalize_child_scoped_candidate_source(source: str) -> str:
+    normalized = str(source).strip().casefold()
+    if normalized not in _CHILD_SCOPED_CANDIDATE_SOURCES:
+        raise ValueError("candidate_source must be one of: query_metadata, parent_retrieved, union.")
+    return normalized
+
+
+def _embedding_cosine_similarity(left: list[float], right: list[float]) -> float:
+    numerator = sum(lv * rv for lv, rv in zip(left, right, strict=True))
+    left_norm = sqrt(sum(value * value for value in left))
+    right_norm = sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+def _resolve_query_embedding_for_retrieval(
+    query: Query,
+    *,
+    embedding_model: str | None,
+    embedding_provider: str | None,
+    embedding_api_key: str | None,
+    embedding_base_url: str | None,
+) -> tuple[Query, list[float], bool]:
+    if query.embedding is not None:
+        return query, list(query.embedding), True
+
+    from ..utils._runtime import Runtime
+
+    query_embedding = Runtime(
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider,
+        embedding_api_key=embedding_api_key,
+        embedding_base_url=embedding_base_url,
+    ).embed(query.text)
+    return replace(query, embedding=query_embedding), query_embedding, False
+
+
+def _score_records_by_embedding_similarity(
+    records: list[Any],
+    query_embedding: list[float],
+) -> tuple[list[tuple[float, Any]], int]:
+    scored_candidates: list[tuple[float, Any]] = []
+    skipped_dim_mismatch = 0
+    for record in records:
+        if record.embedding is None:
+            continue
+        if len(record.embedding) != len(query_embedding):
+            skipped_dim_mismatch += 1
+            continue
+        score = _embedding_cosine_similarity(query_embedding, record.embedding)
+        scored_candidates.append((score, record))
+    scored_candidates.sort(key=lambda item: item[0], reverse=True)
+    return scored_candidates, skipped_dim_mismatch
+
+
+def _records_by_id_on_layer(store: MemoryStore, layer: str) -> dict[str, Any]:
+    return {record.record_id: record for record in store.iter_records(layer)}
+
+
+def _filter_records_to_candidate_ids(records: list[Any], candidate_ids: set[str]) -> list[Any]:
+    if not candidate_ids:
+        return []
+    filtered: list[Any] = []
+    seen: set[str] = set()
+    for record in records:
+        record_id = getattr(record, "record_id", None)
+        if not isinstance(record_id, str) or record_id not in candidate_ids or record_id in seen:
+            continue
+        seen.add(record_id)
+        filtered.append(record)
+    return filtered
+
+
+def _top_k_for_layer(layer_name: str, *, top_k: int, top_k_by_layer: dict[str, int] | None) -> int:
+    if top_k_by_layer is not None and layer_name in top_k_by_layer:
+        layer_top_k = int(top_k_by_layer[layer_name])
+        if layer_top_k <= 0:
+            raise ValueError(f"top_k_by_layer[{layer_name!r}] must be positive.")
+        return layer_top_k
+    return top_k
+
+
+def _resolve_child_scoped_candidate_ids(
+    packet: Packet,
+    query: Query,
+    *,
+    candidate_source: str,
+    child_id_fields: tuple[str, ...],
+) -> tuple[list[str], str]:
+    from_query = _routing_candidate_ids_from_query(query)
+    from_parents = _child_record_ids_from_parents(
+        list(packet.retrieved.items) if packet.retrieved is not None else [],
+        child_id_fields=child_id_fields,
+    )
+    if candidate_source == "query_metadata":
+        return from_query, "query_metadata"
+    if candidate_source == "parent_retrieved":
+        return from_parents, "parent_retrieved"
+    merged: list[str] = []
+    seen: set[str] = set()
+    for record_id in (*from_query, *from_parents):
+        if record_id in seen:
+            continue
+        seen.add(record_id)
+        merged.append(record_id)
+    return merged, "union"
+
+
+class ChildScopedEmbeddingRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
+    """Embedding retrieval restricted to an explicit child candidate set.
+
+    Candidates come from ``query.metadata['candidate_record_ids']``,
+    ``query.metadata['routing']['candidate_record_ids']``, and/or child-id
+    fields on records in ``packet.retrieved`` (parent hits from an upstream
+    retrieval step). When the resolved candidate set is empty, the module
+    returns no records instead of searching the full layer.
+    """
+
+    spec = ModuleSpec(
+        name="child_scoped_embedding_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("record.embedding",),
+    )
+    requires_contracts = frozenset({UNIT_EMBEDDING_CONTRACT})
+
+    def __init__(
+        self,
+        top_k: int = 3,
+        *,
+        layer: str,
+        child_id_fields: str | Iterable[str] = ("child_record_ids", "hmem.child_record_ids"),
+        candidate_source: str = "union",
+        embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("ChildScopedEmbeddingRetrieval requires top_k > 0.")
+        normalized_layer = str(layer).strip()
+        if not normalized_layer:
+            raise ValueError("ChildScopedEmbeddingRetrieval requires a non-empty layer.")
+        self.top_k = top_k
+        self.layer = normalized_layer
+        self.child_id_fields = _normalize_child_id_fields(child_id_fields)
+        self.candidate_source = _normalize_child_scoped_candidate_source(candidate_source)
+        self.embedding_model = embedding_model
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
+
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("ChildScopedEmbeddingRetrieval requires packet.query.")
+
+        query = packet.query
+        candidate_ids, candidate_resolution = _resolve_child_scoped_candidate_ids(
+            packet,
+            query,
+            candidate_source=self.candidate_source,
+            child_id_fields=self.child_id_fields,
+        )
+        if not candidate_ids:
+            return _empty_retrieved(
+                packet,
+                module_name=self.spec.name,
+                top_k=self.top_k,
+                source="store",
+                query=query,
+                strategy="child_scoped_embedding",
+                layer=self.layer,
+                candidate_resolution=candidate_resolution,
+                candidate_count=0,
+                embedding_candidate_count=0,
+                child_id_fields=list(self.child_id_fields),
+            ), store
+
+        query, query_embedding, reused_query_embedding = _resolve_query_embedding_for_retrieval(
+            query,
+            embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
+            embedding_base_url=self.embedding_base_url,
+        )
+        layer_records = list(store.iter_records(self.layer))
+        scoped_records = _filter_records_to_candidate_ids(layer_records, set(candidate_ids))
+        scored_candidates, skipped_dim_mismatch = _score_records_by_embedding_similarity(
+            scoped_records,
+            query_embedding,
+        )
+        selected_candidates = scored_candidates[: self.top_k]
+        selected_records = [record for _, record in selected_candidates]
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": score,
+                "strategy": "child_scoped_embedding",
+                "layer": self.layer,
+                "candidate_resolution": candidate_resolution,
+            }
+            for rank, (score, record) in enumerate(selected_candidates, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=selected_records,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "top_k": self.top_k,
+                "strategy": "child_scoped_embedding",
+                "layer": self.layer,
+                "candidate_resolution": candidate_resolution,
+                "candidate_count": len(scoped_records),
+                "candidate_id_count": len(candidate_ids),
+                "embedding_candidate_count": len(scored_candidates),
+                "reused_query_embedding": reused_query_embedding,
+                "skipped_dim_mismatch_count": skipped_dim_mismatch,
+                "child_id_fields": list(self.child_id_fields),
+            },
+        )
+        return _with_retrieved(packet, retrieved, query=query), store
+
+
+class HierarchicalTopDownRoutingRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
+    """Top-down hierarchical retrieval with parent-to-child candidate routing.
+
+    For each layer in ``layer_order``, the module ranks records by embedding
+    similarity. The first layer searches the full layer; each subsequent layer
+    only considers child record ids linked from the previous layer's hits via
+    ``child_id_fields`` (for example ``child_record_ids`` or
+    ``hmem.child_record_ids``). The final ``return_layer`` records are written
+    to ``packet.retrieved``.
+    """
+
+    spec = ModuleSpec(
+        name="hierarchical_top_down_routing_retrieval",
+        slot="retrieval",
+        input_requirements=("query.text",),
+        output_guarantees=("retrieved.items", "retrieved.scores"),
+        store_requirements=("record.embedding",),
+    )
+    requires_contracts = frozenset({UNIT_EMBEDDING_CONTRACT})
+
+    def __init__(
+        self,
+        layer_order: Iterable[str],
+        top_k: int = 10,
+        *,
+        top_k_by_layer: dict[str, int] | None = None,
+        return_layer: str | None = None,
+        child_id_fields: str | Iterable[str] = ("child_record_ids", "hmem.child_record_ids"),
+        embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
+    ) -> None:
+        if top_k <= 0:
+            raise ValueError("HierarchicalTopDownRoutingRetrieval requires top_k > 0.")
+        normalized_layers = tuple(str(layer).strip() for layer in layer_order)
+        if len(normalized_layers) < 2:
+            raise ValueError("layer_order must contain at least two non-empty layer names.")
+        if any(not layer for layer in normalized_layers):
+            raise ValueError("layer_order must not contain empty layer names.")
+        if len(set(normalized_layers)) != len(normalized_layers):
+            raise ValueError("layer_order must not contain duplicate layer names.")
+        normalized_return = (
+            normalized_layers[-1]
+            if return_layer is None
+            else str(return_layer).strip()
+        )
+        if not normalized_return:
+            raise ValueError("return_layer must be a non-empty string when provided.")
+        if normalized_return not in normalized_layers:
+            raise ValueError("return_layer must be one of the layers listed in layer_order.")
+        if top_k_by_layer is not None:
+            for layer_name, layer_top_k in top_k_by_layer.items():
+                if int(layer_top_k) <= 0:
+                    raise ValueError(f"top_k_by_layer[{layer_name!r}] must be positive.")
+
+        self.layer_order = normalized_layers
+        self.top_k = top_k
+        self.top_k_by_layer = (
+            None
+            if top_k_by_layer is None
+            else {str(layer).strip(): int(value) for layer, value in top_k_by_layer.items()}
+        )
+        self.return_layer = normalized_return
+        self.child_id_fields = _normalize_child_id_fields(child_id_fields)
+        self.embedding_model = embedding_model
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = embedding_api_key
+        self.embedding_base_url = embedding_base_url
+
+    def _run_single_query(self, packet: Packet, store: MemoryStore) -> tuple[Packet, MemoryStore]:
+        if packet.query is None:
+            raise ValueError("HierarchicalTopDownRoutingRetrieval requires packet.query.")
+
+        query = packet.query
+        query, query_embedding, reused_query_embedding = _resolve_query_embedding_for_retrieval(
+            query,
+            embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
+            embedding_base_url=self.embedding_base_url,
+        )
+
+        selections_by_layer: dict[str, list[tuple[float, Any]]] = {}
+        next_candidate_ids: set[str] | None = None
+        per_layer_trace: list[dict[str, Any]] = []
+        stopped_reason: str | None = None
+
+        for layer_index, layer_name in enumerate(self.layer_order):
+            layer_top_k = _top_k_for_layer(layer_name, top_k=self.top_k, top_k_by_layer=self.top_k_by_layer)
+            if layer_index == 0:
+                candidate_records = list(store.iter_records(layer_name))
+                candidate_source = "full_layer"
+            else:
+                if not next_candidate_ids:
+                    stopped_reason = "empty_child_candidate_set"
+                    break
+                candidate_records = [
+                    record
+                    for record_id, record in _records_by_id_on_layer(store, layer_name).items()
+                    if record_id in next_candidate_ids
+                ]
+                candidate_source = "parent_child_ids"
+
+            scored_candidates, skipped_dim_mismatch = _score_records_by_embedding_similarity(
+                candidate_records,
+                query_embedding,
+            )
+            if not scored_candidates:
+                stopped_reason = "no_embedding_matches"
+                per_layer_trace.append(
+                    {
+                        "layer": layer_name,
+                        "layer_index": layer_index,
+                        "top_k": layer_top_k,
+                        "candidate_source": candidate_source,
+                        "candidate_count": len(candidate_records),
+                        "selected_record_ids": [],
+                        "child_record_ids": [],
+                        "skipped_dim_mismatch_count": skipped_dim_mismatch,
+                    }
+                )
+                break
+
+            selected_candidates = scored_candidates[:layer_top_k]
+            selections_by_layer[layer_name] = selected_candidates
+            selected_parents = [record for _, record in selected_candidates]
+            next_candidate_ids = set(
+                _child_record_ids_from_parents(selected_parents, child_id_fields=self.child_id_fields)
+            )
+            per_layer_trace.append(
+                {
+                    "layer": layer_name,
+                    "layer_index": layer_index,
+                    "top_k": layer_top_k,
+                    "candidate_source": candidate_source,
+                    "candidate_count": len(candidate_records),
+                    "selected_record_ids": [record.record_id for record in selected_parents],
+                    "child_record_ids": sorted(next_candidate_ids),
+                    "skipped_dim_mismatch_count": skipped_dim_mismatch,
+                }
+            )
+
+        selected_scores_raw = list(selections_by_layer.get(self.return_layer, []))
+        selected_records = [record for _, record in selected_scores_raw]
+
+        scores = [
+            {
+                "record_id": record.record_id,
+                "rank": rank,
+                "score": score,
+                "strategy": "hierarchical_top_down_routing",
+                "layer": record.layer,
+            }
+            for rank, (score, record) in enumerate(selected_scores_raw, start=1)
+        ]
+        retrieved = RetrievedSet(
+            items=selected_records,
+            scores=scores,
+            trace={
+                "module": self.spec.name,
+                "strategy": "hierarchical_top_down_routing",
+                "layer_order": list(self.layer_order),
+                "return_layer": self.return_layer,
+                "top_k": self.top_k,
+                "top_k_by_layer": dict(self.top_k_by_layer or {}),
+                "child_id_fields": list(self.child_id_fields),
+                "reused_query_embedding": reused_query_embedding,
+                "stopped_reason": stopped_reason,
+                "per_layer": per_layer_trace,
+                "final_returned_count": len(selected_records),
+            },
+        )
+        return _with_retrieved(packet, retrieved, query=query), store
+
+
 class BufferRetrieval(_MultiQueryRetrievalMixin, RetrievalModule):
     """Read a bounded recency window from one layer instead of doing query search.
 
@@ -3319,6 +3809,8 @@ BASELINE_CLASSES: Final[tuple[type[RetrievalModule], ...]] = (
     ExpandRetrievedGraphNeighbors,
     VectorGraphSeedAndExpandRetrieval,
     LayerAwareRetrieval,
+    ChildScopedEmbeddingRetrieval,
+    HierarchicalTopDownRoutingRetrieval,
     BufferRetrieval,
     QueryRewriteRetrieval,
 )
