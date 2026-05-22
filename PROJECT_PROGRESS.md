@@ -59,7 +59,8 @@ Treat these as the current foundation:
 1. **Retrieval/search surface**
    - Make retrieved records, parent records, temporal neighbors, reranked candidates, and readout sections preserve stable provenance.
    - Move from flat `RetrievedSet`-only thinking toward grouped/provenance-aware recall views when a memory system naturally has layers or expansion steps.
-   - Keep MemMachine-style contextualized retrieval as the immediate proving ground: direct episodic hits, sentence-hit parent expansion, temporal expansion, and rerank should be inspectable as separate stages.
+   - MemMachine-style contextualized retrieval as the immediate proving ground: direct episodic hits, sentence-hit parent expansion, temporal expansion, and rerank should be inspectable as separate stages.
+- `memprimitive/example/classics/simplemem_memory.py` reconstructs SimpleMem's three-stage text memory loop (windowed LLM compression, prompt-based online synthesis, TemplateReadout hybrid semantic/lexical/symbolic recall) using existing baseline modules plus example-local symbolic orchestration.
 
 2. **Evolution/maintenance surface**
    - Clarify which evolution modules mutate content, metadata, topology, or derived indexes.
@@ -78,6 +79,8 @@ Treat these as the current foundation:
 
 ## Near-Term Checkpoints
 
+- Retrieval now includes `ChildScopedEmbeddingRetrieval` (parent-selected child candidate set) and `HierarchicalTopDownRoutingRetrieval` (layer-order top-down routing) for H-MEM-style hierarchical recall.
+- `memprimitive/example/classics/hmem_memory.py` wires four-layer ingest, hierarchical top-down recall, and LoCoMo via `--memory-adapter hmem` or `--memory-adapter binding --memory-binding memprimitive.example.classics.hmem_memory:create_memory_binding`.
 - Turn the semantic operation map into a small machine-readable compatibility schema when the next search/evolution implementation pass starts.
 - Run the new harness first in dry-run mode, then with explicit `--base-ref HEAD --allow-dirty-control-worktree` while this checkout remains dirty, so candidate worktrees start from a committed ref rather than the control worktree's local edits.
 - Audit current retrieval and evolution modules for missing metadata/provenance declarations.
