@@ -8,6 +8,20 @@ from typing import Any, Protocol, runtime_checkable
 from ..core import Observation, Query
 
 
+def _locomo_caption_suffix(metadata: dict[str, Any] | None) -> str:
+    """Format LoCoMo BLIP caption like classic memory bindings ([ATTACHED: ...])."""
+
+    if not metadata:
+        return ""
+    raw_caption = metadata.get("blip_caption")
+    if not raw_caption:
+        return ""
+    caption = str(raw_caption).strip()
+    if not caption:
+        return ""
+    return f" [ATTACHED: {caption}]"
+
+
 @dataclass(slots=True)
 class ConversationTurn:
     turn_id: str
@@ -29,8 +43,16 @@ class ConversationTurn:
             "role": str(self.role).strip(),
             "speaker": str(self.speaker).strip(),
         }
+        dialogue_text = str(self.text).strip()
+        caption_suffix = _locomo_caption_suffix(self.metadata)
+        if dialogue_text:
+            observation_text = f"{speaker_label}: {dialogue_text}{caption_suffix}"
+        elif caption_suffix:
+            observation_text = f"{speaker_label}:{caption_suffix}"
+        else:
+            observation_text = f"{speaker_label}:"
         observation_kwargs: dict[str, Any] = {
-            "text": f"{speaker_label}: {str(self.text).strip()}",
+            "text": observation_text,
             "source": "dialogue",
             "metadata": observation_metadata,
         }

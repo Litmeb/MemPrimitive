@@ -131,6 +131,52 @@ def test_load_locomo_samples_normalizes_dialogue_and_qa(tmp_path: Path) -> None:
     assert samples[0].metadata["adversarial_answer"] == "Coffee"
 
 
+def test_load_locomo_samples_preserves_blip_captions(tmp_path: Path) -> None:
+    from memprimitive.benchmarking._memory_adapters import _locomo_turn_text
+
+    data_dir = tmp_path / "LoCoMo" / "data"
+    data_dir.mkdir(parents=True)
+    payload = [
+        {
+            "sample_id": "conv-1",
+            "conversation": {
+                "speaker_a": "Alice",
+                "speaker_b": "Bob",
+                "session_1_date_time": "2024-01-01T00:00:00",
+                "session_1": [
+                    {
+                        "speaker": "Alice",
+                        "dia_id": "D1:1",
+                        "text": "Check out this photo!",
+                        "blip_caption": "a person on a mountain trail",
+                    },
+                    {
+                        "speaker": "Bob",
+                        "dia_id": "D1:2",
+                        "text": "",
+                        "blip_caption": "a cup of coffee on a table",
+                    },
+                ],
+            },
+            "qa": [{"question": "What is on the trail?", "answer": "a person", "category": 1}],
+        }
+    ]
+    (data_dir / "locomo10.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    samples = list(load_benchmark_samples("locomo", benchmark_root=tmp_path))
+
+    assert len(samples) == 1
+    assert len(samples[0].history_turns) == 2
+    text_turn, caption_only_turn = samples[0].history_turns
+    assert text_turn.text == "Check out this photo!"
+    assert text_turn.metadata["blip_caption"] == "a person on a mountain trail"
+    assert "[ATTACHED: a person on a mountain trail]" in text_turn.to_observation().text
+    assert caption_only_turn.text == ""
+    assert caption_only_turn.metadata["blip_caption"] == "a cup of coffee on a table"
+    assert _locomo_turn_text(caption_only_turn) == "Bob: [ATTACHED: a cup of coffee on a table]"
+    assert "[ATTACHED: a cup of coffee on a table]" in caption_only_turn.to_observation().text
+
+
 def test_load_locomo_samples_filters_by_user_values(tmp_path: Path) -> None:
     data_dir = tmp_path / "LoCoMo" / "data"
     data_dir.mkdir(parents=True)

@@ -18,6 +18,7 @@ from ._types import (
     MemoryRecall,
     MemorySystemBinding,
     RecallContext,
+    _locomo_caption_suffix,
     default_turn_to_observation,
 )
 
@@ -344,7 +345,12 @@ def _locomo_turn_text(turn: ConversationTurn | None) -> str:
         return ""
     speaker_label = str(turn.speaker).strip() or str(turn.role).strip() or "speaker"
     text = str(turn.text).strip()
-    return f"{speaker_label}: {text}" if text else ""
+    caption_suffix = _locomo_caption_suffix(turn.metadata)
+    if text:
+        return f"{speaker_label}: {text}{caption_suffix}"
+    if caption_suffix:
+        return f"{speaker_label}:{caption_suffix}"
+    return ""
 
 
 def _locomo_speaker_user_id(sample: BenchmarkSample, *, speaker_key: str, fallback_name: str) -> str:

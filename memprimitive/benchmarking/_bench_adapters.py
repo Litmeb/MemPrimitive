@@ -178,9 +178,17 @@ def _locomo_history_turns(conversation_payload: dict[str, Any]) -> list[Conversa
         for turn_index, turn in enumerate(conversation.get(session_key, []), start=1):
             speaker = str(turn.get("speaker", "")).strip() or "speaker"
             text = str(turn.get("text", "")).strip()
-            if not text:
+            blip_caption = str(turn.get("blip_caption", "")).strip()
+            if not text and not blip_caption:
                 continue
             turn_id = str(turn.get("dia_id", "")).strip() or f"{session_key}-turn-{turn_index}"
+            turn_metadata: dict[str, Any] = {
+                "benchmark": "locomo",
+                "turn_index": turn_index,
+                "dialogue_id": turn.get("dia_id"),
+            }
+            if blip_caption:
+                turn_metadata["blip_caption"] = blip_caption
             turns.append(
                 ConversationTurn(
                     turn_id=turn_id,
@@ -189,11 +197,7 @@ def _locomo_history_turns(conversation_payload: dict[str, Any]) -> list[Conversa
                     role=speaker,
                     speaker=speaker,
                     text=text,
-                    metadata={
-                        "benchmark": "locomo",
-                        "turn_index": turn_index,
-                        "dialogue_id": turn.get("dia_id"),
-                    },
+                    metadata=turn_metadata,
                 )
             )
     return turns

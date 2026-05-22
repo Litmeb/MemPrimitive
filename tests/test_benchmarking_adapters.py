@@ -31,6 +31,38 @@ from memprimitive.benchmarking import (
 )
 from memprimitive.benchmarking.minimal_baseline import _create_cli_memory_adapter
 from memprimitive.benchmarking import _memory_adapters as memory_adapters_module
+from memprimitive.benchmarking._memory_adapters import _locomo_message_event
+
+
+def test_locomo_message_event_forwards_blip_caption() -> None:
+    sample = BenchmarkSample(
+        sample_id="conv-1-qa-1",
+        benchmark_name="locomo",
+        history_observations=[],
+        history_turns=[],
+        query=Query(text="What is in the photo?"),
+        reference_answer="trail",
+        metadata={
+            "locomo_sample_id": "conv-1",
+            "locomo_user_index": 1,
+            "speaker_a": "Alice",
+            "speaker_b": "Bob",
+        },
+    )
+    turn = ConversationTurn(
+        turn_id="D1:1",
+        session_id="session_1",
+        session_timestamp="2024-01-01T00:00:00",
+        role="Alice",
+        speaker="Alice",
+        text="Check out this photo!",
+        metadata={"blip_caption": "a person on a mountain trail"},
+    )
+
+    event = _locomo_message_event(sample, turn)
+
+    assert event.text == "Check out this photo!"
+    assert event.metadata["blip_caption"] == "a person on a mountain trail"
 
 
 def _sample_with_turns(*texts: str, sample_id: str = "sample-1") -> BenchmarkSample:

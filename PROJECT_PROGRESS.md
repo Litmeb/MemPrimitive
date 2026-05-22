@@ -24,6 +24,13 @@ Treat these as the current foundation:
 - `DSL_SEMANTIC_OPERATION_IDEA_LIST.zh-CN.md` is the concise prioritized list of small semantic operations worth trying first in retrieval/evolution/search experiments.
 - `DSL_SEMANTIC_OPERATION_DESIGN_AGENT_IDEAS.zh-CN.md` is the design-agent inspiration list that separates small modification cues from insertable pipeline components.
 - `memprimitive/example/classics/memmachine_memory.py` is the strongest current reference for a search/evolution-heavy memory composition: working memory, STM consolidation, raw episodic LTM, sentence-derived indexing, parent/temporal expansion, cluster rerank, timestamped readout, and profile tools.
+- `memmachine_standalone/` is now a separate extraction target for the MemMachine path: it contains a thin standalone store/pipeline/runtime surface, MemMachine retrieval/evolution modules, the classic memory composition, and a benchmark-friendly binding without depending on the broader MemPrimitive framework.
+- `memmachine_standalone/` now also carries a self-contained benchmark path for MemMachine evaluation: local `.env` runtime config, local `benchmarks/` root, LoCoMo/LongMemEval dataset adapters, shared-conversation/generic binding adapters, answer runners, and a `python -m memmachine.benchmarking.minimal_baseline` CLI.
+- `memmachine_standalone/` benchmark coverage now includes `LoCoMo-Refined`: the standalone CLI accepts `--benchmark locomo-refined`, loads the official public `questions.jsonl` + `conversations.jsonl` schema from `mem-eval-suite/LoCoMo_refined`, preserves refined-only metadata such as `qa_id`, acceptable answer lists, evidence messages, and multimodal flags, and keeps room for the upstream stricter judge rather than flattening the dataset back into original `locomo10.json` assumptions.
+- `memmachine_standalone/benchmarks/LoCoMo-Refined/` now vendors the upstream official evaluation stack as well: `scripts/run_eval.sh`, `scripts/env.sh`, `scripts/build_predictions.py`, and `src/{evaluate,summarize,llm_judge,bleu_f1,export,...}.py` are copied in-tree, so refined runs can be scored locally against the official public evaluator instead of only the local MemPrimitive-style fallback scorer.
+- `memmachine_standalone/` minimal benchmark CLI now persists LoCoMo and LoCoMo-Refined runs incrementally: predictions append row-by-row during execution, sidecar `<output-stem>.run_state.json` and `<output-stem>.events.jsonl` files capture resumable progress plus step-level events, and `--resume` validates saved run config before skipping completed QA and rebuilding unfinished shared-conversation sessions from the persisted turn-ingest stream rather than starting memory construction from scratch.
+- `memmachine_standalone/` runtime now retries transient `openai.APITimeoutError` failures for both answer/tool-agent LLM calls and OpenAI embedding calls before failing the run; retry count/backoff are env-configurable via `MEMPRIMITIVE_OPENAI_TIMEOUT_MAX_RETRIES` and `MEMPRIMITIVE_OPENAI_TIMEOUT_RETRY_BACKOFF_SECONDS`.
+- LoCoMo loader now preserves multimodal `blip_caption` from `locomo10.json` (including image-only turns) and injects `[ATTACHED: …]` into observation/dual-speaker text while forwarding raw captions to shared-conversation bindings (AMEM/MemMachine); `locomo-refined` remains a separate sync target.
 - LoCoMo adapter work established the preferred generic memory-system boundary: `build_system`, `ingest_event`, and `recall`, loadable through `--memory-adapter binding --memory-binding module:create_memory_binding`.
 - LoCoMo benchmark scheduling now parallelizes by `memory_adapter.session_key(sample=...)` user group: each worker creates and loads one memory session, answers/scores that user's QA in stable order, and final predictions are re-sorted to the original benchmark sample order.
 - `memprimitive.benchmarking.minimal_baseline` writes timestamped default outputs under `benchmarks/outputs` using dataset, memory adapter, smoke/full mode, user filter, and timestamp fields; explicit `--output` paths still override this.
@@ -90,6 +97,7 @@ Treat these as the current foundation:
 
 The following remain useful but are no longer the active project center:
 
+- Memobase has no standalone academic paper; mechanism-level reconstruction with existing baseline modules is judged feasible via multi-pipeline composition (buffer → entry summary → slot-profile merge + event/gist layers → layered recall), but not full product/API parity without readout token budgeting, batch slot-merge, and recall-time profile filtering primitives.
 - expanding the classics catalog for its own sake
 - strict reproduction of every paper/repo detail
 - broad benchmark harness polish not tied to search/evolution diagnosis
@@ -97,3 +105,7 @@ The following remain useful but are no longer the active project center:
 - MSC/DMR runner cleanup unless needed for the search/evolution loop
 
 See [PROJECT_BROAD_STATUS_ARCHIVE.md](PROJECT_BROAD_STATUS_ARCHIVE.md) for the broader status snapshot that used to live here.
+
+## External benchmark surveys
+
+- [MEMORY_LOCOMO_BENCHMARK_SURVEY_2026-05-20.md](MEMORY_LOCOMO_BENCHMARK_SURVEY_2026-05-20.md): agent-memory papers with LoCoMo scores, grouped by aligned model/metric (gpt-4o-mini J-score primary).
